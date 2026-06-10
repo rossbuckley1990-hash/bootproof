@@ -1,0 +1,11 @@
+{
+  "name": "pnpm-version-mismatch",
+  "private": true,
+  "packageManager": "pnpm@10.24.0",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "devDependencies": {
+    "example-package": "1.0.0"
+  }
+}

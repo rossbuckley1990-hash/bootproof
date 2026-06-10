@@ -1,25 +1,49 @@
-# The Bootproof registry: federated by design
+# Git-Native Registry Design
 
-## The problem with every obvious design
+BootProof does not operate a public registry service today.
 
-A registry that updates "automatically from every run" implies the CLI phones home. For a trust-branded open-source tool that is fatal: silent telemetry betrays the honesty contract, opt-in uploads get single-digit participation, and a central database is paid infrastructure any fork can route around. Every direct path fails.
+The current primitive is portable signed evidence:
 
-## The inversion
+```text
+.bootproof/attestation.json
+```
 
-The attestation never needs to be *sent* — it is already *committed* somewhere public.
+Projects may deliberately commit that file or export a redacted entry:
 
-- **Write path = git.** `bootproof up` writes `.bootproof/attestation.json`. Developers commit it; the CI workflow (docs/CI_ACTION.md) refreshes it on every push. Committing to your own repository *is* the consent — there is nothing hidden to opt into.
-- **Read path = the index.** The Bootproof index crawls public repositories for `bootproof/attestation/v1` and `bootproof/registry-entry/v1` documents, verifies every signature, discards anything invalid, and aggregates the result: which repos verifiably boot, on what environments, at which commits, and the live statistics of the failure taxonomy.
+```bash
+bootproof attest export .
+```
 
-The artifacts are open by design (they are standard JSON in public repos; anyone may read them). The moat is not the data's existence — it is the **verified aggregation**: the index, its freshness, the signer trust graph, and the taxonomy statistics that come from operating it. The same shape as Go's module index, certificate-transparency logs, and code-search engines: open commons, defensible indexer.
+This writes:
 
-## Consent and privacy rules (non-negotiable)
+```text
+.bootproof/registry-entry.json
+```
 
-1. The CLI performs **no network writes, ever**. Not opt-out telemetry, not "anonymous pings". Nothing.
-2. Sharing is a deliberate act with a visible artifact: `bootproof attest export` writes a **redacted, re-signed** registry entry locally and tells you exactly what is in it; *you* commit it.
-3. Failure evidence may contain secrets, so it only travels in redacted form (src/redact.ts), and the entry lists which redactions were applied.
-4. The index only reads what is already public, verifies before trusting, and links every claim back to its source repository.
+Nothing is uploaded automatically.
 
-## What this yields
+## Intended Design
 
-Each repo's boot problem is solved once, by whoever solves it first, and the solution is cached in the repo itself — verified, signed, replayable by the next human or AI agent with `bootproof verify`. The world stops doing O(users × repos) setup work; the index makes the solved set discoverable; and the corpus of classified failures continuously improves the taxonomy that ships in the next release.
+The proposed registry model is federated:
+
+- write path: repositories deliberately publish signed proof through Git
+- read path: a future index discovers public attestations, verifies signatures, and links claims to source commits
+- failure corpus: classified failures improve detectors without converting failures into success claims
+
+The index, badge service, freshness tracking, and signer trust graph are roadmap items. They are not deployed capabilities.
+
+## Consent And Privacy
+
+1. BootProof sends no telemetry or hidden evidence upload.
+2. Sharing requires a visible local artifact and an explicit user action.
+3. Full local attestations may contain raw failure evidence.
+4. Registry export applies redaction and records which redactions were used.
+5. A future index should trust only valid signatures and public evidence.
+
+Repository commands executed by BootProof may access the network independently. The no-upload promise applies to BootProof's own telemetry and evidence handling, not arbitrary install or application commands.
+
+## Trust
+
+Current attestations are `local_developer_signed`.
+
+CI/OIDC-backed proof will be stronger because a verifier can bind the signature to a repository workflow identity. BootProof does not claim that trust level yet.

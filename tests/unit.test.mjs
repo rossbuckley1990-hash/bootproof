@@ -35,13 +35,13 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure("Error: listen EADDRINUSE: address already in use :::3000").class, "port_in_use");
   assert.equal(classifyFailure("Cannot connect to the Docker daemon at unix:///var/run/docker.sock").class, "docker_unavailable");
   assert.equal(classifyFailure("Error: self-signed certificate SELF_SIGNED_CERT_IN_CHAIN").class, "tls_or_proxy_interception");
-  assert.equal(classifyFailure("docker: failed programming external connectivity: Bind for 0.0.0.0:5432 failed: port is already allocated").class, "service_port_allocated");
+  assert.equal(classifyFailure(fs.readFileSync(path.join(FIX, "service-port-allocated", "evidence.txt"), "utf8")).class, "service_port_allocated");
   assert.equal(classifyFailure("only HTTP 503 observed at http://localhost:3000/").class, "health_http_error");
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
 });
 
 test("Superset-like repository is recognized as a setup-heavy Python/Flask application", () => {
-  const inf = inferRepo(path.join(FIX, "superset-like"));
+  const inf = inferRepo(path.join(FIX, "python-flask-superset-like"));
   assert.equal(inf.isApplication, true);
   for (const stack of ["python-backend", "flask", "react-frontend", "docker-compose", "celery"]) {
     assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
@@ -55,7 +55,7 @@ test("Superset-like repository is recognized as a setup-heavy Python/Flask appli
 });
 
 test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybrid", () => {
-  const inf = inferRepo(path.join(FIX, "grafana-like"));
+  const inf = inferRepo(path.join(FIX, "go-node-grafana-like"));
   assert.equal(inf.isApplication, true);
   for (const stack of ["go-backend", "node-frontend", "react"]) {
     assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
@@ -102,9 +102,7 @@ test("parallel monorepo root commands are not treated as a single application bo
 });
 
 test("pnpm engine mismatch is classified specifically", () => {
-  const evidence = `ERR_PNPM_UNSUPPORTED_ENGINE Unsupported environment (bad pnpm and/or Node.js version)
-Expected version: 10.24
-Got: 9.15.4`;
+  const evidence = fs.readFileSync(path.join(FIX, "pnpm-version-mismatch", "evidence.txt"), "utf8");
   const result = classifyFailure(evidence);
   assert.equal(result.class, "package_manager_version_mismatch");
   assert.match(result.explanation, /Enable Corepack/);

@@ -1,0 +1,3 @@
+ERR_PNPM_UNSUPPORTED_ENGINE Unsupported environment (bad pnpm and/or Node.js version)
+Expected version: 10.24
+Got: 9.15.4

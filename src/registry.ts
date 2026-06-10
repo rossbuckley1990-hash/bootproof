@@ -1,8 +1,8 @@
-// The Bootproof registry is federated by design (docs/REGISTRY.md):
-//   WRITE PATH: developers commit .bootproof/attestation.json to their own repos (git is the registry).
-//   READ PATH: an index crawls public repos for these artifacts and verifies every signature.
-// The CLI therefore never uploads anything. `attest export` produces a redacted, re-signed
-// registry entry, and shows the user exactly what is in it. Sharing it is a deliberate git/PR act.
+// The proposed BootProof registry is federated by design (docs/REGISTRY.md):
+//   WRITE PATH: developers may commit signed proof to their own repositories.
+//   FUTURE READ PATH: an index could discover public artifacts and verify every signature.
+// No public index is operated today. The CLI never uploads evidence. `attest export` produces a
+// redacted, re-signed local entry; sharing it remains a deliberate git/PR action.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";

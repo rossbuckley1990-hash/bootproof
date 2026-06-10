@@ -55,8 +55,8 @@ test("e2e: real boot, observed health, signed attestation that verifies", () => 
   assert.match(v.out, /signature valid/);
 });
 
-test("honesty: library refusal writes signed proof that explains and verifies without touching env", () => {
-  const repo = freshCopy("library-only");
+test("honesty: early refusal fixture writes signed proof that explains and verifies without touching env", () => {
+  const repo = freshCopy("early-refusal-attestation");
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local"], true);
   assert.equal(code, 1);
   assert.match(out, /not_an_application/);
@@ -73,6 +73,10 @@ test("honesty: library refusal writes signed proof that explains and verifies wi
   const explained = run(["explain", attestation]);
   assert.match(explained.out, /Failure class: not_an_application/);
   assert.match(explained.out, /Trust level: local_developer_signed/);
+  assert.match(explained.out, /What happened:/);
+  assert.match(explained.out, /Why BootProof refused:/);
+  assert.match(explained.out, /Safe next step:/);
+  assert.match(explained.out, /Evidence:/);
 
   const verified = run(["verify", attestation]);
   assert.equal(verified.code, 0);
@@ -89,6 +93,7 @@ test("machine interface: --json emits one strict failed result object", () => {
   assert.equal(code, 1);
   assert.equal(out.trim().split("\n").length, 1, "stdout must contain exactly one JSON object");
   assert.doesNotMatch(out, /\x1b\[/, "JSON output must not contain ANSI colours");
+  assert.doesNotMatch(out, /What happened:|Why BootProof refused:|Safe next step:/, "human diagnosis must stay out of JSON mode");
   const result = JSON.parse(out);
   assert.equal(result.schema, "bootproof/result/v1");
   assert.equal(result.booted, false);
@@ -146,7 +151,7 @@ test("machine interface: --ci rejects invalid providers before execution", () =>
 });
 
 test("Superset-like app writes a signed python_flask_setup_required refusal", () => {
-  const repo = freshCopy("superset-like");
+  const repo = freshCopy("python-flask-superset-like");
   const { out, code } = run(["up", repo, "--ci"], true);
   assert.equal(code, 1);
   assert.match(out, /application: yes/);
@@ -165,7 +170,7 @@ test("Superset-like app writes a signed python_flask_setup_required refusal", ()
 });
 
 test("Grafana-like hybrid fails closed when dependency installation is skipped", () => {
-  const repo = freshCopy("grafana-like");
+  const repo = freshCopy("go-node-grafana-like");
   const { out, code } = run(["up", repo, "--ci"], true);
   assert.equal(code, 1);
   assert.match(out, /go-backend, node-frontend, react/);
@@ -180,15 +185,7 @@ test("Grafana-like hybrid fails closed when dependency installation is skipped",
 });
 
 test("package manager version mismatch is signed before install runs", () => {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-pnpm-version-"));
-  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
-    name: "pnpm-version-fixture",
-    private: true,
-    packageManager: "pnpm@10.24.0",
-    scripts: { dev: "node server.js" },
-    devDependencies: { example: "1.0.0" },
-  }));
-  fs.writeFileSync(path.join(repo, "server.js"), "throw new Error('must not start');");
+  const repo = freshCopy("pnpm-version-mismatch");
   const bin = path.join(repo, "bin");
   fs.mkdirSync(bin);
   const fakePnpm = path.join(bin, "pnpm");
@@ -202,12 +199,29 @@ test("package manager version mismatch is signed before install runs", () => {
   );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — package_manager_version_mismatch/);
+  assert.match(out, /What happened: The repository requires pnpm 10\.24\.0, but this environment has pnpm 9\.15\.4\./);
+  assert.match(out, /Why BootProof refused:/);
+  assert.match(out, /Safe next step: Run corepack enable && corepack prepare pnpm@10\.24\.0 --activate/);
+  assert.match(out, /Evidence: \.bootproof\/attestation\.json/);
   assert.doesNotMatch(out, /install-must-not-run/);
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.failureClass, "package_manager_version_mismatch");
   assert.match(att.result.failureEvidence, /expected version: 10\.24\.0/);
   assert.match(att.result.failureEvidence, /Got: 9\.15\.4/);
   assert.equal(att.observed[0].command, "pnpm --version");
+});
+
+test("health HTTP error fixture is not mislabeled as a timeout", () => {
+  const repo = freshCopy("health-http-error");
+  const port = 7600 + Math.floor(Math.random() * 400);
+  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — health_http_error/);
+  assert.match(out, /What happened: The application responded to a health candidate with HTTP 5xx\./);
+  assert.doesNotMatch(out, /NOT VERIFIED — health_check_timeout/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "health_http_error");
+  assert.ok(att.observed.some(step => step.kind === "health" && step.ok === false));
 });
 
 test("matching package manager does not make a parallel monorepo health target unambiguous", () => {

@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
     "ci": "npm run lint && npm run test"

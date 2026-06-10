@@ -1,0 +1,1 @@
+docker: failed programming external connectivity on endpoint db: Bind for 0.0.0.0:5432 failed: port is already allocated

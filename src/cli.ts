@@ -8,6 +8,7 @@ import { verifySignature, attestationPath, TOOL_ID } from "./proof.js";
 import { pollHealth } from "./exec.js";
 import { buildRegistryEntry, verifyRegistryEntry, writeRegistryEntry, registryEntryPath } from "./registry.js";
 import { normalizeDockerBindPath, detectHostPlatform } from "./platform.js";
+import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
 import type { Attestation } from "./types.js";
 
 let GREEN = "\x1b[32m", YELLOW = "\x1b[33m", RED = "\x1b[31m", DIM = "\x1b[2m", BOLD = "\x1b[1m", RESET = "\x1b[0m";
@@ -37,13 +38,13 @@ function parseFlags(argv: string[]) {
 }
 
 function help() {
-  console.log(`${BOLD}bootproof${RESET} — the honest local run button. Proof that it boots.
+  console.log(`${BOLD}bootproof${RESET} — Human diagnosis. Machine proof. One engine.
 
 Usage:
   bootproof analyze <path> [--workspace dir] [--json]   inspect a repo, show evidence-based inference
   bootproof plan <path> [--workspace dir]               show the run plan and files that WOULD be generated
   bootproof up <path> [options]                         execute the plan, verify localhost, write a signed attestation
-  bootproof verify <path>                               replay a committed attestation's plan and re-verify
+  bootproof verify <path|attestation.json>              validate an attestation signature and inspect its claim
   bootproof explain <attestation.json>                  human explanation of an attestation
   bootproof attest export <path>                        redacted, re-signed shareable registry entry (never uploads)
   bootproof attest check <path>                         verify a registry entry signature
@@ -122,6 +123,14 @@ function machineFailure(explanation: string) {
   };
 }
 
+function printFailure(failureClass: NonNullable<Attestation["result"]["failureClass"]>, diagnosis: FailureDiagnosis, evidencePath: string) {
+  bad(`${BOLD}NOT VERIFIED${RESET}${RED} — ${failureClass}`);
+  console.log(`What happened: ${diagnosis.whatHappened}`);
+  console.log(`Why BootProof refused: ${diagnosis.whyRefused}`);
+  console.log(`Safe next step: ${diagnosis.safeNextStep}`);
+  console.log(`Evidence: ${evidencePath}`);
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return help();
@@ -192,9 +201,13 @@ async function main() {
     console.log("");
     if (outcome.refusal) {
       for (const o of outcome.attestation?.observed ?? []) (o.observation.startsWith("skipped") ? warn : o.ok ? ok : bad)(`${o.id}: ${o.observation}`);
-      bad(`${BOLD}NOT VERIFIED${RESET}${RED} — ${outcome.refusal.failureClass}`);
-      console.log(outcome.refusal.explanation);
-      if (outcome.attestation) console.log(`${DIM}evidence preserved in: ${attestationPath(outcome.inference.repoPath)}${RESET}`);
+      const diagnosis = diagnoseFailure(
+        outcome.refusal.failureClass,
+        outcome.attestation?.result.failureEvidence ?? null,
+        outcome.refusal.explanation,
+        outcome.inference,
+      );
+      printFailure(outcome.refusal.failureClass, diagnosis, ".bootproof/attestation.json");
       process.exitCode = 1;
       return;
     }
@@ -210,11 +223,10 @@ async function main() {
     console.log("");
     if (r.healthVerified) {
       ok(`${BOLD}BOOTED${RESET}${GREEN} — ${r.healthObservation} (observed, signed)`);
-      console.log(`${DIM}attestation: ${attestationPath(outcome.inference.repoPath)}${RESET}`);
+      console.log("Evidence: .bootproof/attestation.json");
     } else {
-      bad(`${BOLD}NOT VERIFIED${RESET}${RED} — ${r.failureClass}`);
-      console.log(`${r.explanation}`);
-      console.log(`${DIM}evidence preserved in: ${attestationPath(outcome.inference.repoPath)}${RESET}`);
+      const diagnosis = diagnoseFailure(r.failureClass, r.failureEvidence, r.explanation, outcome.inference);
+      printFailure(r.failureClass!, diagnosis, ".bootproof/attestation.json");
       process.exitCode = 1;
     }
     return;
@@ -275,7 +287,15 @@ async function main() {
     console.log(`${BOLD}Attestation explained${RESET}`);
     console.log(att.result.booted ? `This run BOOTED: ${att.result.healthObservation}.` : `This run did NOT verify. Failure class: ${att.result.failureClass}.`);
     console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
-    console.log(att.result.explanation);
+    if (!att.result.booted && att.result.failureClass) {
+      const diagnosis = diagnoseFailure(att.result.failureClass, att.result.failureEvidence, att.result.explanation);
+      console.log(`What happened: ${diagnosis.whatHappened}`);
+      console.log(`Why BootProof refused: ${diagnosis.whyRefused}`);
+      console.log(`Safe next step: ${diagnosis.safeNextStep}`);
+      console.log(`Evidence: ${p}`);
+    } else {
+      console.log(att.result.explanation);
+    }
     if (att.plan.healthCandidates?.length) console.log(`Health candidates: ${att.plan.healthCandidates.join(", ")}`);
     if (att.result.observedHealthCandidates?.length) console.log(`Observed health candidates: ${att.result.observedHealthCandidates.join(", ")}`);
     for (const o of att.observed) console.log(`  ${o.ok ? "\u2713" : "\u2717"} ${o.id}: ${o.observation}`);

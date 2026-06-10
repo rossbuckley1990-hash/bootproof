@@ -1,473 +1,174 @@
-# bootproof
+# BootProof
 
 > **The honest Run Button for repos — with proof, not vibes.**
 
+**Human diagnosis. Machine proof. One engine.**
+
 <p align="center">
-  <img src="assets/bootproof_viral_demo.gif" alt="BootProof demo: the honest Run Button for repos, with proof not vibes" width="900">
+  <img src="assets/bootproof_viral_demo.gif" alt="BootProof demo" width="900">
 </p>
 
+BootProof inspects a local repository, builds an evidence-based run plan, executes only what it can justify, observes HTTP health, and writes a signed attestation for success or failure.
 
-GitHub has a **Code** button.  
-GitHub has a **Star** button.  
-But software still does not have a trustworthy **Run** button.
-
-`bootproof` is the open-source local Run Button for repositories.
-
-It takes a repo from cold start to observed boot, then writes a signed attestation proving what actually happened.
-
-No fake green checks.  
-No guessed localhost URLs.  
-No invented secrets.  
-No silent `.env` mutation.  
-No “works on my machine” theatre.
-
-If it boots, `bootproof` proves it.  
-If it fails, `bootproof` tells you why.
-
----
-
-## The problem
-
-Open-source has a trust problem.
-
-AI has made it easy to generate entire repositories that look complete.  
-READMEs can be polished.  
-Demos can be convincing.  
-CI badges can be shallow.  
-Install instructions can rot.  
-Generated apps can look finished but fail on first boot.
-
-Every developer still discovers the truth the slow way:
-
-```bash
-git clone ...
-npm install
-npm run dev
-```
-
-Then the real debugging begins.
-
-Wrong package manager.  
-Missing environment variables.  
-Broken scripts.  
-Port conflicts.  
-Database auth failures.  
-Stale docs.  
-Monorepo ambiguity.  
-A README that says “just run it” when it does not run.
-
-`bootproof` exists for one simple question:
-
-> **Can this repository actually boot from a clean start?**
-
-Not theoretically.  
-Not according to the README.  
-Not according to an agent summary.  
-Actually.
-
----
-
-## The idea
-
-Runnability should be a verifiable property of a repository.
-
-A repo should be able to carry proof that it booted.
-
-Not a promise.  
-Not a screenshot.  
-Not a decorative badge.  
-Not a maintainer claim.
-
-A signed, local, per-run execution receipt.
-
-```bash
-bootproof up ./some-repo
-```
-
-Or, for the canonical cold-clone scenario:
-
-```bash
-npx bootproof https://github.com/user/repo
-```
-
-`bootproof` inspects the repo, builds a safe run plan, starts only what it can honestly start, observes a real health signal, classifies failures, and writes a signed attestation.
-
-The Run Button is the product.
-
-The proof is the moat.
-
-The registry is how it compounds.
-
----
-
-## What success looks like
-
-```text
-BootProof
-
-Repo: github.com/user/repo
-Mode: cold clone
-
-Install       ✓ npm ci completed
-Env           ✓ .env.bootproof.example written (your .env untouched)
-Run           ✓ npm run dev started
-Observe       ✓ http://127.0.0.1:3000 returned 200
-Proof         ✓ signed attestation written
-
-Verdict: BOOTS
-First-run time: 48s
-```
-
-If the repo does not boot, `bootproof` does not pretend.
-
-```text
-BootProof
-
-Repo: github.com/user/repo
-Mode: cold clone
-
-Install       ✓ npm ci completed
-Env           ✓ .env.bootproof.example written (your .env untouched)
-Run           ✗ npm run dev failed
-Class         missing_env
-Evidence      DATABASE_URL is required but no safe value was available
-
-Verdict: DOES NOT BOOT
-First-run time: 31s
-```
-
-A failed run is still useful.
-
-It tells the truth.
-
----
-
-## The honesty contract
-
-`bootproof` is built around a hard honesty contract.
-
-- Real `.env` files are **never** written.
-- Secrets are **never** invented.
-- Unknown commands are **rejected**, not guessed.
-- Monorepo ambiguity is **surfaced**, not hidden.
-- Skipped steps are **never** rendered as success.
-- Library packages are not mislabelled as applications.
-- Dry runs say what they *would* do; they do not claim proof.
-- Positive boot claims require observed evidence.
-- No telemetry.
-- No hidden upload.
-- No background network writes.
-- No silent patching of your project.
-
-When environment scaffolding is needed, `bootproof` writes a namespaced file:
-
-```text
-.env.bootproof.example
-```
-
-It does not write:
-
-```text
-.env
-```
-
-That rule is contract-level, test-enforced behaviour.
-
----
-
-## Quick start
-
-For local development:
-
-```bash
-npm ci
-npm run build
-npm link
-```
-
-Run against a local repo:
-
-```bash
-bootproof up ./path-to-repo
-```
-
-Use the machine interface:
-
-```bash
-bootproof up ./path-to-repo --json
-bootproof up ./path-to-repo --ci --json
-```
-
-`--json` writes one `bootproof/result/v1` JSON object to stdout. `--ci` disables prompts, colours, and interactive output, and exits `0` only after both boot and health are observed.
-
-Run against a remote repo:
-
-```bash
-npx bootproof https://github.com/user/repo
-```
-
-Explain an attestation:
-
-```bash
-bootproof explain .bootproof/attestation.json
-```
-
-Verify an attestation:
-
-```bash
-bootproof verify .bootproof/attestation.json
-```
-
----
-
-## What `bootproof` writes
-
-`bootproof` writes namespaced artefacts only.
-
-```text
-.bootproof/
-  attestation.json
-  registry-entry.json  # only after `bootproof attest export`
-
-docker-compose.bootproof.yml  # only when service scaffolding is generated
-.env.bootproof.example        # only when env guidance is generated
-```
-
-It does not overwrite your app configuration.
-
-It does not mutate your real `.env`.
-
-It does not hide uncertainty by patching the repo until something appears to work.
-
-If the run cannot be performed safely, `bootproof` refuses and explains why.
-
----
-
-## Attestations
-
-A `bootproof` attestation is a signed execution receipt.
-
-It records:
-
-- the repository tested
-- the commit or local state
-- the detected stack
-- the install command
-- the run command
-- the observed health signal
-- the verdict
-- the failure class, if any
-- the first-run time
-- the tool version
-- the signature
-- the trust level
-
-Example:
-
-```json
-{
-  "tool": "bootproof",
-  "version": "0.1.0-alpha",
-  "repo": "github.com/user/repo",
-  "commit": "abc123",
-  "mode": "cold_clone",
-  "verdict": "boots",
-  "observed": {
-    "health_url": "http://127.0.0.1:3000",
-    "status": 200
-  },
-  "timing": {
-    "first_run_seconds": 48
-  },
-  "signature": {
-    "algorithm": "ed25519"
-  }
-}
-```
-
-If the file is tampered with, verification fails.
-
-That is the point.
-
----
-
-## Why this is different from CI
-
-CI normally answers:
-
-> Did the maintainer’s workflow pass?
-
-`bootproof` answers:
-
-> Can a stranger boot this repository from a clean start?
-
-Those are different questions.
-
-CI can pass while the README is wrong.  
-CI can pass while the first-run path is broken.  
-CI can pass while the demo cannot start.  
-CI can pass while the repo is hostile to new contributors.
-
-`bootproof` is focused on the first adoption truth:
-
-> **Can I run it?**
-
----
-
-## Why this matters for AI agents
-
-AI coding agents need an execution oracle.
-
-They can edit files.  
-They can generate apps.  
-They can open pull requests.  
-They can claim success.
-
-But without execution proof, they are guessing.
-
-`bootproof` gives agents a simple rule:
+It does not turn every repository green. That would defeat the point.
 
 ```text
 No proof, no green check.
 ```
 
-An agent can run:
+## One engine. Two interfaces.
+
+Humans run:
 
 ```bash
 bootproof up .
 ```
 
-Then attach the signed attestation to a PR.
+They get a diagnosis and a runbook.
 
-The maintainer no longer has to trust the agent’s summary.  
-They can inspect the proof.
+Machines run:
 
-This makes `bootproof` useful for:
-
-- autonomous coding agents
-- generated application scaffolds
-- repo repair agents
-- pull request validation
-- open-source maintainers
-- enterprise code intake
-- vendor due diligence
-- supply-chain review
-
-In the AI era, code is abundant.
-
-Proof is scarce.
-
----
-
-## The registry model
-
-The long-term value of `bootproof` is not one signed file.
-
-Signed receipts are useful.  
-A federated proof registry is what makes them compound.
-
-The registry is intentionally Git-native.
-
-A repository can carry its own runnability history:
-
-```text
-repo
-└── .bootproof
-    └── attestation.json
+```bash
+bootproof up . --ci --json
 ```
 
-A CI Action can refresh that proof on every push.
+They get a signed verdict and a deterministic exit code.
 
-A verified index can aggregate attestations across thousands of repositories.
+The same engine powers both.
 
-A failure corpus can compound into better detectors, clearer fixes, and sharper run plans.
+## What It Tells Humans
 
-This creates a public, portable record of what actually boots.
-
-No central SaaS is required for the primitive to work.
-
-The repo is the write path.
-
-Git is the distribution layer.
-
-The ecosystem becomes the database.
-
----
-
-## Badges, but only as proof pointers
-
-`bootproof` should never create decorative trust badges.
-
-A badge is only acceptable if it is a dumb pointer to a live, verifiable attestation.
-
-That means:
-
-- green only when the committed proof verifies for the current commit
-- grey when the proof is stale
-- red when verification fails
-- always linked to the underlying attestation
-- never used as a standalone claim
-
-A badge is not the proof.
-
-The attestation is the proof.
-
----
-
-## Failure taxonomy
-
-`bootproof` does not just say “failed”.
-
-It classifies failure.
-
-Examples include:
-
-- `not_an_application`
-- `unknown_command`
-- `missing_env`
-- `install_failed`
-- `run_failed`
-- `healthcheck_failed`
-- `port_unavailable`
-- `monorepo_ambiguous`
-- `postgres_auth_failed`
-- `docker_unavailable`
-- `timeout`
-- `unsafe_local_required`
-
-Instead of:
+A failed run is still useful:
 
 ```text
-Something went wrong.
+NOT VERIFIED — package_manager_version_mismatch
+What happened: The repository requires pnpm 10.24.0, but this environment has pnpm 9.15.4.
+Why BootProof refused: The dependency install cannot be trusted with the wrong package manager version.
+Safe next step: Run corepack enable && corepack prepare pnpm@10.24.0 --activate, then rerun BootProof.
+Evidence: .bootproof/attestation.json
 ```
 
-You get:
+BootProof distinguishes diagnosis from proof. Detecting Python, Flask, React, Celery, Go, or a monorepo does not mean BootProof claims full orchestration support for that stack.
+
+## What It Gives Machines
+
+`--json` emits exactly one `bootproof/result/v1` object to stdout:
+
+```json
+{
+  "schema": "bootproof/result/v1",
+  "booted": false,
+  "healthVerified": false,
+  "failureClass": "dependency_install_skipped",
+  "attestationPath": ".bootproof/attestation.json",
+  "inference": {},
+  "plan": {},
+  "observed": []
+}
+```
+
+`--ci` disables colour and interactive output. Exit codes are deterministic:
+
+- `0`: `booted === true` and `healthVerified === true`
+- `1`: every refusal, ambiguity, install failure, service failure, app failure, or health failure
+
+## Quick Start
+
+BootProof currently operates on local repository paths.
+
+```bash
+npm ci
+npm run build
+npm link
+
+cd /path/to/repository
+bootproof up .
+```
+
+Host execution can be selected explicitly:
+
+```bash
+bootproof up . --provider local --unsafe-local
+```
+
+Run dependency installation only when intended:
+
+```bash
+bootproof up . --install
+```
+
+Explain and verify the signed result:
+
+```bash
+bootproof explain .bootproof/attestation.json
+bootproof verify .bootproof/attestation.json
+```
+
+Remote URL cold-clone mode is **coming soon**. This is not implemented yet:
 
 ```text
-Failure class: postgres_auth_failed
-Evidence: password authentication failed for user "postgres"
-Suggested next step: check DATABASE_URL or local Postgres credentials
+npx bootproof https://github.com/user/repo
 ```
 
-This is how failed runs become useful data.
+Clone the repository yourself and pass its local path today.
 
----
+## Honesty Contract
 
-## Security model
+BootProof is constrained on purpose:
 
-`bootproof` uses Ed25519 signatures for attestations.
+- no verified boot without an observed health signal
+- no success rendering for skipped steps
+- no invented secrets
+- no writes to `.env`, `.env.local`, `.env.development`, or `.env.production`
+- no silent project patching
+- no guessed workspace when the repository is ambiguous
+- no claim that generated scaffolding exists unless it was written
+- signed failed attestations for refusals and execution failures
+- raw local evidence preserved in the attestation
+- no telemetry or hidden evidence upload
 
-A signed attestation proves what `bootproof` observed during a specific run.
+See [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md).
 
-Current trust model:
+## Current Capabilities
+
+BootProof currently provides:
+
+- Node package-manager and start-command inference
+- Python/Flask and Go/Node hybrid detection
+- monorepo candidate ranking
+- Docker service dependency detection and scaffolding
+- localhost health-candidate discovery from repository evidence and app logs
+- classified failures
+- signed Ed25519 attestations
+- strict JSON and fail-closed CI output
+- redacted registry-entry export
+
+Detection is broader than orchestration. For example:
+
+- Superset-like Python/Flask/React/Celery repos are detected, then honestly refused with `python_flask_setup_required`.
+- Grafana-like Go/Node hybrids are detected without pretending a frontend watcher is the whole application.
+- Parallel monorepo root commands are refused until a specific workspace is selected.
+
+## Files Written
+
+Depending on the observed plan, BootProof may write:
 
 ```text
-local_developer_signed
+.bootproof/attestation.json
+.bootproof/registry-entry.json
+docker-compose.bootproof.yml
+.env.bootproof.example
 ```
 
-Local attestations are useful evidence: they are signed, tamper-evident receipts for what BootProof observed on a developer machine. They are not enterprise-grade CI proof and should not be treated as equivalent to an independently controlled build environment.
+`registry-entry.json` is written only by `bootproof attest export`.
 
-Current local attestations contain:
+Docker and env guidance files are listed in proof only when BootProof actually generated them.
+
+Protected application env files remain untouched.
+
+## Attestation Trust
+
+Current attestations contain:
 
 ```json
 {
@@ -479,128 +180,75 @@ Current local attestations contain:
 }
 ```
 
-The future trust level `ci_oidc_signed` is reserved for CI/OIDC-backed attestations. BootProof does not claim that level yet. When implemented, it will provide stronger supply-chain evidence by letting a verifier distinguish a developer-laptop receipt from proof issued by an identified CI workload.
+Local attestations are useful evidence. CI/OIDC attestations are stronger supply-chain proof. BootProof does not pretend local laptop proof is enterprise CI proof.
 
-## Release hygiene
+The future `ci_oidc_signed` level is reserved but is not emitted today.
 
-`node_modules/`, generated `dist/`, `.DS_Store`, and `.git/` are excluded from the tracked source tree. `dist/` is generated by `npm run build` and is not committed. Published npm packages may include the generated `dist/` because the package executable is `dist/cli.js`; source release archives should be built from tracked files.
+## Failure Taxonomy
 
----
+Examples include:
 
-## Why not just let GitHub build this?
+- `not_an_application`
+- `workspace_ambiguous`
+- `dependency_install_skipped`
+- `package_manager_version_mismatch`
+- `python_flask_setup_required`
+- `service_port_allocated`
+- `postgres_auth_env_missing`
+- `health_http_error`
+- `health_check_timeout`
+- `unknown_failure`
 
-GitHub could ship a Run Button.
+Unknown failures remain unknown, with evidence preserved for the next detector.
 
-That is the obvious platform risk.
+See [docs/FAILURE_TAXONOMY.md](docs/FAILURE_TAXONOMY.md).
 
-`bootproof` is designed around three defenses:
+## Real Repository Evidence
 
-1. **Neutrality**  
-   `bootproof` can work across GitHub, GitLab, Bitbucket, local repos, private repos, enterprise hosts, and air-gapped environments.
+BootProof records both useful successes and useful failures. The evidence ledger does not relabel failure as support.
 
-2. **Open attestation format**  
-   Proof should live with the repo, not inside one platform’s UI.
+See [docs/REAL_REPO_EVIDENCE.md](docs/REAL_REPO_EVIDENCE.md).
 
-3. **Corpus head-start**  
-   Every run, failure class, CI refresh, and committed proof improves the registry and the detectors.
+## CI And Registry
 
-This is not an invincible moat.
+BootProof does not upload attestations. A project can deliberately commit `.bootproof/` or export a redacted registry entry.
 
-It is a practical one.
+The Git-native registry and OIDC-backed trust model are designs in progress, not deployed services.
 
-The goal is to make `bootproof` the open standard for proving that software boots.
+- [docs/CI_ACTION.md](docs/CI_ACTION.md)
+- [docs/REGISTRY.md](docs/REGISTRY.md)
 
----
+## Release Hygiene
 
-## What `bootproof` is not
+`node_modules/`, `.DS_Store`, and generated `dist/` are ignored and not committed.
 
-`bootproof` is not a deployment platform.
+`dist/` is generated by `npm run build`. It is included in the npm package because `dist/cli.js` is the executable, and `npm pack`/publish runs the `prepack` build.
 
-It is not a general CI replacement.
-
-It is not a cloud runner.
-
-It is not an AI agent.
-
-It is not a magic environment fixer.
-
-It is not a tool that mutates your project until it appears to work.
-
-It is a proof layer for the most basic software claim:
-
-> **This repository boots.**
-
----
-
-## Current status
-
-`bootproof` is early alpha.
-
-Current focus:
-
-- Node.js app detection
-- safe local execution
-- healthcheck observation
-- signed attestations
-- verification
-- explanation
-- redaction
-- failure classification
-- registry export
-- Windows / WSL2 path handling
-- zero runtime dependencies
-
-Near-term roadmap:
-
-- cold-clone URL support
-- fully containerised app execution
-- Python support
-- Go support
-- GitHub Action integration
-- GitHub OIDC-backed attestations
-- multi-service health checks
-- proof-linked badges
-- public verified index
-
-Unsupported stacks should fail clearly, not magically.
-
----
-
-## Philosophy
-
-When code was scarce, writing code was the hard part.
-
-When AI makes code abundant, proving code works becomes the hard part.
-
-The future will have more generated repos, more automated PRs, more synthetic demos, and more confident claims than any developer can manually verify.
-
-`bootproof` is a small primitive for that world.
-
-A local Run Button.
-
-A refusal to fake success.
-
-A signed receipt when something actually works.
-
-A growing registry of what really boots.
-
----
-
-## One-line version
+Repository metadata points to:
 
 ```text
-bootproof is the honest Run Button for repos: it runs a project from cold start and writes cryptographic proof of whether it actually booted.
+https://github.com/rossbuckley1990-hash/bootproof
 ```
 
----
+## What BootProof Is Not
 
-## The rule
+BootProof is not a deployment platform, a general CI replacement, or a magic environment fixer.
 
-```text
-No proof, no green check.
-```
+It is the honest Run Button for repos. It runs what it can, refuses what it cannot prove, signs both success and failure, and gives humans and machines the same evidence.
 
----
+## Status
+
+BootProof is early alpha.
+
+Near-term work includes:
+
+- remote cold-clone URL mode
+- stronger multi-service orchestration
+- broader Python and Go execution support
+- CI/OIDC-backed signing
+- proof-linked badges and a verified public index
+
+Unsupported paths should fail clearly, not magically.
 
 ## License
 

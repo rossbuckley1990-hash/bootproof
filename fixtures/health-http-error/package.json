@@ -1,0 +1,7 @@
+{
+  "name": "health-http-error",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}

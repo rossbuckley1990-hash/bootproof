@@ -1,28 +1,75 @@
-# Keeping proof fresh automatically (the registry write-path)
+# CI Usage
 
-Bootproof never uploads anything. The registry updates because attestations live in repos, and repos get pushed. To keep your repo's proof continuously fresh, add this workflow — every push re-attests and commits the result:
+BootProof has a fail-closed machine interface:
+
+```bash
+bootproof up . --ci --json
+```
+
+Exit `0` means both `booted` and `healthVerified` are true. Every refusal or failure exits `1`.
+
+## GitHub Actions Example
+
+This example records the JSON result and preserves the signed attestation even when verification fails:
 
 ```yaml
 name: bootproof
+
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
+
 jobs:
-  attest:
+  bootproof:
     runs-on: ubuntu-latest
-    permissions: { contents: write }
+    permissions:
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "22" }
-      - run: npm i -g bootproof   # once published; until then: clone + npm link
-      - run: bootproof up . --provider local --unsafe-local --install --timeout 120000 --ci
-        continue-on-error: true   # a failed boot is still honest, classified proof
-      - run: bootproof attest export .
-      - name: commit refreshed proof
+        with:
+          node-version: "22"
+
+      - run: npm install --global bootproof
+
+      - name: Run BootProof
+        id: bootproof
+        continue-on-error: true
+        shell: bash
         run: |
-          git config user.name bootproof-ci && git config user.email ci@bootproof.invalid
-          git add .bootproof/ && git diff --cached --quiet || git commit -m "bootproof: refresh attestation [skip ci]"
-          git push
+          mkdir -p .bootproof
+          set +e
+          bootproof up . --provider local --unsafe-local --install --timeout 120000 --ci --json \
+            | tee .bootproof/result.json
+          code=${PIPESTATUS[0]}
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootproof-evidence
+          path: .bootproof/
+
+      - name: Enforce verdict
+        if: steps.bootproof.outputs.exit_code != '0'
+        run: exit 1
 ```
 
-Result: your repo always carries a current, signed, replayable answer to "does this boot from cold?" — and a boot regression fails loudly on the commit that caused it. Installing this workflow is the consent; there is no hidden telemetry to consent to.
+Review execution flags for the target repository. `--install` can run package-manager lifecycle scripts, and `--unsafe-local` acknowledges host execution.
+
+## Current Trust Limitation
+
+Running BootProof in CI does not automatically produce OIDC trust.
+
+Current attestations still say:
+
+```text
+local_developer_signed
+```
+
+They are signed evidence generated on a CI runner, but they are not yet `ci_oidc_signed`. Workload-identity-backed signing remains future work.
+
+BootProof does not silently push commits or upload evidence. The workflow owner chooses whether to retain artifacts or commit `.bootproof/`.
