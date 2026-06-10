@@ -14,7 +14,7 @@ const RULES: Rule[] = [
   { class: "port_in_use", pattern: /(EADDRINUSE|address already in use|[Pp]ort \d+ is (already )?in use)/,
     explain: () => "The app port is occupied by another process. Stop it or run with a different PORT." },
   { class: "postgres_auth_env_missing", pattern: /(SASL: SCRAM-SERVER-FIRST-MESSAGE|password authentication failed for user|client password must be a string)/i,
-    explain: () => "Postgres was reached but authentication failed — the app's DATABASE_URL credentials don't match the running database. Align them with the values in docker-compose.bootproof.yml; bootproof will not edit your .env." },
+    explain: () => "Postgres was reached but authentication failed — the app's DATABASE_URL credentials don't match the running database. Inspect the repository's own env and compose examples, or rerun after generating BootProof service scaffolding; bootproof will not edit your .env." },
   { class: "database_unreachable", pattern: /(ECONNREFUSED.*:(5432|3306|6379|27017)|P1001|Can'?t reach database server|Connection refused.*postgres)/i,
     explain: () => "The app requires a database that is not reachable. Start the generated docker-compose.bootproof.yml services first." },
   { class: "migrations_missing", pattern: /(relation .* does not exist|no such table|Migration.*pending|P3009)/i,
