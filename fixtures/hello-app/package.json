@@ -1,0 +1,1 @@
+{ "name": "hello-app", "private": true, "scripts": { "start": "node server.js" } }

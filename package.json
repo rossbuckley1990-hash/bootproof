@@ -1,0 +1,47 @@
+{
+  "name": "bootproof",
+  "version": "0.1.0-alpha",
+  "description": "The honest local run button. Boots unfamiliar repos when it safely can, tells the truth when it cannot, and signs proof of what actually happened.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "bootproof": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "docs",
+    "schemas"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "ci": "npm run lint && npm run test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rossbuckley1990-hash/bootproof"
+  },
+  "keywords": [
+    "devtools",
+    "onboarding",
+    "docker",
+    "run",
+    "attestation",
+    "reproducibility"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "typescript": "5.8.3"
+  },
+  "bugs": {
+    "url": "https://github.com/rossbuckley1990-hash/bootproof/issues"
+  },
+  "homepage": "https://github.com/rossbuckley1990-hash/bootproof#readme"
+}

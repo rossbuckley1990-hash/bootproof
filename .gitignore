@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.bootproof/
+docker-compose.bootproof.yml
+.env.bootproof.example
+.DS_Store
