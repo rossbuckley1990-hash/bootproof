@@ -2,161 +2,264 @@
 
 > **The honest Run Button for repos — with proof, not vibes.**
 
-BootProof looks at any repository, works out how it's supposed to run, starts what it safely
-can, and tells you the truth: a signed **BOOTS** receipt when localhost actually responded,
-or an honest, classified explanation of exactly why it didn't.
-
-```text
-No proof, no green check.
-```
+**Human diagnosis. Machine proof. One engine.**
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/rossbuckley1990-hash/bootproof/main/assets/bootproof_viral_demo.gif" alt="BootProof demo" width="900">
 </p>
 
----
+BootProof inspects a local repository, builds an evidence-based run plan, executes only what it can justify, observes HTTP health, and writes a signed attestation for success or failure.
 
-## Try it in 60 seconds
-
-**You need:** Node 20.11+ and git. (Docker is optional — only used for service containers
-like Postgres.) Nothing to install: `npx` fetches BootProof on the fly.
-
-### Step 1 — X-ray any repository (nothing is executed)
-
-```bash
-npx bootproof up https://github.com/usememos/memos
-```
-
-BootProof clones it for inspection and gives you the diagnosis in seconds: the stack, the
-package manager and exact version it expects, the services it needs, the secrets only you
-can provide, and which folder the real app lives in. **No code from the repository runs.**
-This step is safe to point at anything.
-
-### Step 2 — actually run it (your explicit choice)
-
-Step 1 ends by stopping on purpose:
+It does not turn every repository green. That would defeat the point.
 
 ```text
-✗ NOT VERIFIED
-Why BootProof refused: A remote clone is untrusted code, and BootProof requires
-explicit acknowledgement before running it on the host.
+No proof, no green check.
 ```
 
-That stop is the product working, not breaking — BootProof never runs a stranger's code
-without your yes. To give it:
+## One engine. Two interfaces.
+
+Humans run:
 
 ```bash
-npx bootproof up https://github.com/usememos/memos --provider local --unsafe-local
+bootproof up .
 ```
 
-Plain English: `--provider local --unsafe-local` means *"I understand this runs the
-repository's own code on my machine, like running its README commands myself."* Only say it
-to repositories you'd be willing to run by hand.
+They get a diagnosis and a runbook.
 
-### Or start with a repo you already trust — your own
-
-```bash
-cd ~/code/my-project
-npx bootproof up . --provider local --unsafe-local
-```
-
-Two outcomes, both honest:
-
-```text
-✓ BOOTED — HTTP 200 at http://localhost:3000/ (observed, signed)
-Evidence: .bootproof/attestation.json
-```
-
-or
-
-```text
-✗ NOT VERIFIED — package_manager_version_mismatch
-The repository requires pnpm 10.24, but this environment has 9.15.4.
-Enable Corepack (corepack enable) and rerun.
-```
-
-Either way you get a signed receipt in `.bootproof/` recording exactly what was observed.
-
----
-
-## What the output is telling you
-
-- **Inference** — everything BootProof worked out from evidence, with the evidence named.
-  When it's guessing, it says so (`port: 3000 (default assumption; not evidence-based)`).
-- **secrets you must provide** — keys like `API_SECRET` that have no safe local value.
-  BootProof will never invent them, and **never writes your `.env` files. Ever.**
-- **BOOTED** — printed only when an HTTP response was actually observed at localhost.
-- **NOT VERIFIED — `<failure_class>`** — an honest, classified failure with the raw
-  evidence preserved in the receipt and a concrete next step. The classes are documented in
-  [docs/FAILURE_TAXONOMY.md](docs/FAILURE_TAXONOMY.md).
-
-## The honesty contract
-
-Every promise below is enforced by a test — breaking one fails our build:
-
-- No green check without an observed event. Dry runs say "would" and prove nothing.
-- `BOOTED` only when localhost actually responded.
-- Your `.env`, `.env.local`, and friends are never written or modified.
-- Secrets are never invented.
-- Running repository code on your machine always requires your explicit consent.
-- Every failure is classified with evidence preserved; unknowns say `unknown_failure`.
-- Receipts are signed (ed25519); a tampered result fails verification.
-
-Full text: [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md)
-
-## Commands
-
-| Command | What it does | Runs repo code? |
-|---|---|---|
-| `bootproof up <path or url>` | Diagnose, and (with consent) boot + verify + sign a receipt | Only with `--unsafe-local` |
-| `bootproof analyze <path>` | The diagnosis only | No |
-| `bootproof plan <path>` | What it *would* do — every line says "would" | No |
-| `bootproof verify <path>` | Check a receipt's signature and claims | No |
-| `bootproof explain <receipt>` | Plain-language walkthrough of a receipt | No |
-| `bootproof attest export <path>` | Redacted, shareable copy of your receipt (never uploads) | No |
-
-Useful flags: `--install` (run dependency installation), `--port <n>`, `--timeout <ms>`,
-`--workspace <dir>` (pick a monorepo app), `--dry-run`, `--json`, `--ci`.
-
-## For machines and AI agents
+Machines run:
 
 ```bash
 bootproof up . --ci --json
 ```
 
-One `bootproof/result/v1` JSON object on stdout, deterministic exit codes, fail-closed
-behaviour, no prompts. An agent gets ground truth about whether code runs — from a tool
-that is structurally unable to claim a boot it didn't observe.
+They get a signed verdict and a deterministic exit code.
 
-## When something blocks you
+The same engine powers both.
 
-| You see | It means | Do this |
-|---|---|---|
-| `requires explicit acknowledgement before running` | The consent gate — by design | Rerun the same command with `--provider local --unsafe-local` |
-| `package_manager_version_mismatch` | Repo wants a different pnpm/yarn/npm | `corepack enable`, then rerun |
-| `docker_unavailable` | Repo needs service containers; Docker isn't running | Start Docker Desktop, or skip services for now |
-| `not_an_application` | It's a library — nothing to boot | Point at an app, or a `--workspace` that is one |
-| `workspace_ambiguous` | Monorepo with several apps | Rerun with `--workspace <dir>` from the listed candidates |
-| `missing_env_var` | The app needs secrets only you have | Copy `.env.bootproof.example`, fill the named keys yourself |
-| `port_in_use` | Something else owns the port | Rerun with `--port <free port>` |
+## What It Tells Humans
 
-Anything else: the receipt at `.bootproof/attestation.json` preserves the raw evidence —
-`bootproof explain` it, or open an issue with the receipt attached. A confusing failure is
-a bug we want.
+A failed run is still useful:
 
-## Honest limitations (v0.1)
+```text
+NOT VERIFIED — package_manager_version_mismatch
+What happened: The repository requires pnpm 10.24.0, but this environment has pnpm 9.15.4.
+Why BootProof refused: The dependency install cannot be trusted with the wrong package manager version.
+Safe next step: Run corepack enable && corepack prepare pnpm@10.24.0 --activate, then rerun BootProof.
+Evidence: .bootproof/attestation.json
+```
 
-Node.js applications boot end-to-end today; Python is partially supported; Go and Ruby get
-a full diagnosis but not orchestration yet — BootProof tells you so explicitly rather than
-pretending. Docker is used for service containers, not yet for running the app itself. One
-health URL per app. These are roadmap items, not hidden surprises.
+BootProof distinguishes diagnosis from proof. Detecting Python, Flask, React, Celery, Go, or a monorepo does not mean BootProof claims full orchestration support for that stack.
 
-## Receipts, and where this is going
+## What It Gives Machines
 
-Commit `.bootproof/` and your repository carries living, replayable proof that it boots —
-the next contributor (human or AI) runs `bootproof verify` instead of re-solving your setup
-from scratch. BootProof itself never uploads anything, ever: no telemetry, no pings.
-Sharing proof is always your deliberate act. Design: [docs/REGISTRY.md](docs/REGISTRY.md).
+`--json` emits exactly one `bootproof/result/v1` object to stdout:
 
-Apache-2.0. Built in Huddersfield. If BootProof ever overclaims anything, that is our
-highest-severity bug — please open an issue with the receipt attached.
+```json
+{
+  "schema": "bootproof/result/v1",
+  "booted": false,
+  "healthVerified": false,
+  "failureClass": "dependency_install_skipped",
+  "attestationPath": ".bootproof/attestation.json",
+  "inference": {},
+  "plan": {},
+  "observed": []
+}
+```
+
+`--ci` disables colour and interactive output. Exit codes are deterministic:
+
+- `0`: `booted === true` and `healthVerified === true`
+- `1`: every refusal, ambiguity, install failure, service failure, app failure, or health failure
+
+## Quick Start
+
+Run against a local repository:
+
+```bash
+cd /path/to/repository
+npx bootproof up .
+```
+
+Host execution can be selected explicitly:
+
+```bash
+npx bootproof up . --provider local --unsafe-local
+```
+
+Run dependency installation only when intended:
+
+```bash
+npx bootproof up . --install
+```
+
+Explain and verify the signed result:
+
+```bash
+npx bootproof explain .bootproof/attestation.json
+npx bootproof verify .bootproof/attestation.json
+```
+
+Run against a public GitHub repository:
+
+```bash
+npx bootproof up https://github.com/user/repo
+```
+
+BootProof clones credential-free HTTPS GitHub URLs into `.bootproof/remotes/` and retains the clone so its evidence and any generated files continue to exist. It inspects the clone but refuses to execute remote code until host execution is explicitly acknowledged:
+
+```bash
+npx bootproof up https://github.com/user/repo --provider local --unsafe-local
+```
+
+Review the inferred commands before using that acknowledgement. Add `--install` only when you also intend to run dependency installation and its lifecycle scripts. Remote `--dry-run` is refused before cloning because dry runs promise to write nothing.
+
+Contributors working from this source repository can use `npm ci`, `npm run build`, and `npm link`. Those steps are not required for npm users.
+
+## Honesty Contract
+
+BootProof is constrained on purpose:
+
+- no verified boot without an observed health signal
+- no success rendering for skipped steps
+- no invented secrets
+- no writes to `.env`, `.env.local`, `.env.development`, or `.env.production`
+- no silent project patching
+- no guessed workspace when the repository is ambiguous
+- no claim that generated scaffolding exists unless it was written
+- signed failed attestations for refusals and execution failures
+- raw local evidence preserved in the attestation
+- no telemetry or hidden evidence upload
+
+See [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md).
+
+## Current Capabilities
+
+BootProof currently provides:
+
+- Node package-manager and start-command inference
+- Python/Flask and Go/Node hybrid detection
+- monorepo candidate ranking
+- Docker service dependency detection and scaffolding
+- localhost health-candidate discovery from repository evidence and app logs
+- classified failures
+- signed Ed25519 attestations
+- strict JSON and fail-closed CI output
+- redacted registry-entry export
+
+Detection is broader than orchestration. For example:
+
+- Superset-like Python/Flask/React/Celery repos are detected, then honestly refused with `python_flask_setup_required`.
+- Grafana-like Go/Node hybrids are detected without pretending a frontend watcher is the whole application.
+- Parallel monorepo root commands are refused until a specific workspace is selected.
+
+## Files Written
+
+Depending on the observed plan, BootProof may write:
+
+```text
+.bootproof/attestation.json
+.bootproof/registry-entry.json
+docker-compose.bootproof.yml
+.env.bootproof.example
+```
+
+`registry-entry.json` is written only by `bootproof attest export`.
+
+Docker and env guidance files are listed in proof only when BootProof actually generated them.
+
+Protected application env files remain untouched.
+
+## Attestation Trust
+
+Current attestations contain:
+
+```json
+{
+  "trust": {
+    "level": "local_developer_signed",
+    "signer": "local_ed25519",
+    "oidc": null
+  }
+}
+```
+
+Local attestations are useful evidence. CI/OIDC attestations are stronger supply-chain proof. BootProof does not pretend local laptop proof is enterprise CI proof.
+
+The future `ci_oidc_signed` level is reserved but is not emitted today.
+
+## Failure Taxonomy
+
+Examples include:
+
+- `not_an_application`
+- `workspace_ambiguous`
+- `dependency_install_skipped`
+- `package_manager_version_mismatch`
+- `python_flask_setup_required`
+- `service_port_allocated`
+- `postgres_auth_env_missing`
+- `health_http_error`
+- `health_check_timeout`
+- `unknown_failure`
+
+Unknown failures remain unknown, with evidence preserved for the next detector.
+
+See [docs/FAILURE_TAXONOMY.md](docs/FAILURE_TAXONOMY.md).
+
+## Real Repository Evidence
+
+BootProof records both useful successes and useful failures. The evidence ledger does not relabel failure as support.
+
+See [docs/REAL_REPO_EVIDENCE.md](docs/REAL_REPO_EVIDENCE.md).
+
+## CI And Registry
+
+BootProof does not upload attestations. A project can deliberately commit `.bootproof/` or export a redacted registry entry.
+
+The Git-native registry and OIDC-backed trust model are designs in progress, not deployed services.
+
+- [docs/CI_ACTION.md](docs/CI_ACTION.md)
+- [docs/REGISTRY.md](docs/REGISTRY.md)
+
+## Release Packaging
+
+The npm package contains the compiled CLI, license, README, and docs. `dist/` is required at runtime, generated by `npm run build` during `prepack`, and intentionally not committed.
+
+Run `npm run pack:check` to pack BootProof, install the tarball in an isolated temporary directory, and exercise the installed CLI. See [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+
+## Release Hygiene
+
+`node_modules/`, `.DS_Store`, and generated `dist/` are ignored and not committed.
+
+`dist/` is generated by `npm run build`. It is included in the npm package because `dist/cli.js` is the executable, and `npm pack`/publish runs the `prepack` build.
+
+Repository metadata points to:
+
+```text
+https://github.com/rossbuckley1990-hash/bootproof
+```
+
+## What BootProof Is Not
+
+BootProof is not a deployment platform, a general CI replacement, or a magic environment fixer.
+
+It is the honest Run Button for repos. It runs what it can, refuses what it cannot prove, signs both success and failure, and gives humans and machines the same evidence.
+
+## Status
+
+BootProof is early alpha.
+
+Near-term work includes:
+
+- additional remote source providers beyond public HTTPS GitHub repositories
+- stronger multi-service orchestration
+- broader Python and Go execution support
+- CI/OIDC-backed signing
+- proof-linked badges and a verified public index
+
+Unsupported paths should fail clearly, not magically.
+
+## License
+
+Apache-2.0
