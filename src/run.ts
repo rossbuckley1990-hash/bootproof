@@ -26,7 +26,7 @@ export interface UpOptions {
 export interface UpOutcome {
   inference: Inference;
   plan: RunPlan;
-  attestation: Attestation | null; // null only for dry runs and pre-execution refusals
+  attestation: Attestation | null; // null only for dry runs
   refusal: { failureClass: FailureClass; explanation: string } | null;
   writtenFiles: string[];
 }
@@ -36,26 +36,43 @@ function step(id: string, kind: ObservedStep["kind"], command: string | undefine
 }
 
 export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> {
+  const startedAt = new Date().toISOString();
   const inference = inferRepo(repoPath, { workspace: opts.workspace });
   if (opts.port) { inference.port = opts.port; inference.portEvidence = "set by --port flag"; }
   const plan = buildPlan(inference, opts.provider);
   const base: Omit<UpOutcome, "refusal" | "attestation"> = { inference, plan, writtenFiles: [] };
+  const refuse = (failureClass: FailureClass, explanation: string): UpOutcome => {
+    const refusal = { failureClass, explanation };
+    if (opts.dryRun) return { ...base, attestation: null, refusal };
+    const attestation = buildAttestation({
+      repo: inference.repoPath,
+      plan,
+      observed: [],
+      startedAt,
+      booted: false,
+      healthVerified: false,
+      healthObservation: null,
+      failureClass,
+      failureEvidence: explanation,
+      explanation,
+    });
+    writeAttestation(inference.repoPath, attestation);
+    return { ...base, attestation, refusal };
+  };
 
-  // Pre-execution refusals: honest, no attestation written because nothing executed.
   if (!inference.isApplication) {
-    return { ...base, attestation: null, refusal: { failureClass: "not_an_application", explanation: inference.notAppReason! } };
+    return refuse("not_an_application", inference.notAppReason!);
   }
   if (!opts.workspace && inference.workspaces.length > 1 && !inference.appCommand) {
-    return { ...base, attestation: null, refusal: { failureClass: "workspace_ambiguous", explanation: `This is a monorepo with ${inference.workspaces.length} workspace candidates. Choose one with --workspace <dir> instead of letting bootproof guess.` } };
+    return refuse("workspace_ambiguous", `This is a monorepo with ${inference.workspaces.length} workspace candidates. Choose one with --workspace <dir> instead of letting bootproof guess.`);
   }
   if (opts.provider === "local" && !opts.unsafeLocal) {
-    return { ...base, attestation: null, refusal: { failureClass: "unknown_failure", explanation: "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker." } };
+    return refuse("unknown_failure", "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker.");
   }
   if (opts.dryRun) return { ...base, attestation: null, refusal: null };
 
   const writtenFiles = writePlanFiles(inference, inference.repoPath);
   const observed: ObservedStep[] = [];
-  const startedAt = new Date().toISOString();
   const env = minimalEnv({ PORT: String(inference.port) });
   const fail = (failureClass: FailureClass, evidence: string, explanation: string): UpOutcome => {
     const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: false, healthVerified: false, healthObservation: null, failureClass, failureEvidence: evidence.slice(-2000), explanation });

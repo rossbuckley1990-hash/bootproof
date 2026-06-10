@@ -56,9 +56,13 @@ test("attestation signature verifies and tamper is detected", () => {
   const inf = inferRepo(path.join(FIX, "hello-app"));
   const plan = buildPlan(inf, "local");
   const att = buildAttestation({ repo: inf.repoPath, plan, observed: [], startedAt: new Date().toISOString(), booted: false, healthVerified: false, healthObservation: null, failureClass: "unknown_failure", failureEvidence: "x", explanation: "test" });
+  assert.deepEqual(att.trust, { level: "local_developer_signed", signer: "local_ed25519", oidc: null });
   assert.equal(verifySignature(att), true);
   att.result.booted = true; // tamper: claim it booted
   assert.equal(verifySignature(att), false, "a tampered 'booted' claim must fail signature verification");
+  att.result.booted = false;
+  att.trust.level = "ci_oidc_signed"; // tamper: upgrade local proof to a stronger trust claim
+  assert.equal(verifySignature(att), false, "a tampered trust level must fail signature verification");
 });
 
 test("redaction masks secrets, urls credentials and home paths", async () => {

@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
       - run: npm i -g bootproof   # once published; until then: clone + npm link
-      - run: bootproof up . --provider local --unsafe-local --install --timeout 120000
+      - run: bootproof up . --provider local --unsafe-local --install --timeout 120000 --ci
         continue-on-error: true   # a failed boot is still honest, classified proof
       - run: bootproof attest export .
       - name: commit refreshed proof

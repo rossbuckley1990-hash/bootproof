@@ -54,6 +54,7 @@ export function buildAttestation(input: {
     tool: TOOL_ID,
     repo: gitInfo(input.repo),
     environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
+    trust: { level: "local_developer_signed", signer: "local_ed25519", oidc: null },
     plan: input.plan,
     observed: input.observed,
     result: {

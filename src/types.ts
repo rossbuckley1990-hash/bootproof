@@ -88,11 +88,18 @@ export interface ObservedStep {
   evidenceTail?: string;
 }
 
+export interface AttestationTrust {
+  level: "local_developer_signed" | "ci_oidc_signed";
+  signer: "local_ed25519" | "ci_oidc";
+  oidc: Record<string, string> | null;
+}
+
 export interface Attestation {
   schema: "bootproof/attestation/v1";
   tool: string;
   repo: { path: string; remote: string | null; commit: string | null; dirty: boolean | null };
   environment: { os: string; arch: string; node: string };
+  trust: AttestationTrust;
   plan: RunPlan;
   observed: ObservedStep[];
   result: {
