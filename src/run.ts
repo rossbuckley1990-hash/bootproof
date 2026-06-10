@@ -5,6 +5,14 @@ import { runToCompletion, superviseApp, pollHealth, minimalEnv } from "./exec.js
 import { classifyFailure } from "./taxonomy.js";
 import { buildAttestation, writeAttestation } from "./proof.js";
 
+function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
+  if (/(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i.test(evidence)) {
+    return "health_http_error";
+  }
+  return "health_check_timeout";
+}
+
+
 export interface UpOptions {
   provider: "docker" | "local";
   unsafeLocal: boolean;
@@ -63,7 +71,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       observed.push(step(planned.id, "service", planned.command, t, r.exitCode, ok, ok ? "services started (docker compose exit 0)" : "docker compose failed", r.stderr || r.stdout));
       if (!ok) {
         const c = classifyFailure(r.stderr + r.stdout);
-        return fail(c.class === "unknown_failure" ? "docker_unavailable" : c.class, r.stderr + r.stdout, c.explanation);
+        return fail(c.class, r.stderr + r.stdout, c.explanation);
       }
     }
     if (planned.kind === "install" && planned.command) {
@@ -101,10 +109,21 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
       }
       const evidence = app.output();
-      observed.push(step("health", "health", undefined, ht, null, false, health.responded ? `only HTTP ${health.status} observed at ${plan.healthUrl}` : `no HTTP response at ${plan.healthUrl} within ${opts.timeoutMs}ms`, evidence));
-      const c = classifyFailure(evidence);
+      const healthFailureMessage = health.responded
+        ? `only HTTP ${health.status} observed at ${plan.healthUrl}`
+        : `no HTTP response at ${plan.healthUrl} within ${opts.timeoutMs}ms`;
+      observed.push(step("health", "health", undefined, ht, null, false, healthFailureMessage, evidence));
+      const c = classifyFailure(`${healthFailureMessage}\n${evidence}`);
+      const healthClass = health.responded && health.status !== null && health.status >= 500
+        ? "health_http_error"
+        : c.class === "unknown_failure"
+          ? classifyHealthFailure(healthFailureMessage)
+          : c.class;
+      const healthExplanation = healthClass === "health_http_error"
+        ? "The app responded on the configured health URL, but returned HTTP 5xx. BootProof observed a running server, but not a verified healthy boot."
+        : c.explanation;
       await app.stop();
-      return fail(c.class === "unknown_failure" ? "health_check_timeout" : c.class, evidence, c.explanation);
+      return fail(healthClass, `${healthFailureMessage}\n${evidence}`, healthExplanation);
     }
   }
   return fail("not_an_application", "", "Plan contained no runnable app step.");

@@ -1,5 +1,25 @@
 import type { FailureClass } from "./types.js";
 
+function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
+  if (/(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i.test(evidence)) {
+    return "health_http_error";
+  }
+  return "health_check_timeout";
+}
+
+
+function isServicePortAllocatedEvidence(evidence: string): boolean {
+  const lower = evidence.toLowerCase();
+  return (
+    lower.includes("port is already allocated") ||
+    lower.includes("bind for 0.0.0.0:") ||
+    lower.includes("failed programming external connectivity") ||
+    lower.includes("ports are not available") ||
+    lower.includes("address already in use")
+  );
+}
+
+
 interface Rule { class: FailureClass; pattern: RegExp; explain: (m: RegExpMatchArray) => string }
 
 const RULES: Rule[] = [
@@ -23,7 +43,9 @@ const RULES: Rule[] = [
     explain: () => "The app refuses to start without specific environment variables. See .env.bootproof.example; secrets without safe defaults must come from you." },
   { class: "tls_or_proxy_interception", pattern: /(SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|unable to get local issuer certificate)/,
     explain: () => "A TLS-intercepting proxy or self-signed certificate chain is blocking package/tool downloads. Configure your proxy CA (NODE_EXTRA_CA_CERTS) or run outside the intercepting network." },
-  { class: "docker_unavailable", pattern: /(Cannot connect to the Docker daemon|docker: (command )?not found|docker daemon is not running|error during connect)/i,
+    { class: "service_port_allocated", pattern: /(port is already allocated|Bind for 0\.0\.0\.0:\d+ failed|failed programming external connectivity|Ports are not available|address already in use)/i,
+    explain: () => "Docker is available, but a required service port is already allocated by another local process or container. Stop the process using that port, or rerun with a different service port." },
+{ class: "docker_unavailable", pattern: /(Cannot connect to the Docker daemon|docker: (command )?not found|docker daemon is not running|error during connect)/i,
     explain: () => "Docker is not available, and this plan needs it for services. Start Docker, or rerun with --provider local --unsafe-local if the app needs no containers." },
 ];
 
@@ -41,6 +63,6 @@ export function classifyFailure(evidence: string): { class: FailureClass; explan
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "runtime_engine_mismatch", "missing_package_manager", "missing_env_var",
   "database_unreachable", "postgres_auth_env_missing", "migrations_missing", "port_in_use", "native_build_dependency",
-  "private_registry_or_auth", "tls_or_proxy_interception", "docker_unavailable", "install_failed", "app_exited_early",
+  "private_registry_or_auth", "tls_or_proxy_interception", "service_port_allocated", "docker_unavailable", "install_failed", "app_exited_early",
   "health_check_timeout", "workspace_ambiguous", "unknown_failure",
 ];

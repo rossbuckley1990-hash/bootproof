@@ -1,3 +1,11 @@
+
+function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
+  if (/(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i.test(evidence)) {
+    return "health_http_error";
+  }
+  return "health_check_timeout";
+}
+
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 export type FailureClass =
@@ -12,10 +20,12 @@ export type FailureClass =
   | "native_build_dependency"
   | "private_registry_or_auth"
   | "tls_or_proxy_interception"
+  | "service_port_allocated"
   | "docker_unavailable"
   | "install_failed"
   | "app_exited_early"
   | "health_check_timeout"
+  | "health_http_error"
   | "workspace_ambiguous"
   | "unknown_failure";
 
