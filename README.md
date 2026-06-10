@@ -2,6 +2,11 @@
 
 > **The honest Run Button for repos — with proof, not vibes.**
 
+<p align="center">
+  <img src="assets/bootproof_viral_demo.gif" alt="BootProof demo: the honest Run Button for repos, with proof not vibes" width="900">
+</p>
+
+
 GitHub has a **Code** button.  
 GitHub has a **Star** button.  
 But software still does not have a trustworthy **Run** button.
