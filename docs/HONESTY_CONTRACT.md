@@ -79,4 +79,8 @@ BootProof itself does not upload telemetry or evidence.
 
 Commands chosen from a repository, such as package installation or application startup, may perform their own network activity. That behavior belongs to the command being executed and should be reviewed before using `--install` or unsafe local execution.
 
+Remote mode accepts only credential-free public HTTPS GitHub repository URLs. BootProof clones them into a retained `.bootproof/remotes/` workspace. Cloning does not authorize execution: a remote application command runs only with `--provider local --unsafe-local`.
+
+Remote `--dry-run` is refused before cloning. A clone writes files, while the dry-run contract promises that nothing is written.
+
 Sharing proof is deliberate: inspect and commit `.bootproof/`, or export a redacted registry entry.

@@ -9,6 +9,7 @@ import { pollHealth } from "./exec.js";
 import { buildRegistryEntry, verifyRegistryEntry, writeRegistryEntry, registryEntryPath } from "./registry.js";
 import { normalizeDockerBindPath, detectHostPlatform } from "./platform.js";
 import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
+import { cloneGithubRemote, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
 import type { Attestation } from "./types.js";
 
 let GREEN = "\x1b[32m", YELLOW = "\x1b[33m", RED = "\x1b[31m", DIM = "\x1b[2m", BOLD = "\x1b[1m", RESET = "\x1b[0m";
@@ -41,9 +42,10 @@ function help() {
   console.log(`${BOLD}bootproof${RESET} — Human diagnosis. Machine proof. One engine.
 
 Usage:
-  bootproof analyze <path> [--workspace dir] [--json]   inspect a repo, show evidence-based inference
-  bootproof plan <path> [--workspace dir]               show the run plan and files that WOULD be generated
-  bootproof up <path> [options]                         execute the plan, verify localhost, write a signed attestation
+  bootproof analyze <path|github-url> [--workspace dir] [--json]
+                                                            inspect a repo, show evidence-based inference
+  bootproof plan <path|github-url> [--workspace dir]        show the run plan and files that WOULD be generated
+  bootproof up <path|github-url> [options]                  execute the plan, verify localhost, write signed proof
   bootproof verify <path|attestation.json>              validate an attestation signature and inspect its claim
   bootproof explain <attestation.json>                  human explanation of an attestation
   bootproof attest export <path>                        redacted, re-signed shareable registry entry (never uploads)
@@ -62,7 +64,8 @@ Options for up:
   --ci                      no prompts, colours, or interactive UI; fail closed
 
 Honesty contract: no green check without an observed event; dry runs say "would";
-.env/.env.local are never written; secrets are never invented. docs/HONESTY_CONTRACT.md`);
+.env/.env.local are never written; secrets are never invented.
+Remote execution requires --provider local --unsafe-local. docs/HONESTY_CONTRACT.md`);
 }
 
 function printInference(inf: ReturnType<typeof inferRepo>) {
@@ -90,14 +93,14 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   console.log(`  confidence: ${inf.confidence}% ${DIM}(heuristic score of evidence found, not a success prediction)${RESET}`);
 }
 
-function machineResult(outcome: UpOutcome) {
+function machineResult(outcome: UpOutcome, evidencePath: string) {
   const result = outcome.attestation?.result;
   return {
     schema: "bootproof/result/v1",
     booted: result?.booted ?? false,
     healthVerified: result?.healthVerified ?? false,
     failureClass: result?.failureClass ?? outcome.refusal?.failureClass ?? null,
-    attestationPath: outcome.attestation ? ".bootproof/attestation.json" : null,
+    attestationPath: outcome.attestation ? evidencePath : null,
     inference: outcome.inference,
     plan: outcome.plan,
     observed: outcome.attestation?.observed ?? [],
@@ -143,7 +146,43 @@ async function main() {
   }
   const { flags, positional } = parseFlags(rest);
   if (flags.ci || flags.json) disableColor();
-  const target = path.resolve(String(positional[0] ?? "."));
+  const targetInput = String(positional[0] ?? ".");
+  let target = path.resolve(targetInput);
+  let remote: RemoteClone | null = null;
+  let remoteSource: string | null = null;
+  if (["analyze", "plan", "up"].includes(cmd) && isRemoteTarget(targetInput)) {
+    if (flags["dry-run"]) {
+      const explanation = "Remote dry runs are refused because cloning would write files, while BootProof dry runs promise to write nothing.";
+      if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
+      else bad(explanation);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      remote = cloneGithubRemote(targetInput, process.cwd());
+      target = remote.repoPath;
+      remoteSource = remote.canonicalUrl;
+      if (!flags.json) {
+        console.log(`${DIM}Remote source: ${remote.canonicalUrl}${RESET}`);
+        console.log(`${DIM}Clone retained at: ${path.relative(process.cwd(), remote.repoPath)}${RESET}`);
+      }
+    } catch (error) {
+      const explanation = error instanceof Error ? error.message : String(error);
+      if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
+      else bad(explanation);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  if (!remote && ["analyze", "plan", "up"].includes(cmd)) {
+    remoteSource = managedRemoteSource(target);
+    if (remoteSource && !flags.json) {
+      console.log(`${DIM}Managed remote source: ${remoteSource}${RESET}`);
+    }
+  }
+  const evidencePath = remote
+    ? path.relative(process.cwd(), attestationPath(target))
+    : ".bootproof/attestation.json";
 
   if (cmd === "analyze") {
     const inf = inferRepo(target, { workspace: flags.workspace as string | undefined });
@@ -185,6 +224,7 @@ async function main() {
       provider: provider as UpOptions["provider"],
       unsafeLocal: Boolean(flags["unsafe-local"]),
       dryRun: Boolean(flags["dry-run"]),
+      remoteSource: remoteSource ?? undefined,
       workspace: flags.workspace as string | undefined,
       timeoutMs,
       install: Boolean(flags.install),
@@ -193,7 +233,7 @@ async function main() {
     const outcome = await up(target, opts);
     const verified = outcome.attestation?.result.booted === true && outcome.attestation.result.healthVerified === true;
     if (flags.json) {
-      console.log(JSON.stringify(machineResult(outcome)));
+      console.log(JSON.stringify(machineResult(outcome, evidencePath)));
       if (flags.ci || !opts.dryRun) process.exitCode = verified ? 0 : 1;
       return;
     }
@@ -207,7 +247,7 @@ async function main() {
         outcome.refusal.explanation,
         outcome.inference,
       );
-      printFailure(outcome.refusal.failureClass, diagnosis, ".bootproof/attestation.json");
+      printFailure(outcome.refusal.failureClass, diagnosis, evidencePath);
       process.exitCode = 1;
       return;
     }
@@ -223,10 +263,10 @@ async function main() {
     console.log("");
     if (r.healthVerified) {
       ok(`${BOLD}BOOTED${RESET}${GREEN} — ${r.healthObservation} (observed, signed)`);
-      console.log("Evidence: .bootproof/attestation.json");
+      console.log(`Evidence: ${evidencePath}`);
     } else {
       const diagnosis = diagnoseFailure(r.failureClass, r.failureEvidence, r.explanation, outcome.inference);
-      printFailure(r.failureClass!, diagnosis, ".bootproof/attestation.json");
+      printFailure(r.failureClass!, diagnosis, evidencePath);
       process.exitCode = 1;
     }
     return;
@@ -240,7 +280,13 @@ async function main() {
     (sig ? ok : bad)(`signature ${sig ? "valid" : "INVALID"} (ed25519, trust-on-first-use)`);
     console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
     console.log(`${DIM}attested: booted=${att.result.booted} at commit ${att.repo.commit ?? "unknown"} on ${att.environment.os} node ${att.environment.node}${RESET}`);
-    console.log(`Replaying attested plan with bootproof up --provider ${att.plan.provider} would re-verify it on this machine.`);
+    const retainedRemote = managedRemoteSource(att.repo.path);
+    if (retainedRemote) {
+      console.log(`Retained remote source: ${retainedRemote}`);
+      console.log("Replay requires explicit host execution acknowledgement: bootproof up <clone-path> --provider local --unsafe-local.");
+    } else {
+      console.log(`Replaying attested plan with bootproof up --provider ${att.plan.provider} would re-verify it on this machine.`);
+    }
     if (att.result.booted) {
       const live = await pollHealth(att.plan.healthUrl, 3000);
       if (live.responded) ok(`bonus observation: ${att.plan.healthUrl} is responding right now (HTTP ${live.status})`);

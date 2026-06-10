@@ -9,6 +9,7 @@ import { buildPlan, envExampleFor, PROTECTED_ENV } from "../dist/plan.js";
 import { buildAttestation, verifySignature } from "../dist/proof.js";
 import { extractHealthCandidates } from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
+import { isRemoteTarget, managedRemoteSource, parseGithubRemote } from "../dist/remote.js";
 
 const FIX = path.resolve("fixtures");
 
@@ -120,6 +121,31 @@ test("health candidates are extracted from common application log formats", () =
     extractHealthCandidates("Local: http://127.0.0.1:5173/\nserver listening on port 8088\nserver listening on 9090"),
     ["http://127.0.0.1:5173/", "http://localhost:8088/", "http://localhost:9090/"],
   );
+});
+
+test("remote URL parsing accepts only credential-free HTTPS GitHub repositories", () => {
+  assert.equal(isRemoteTarget("https://github.com/example/app"), true);
+  assert.deepEqual(parseGithubRemote("https://github.com/example/app"), {
+    originalUrl: "https://github.com/example/app",
+    canonicalUrl: "https://github.com/example/app.git",
+    owner: "example",
+    repo: "app",
+  });
+  assert.throws(() => parseGithubRemote("http://github.com/example/app"), /only public HTTPS GitHub/);
+  assert.throws(() => parseGithubRemote("https://token@github.com/example/app"), /must not contain credentials/);
+  assert.throws(() => parseGithubRemote("https://gitlab.com/example/app"), /only public HTTPS GitHub/);
+  assert.throws(() => parseGithubRemote("https://github.com/example/app/tree/main"), /exactly one repository/);
+
+  const managed = fs.mkdtempSync(path.join(os.tmpdir(), "bp-managed-remote-"));
+  const repo = path.join(managed, "repo");
+  fs.mkdirSync(repo);
+  fs.writeFileSync(path.join(managed, "source.json"), JSON.stringify({
+    schema: "bootproof/remote-source/v1",
+    canonicalUrl: "https://github.com/example/app.git",
+    repoDirectory: "repo",
+  }));
+  assert.equal(managedRemoteSource(repo), "https://github.com/example/app.git");
+  assert.equal(managedRemoteSource(path.join(managed, "ordinary-repo")), null);
 });
 
 test("env example never invents secrets", () => {

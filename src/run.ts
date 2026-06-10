@@ -18,6 +18,7 @@ export interface UpOptions {
   provider: "docker" | "local";
   unsafeLocal: boolean;
   dryRun: boolean;
+  remoteSource?: string;
   workspace?: string;
   timeoutMs: number;
   install: boolean;
@@ -108,6 +109,12 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   }
   if (!opts.workspace && inference.workspaces.length > 1 && !inference.appCommand) {
     return refuse("workspace_ambiguous", `This is a monorepo with ${inference.workspaces.length} workspace candidates. Choose one with --workspace <dir> instead of letting bootproof guess.`);
+  }
+  if (opts.remoteSource && !opts.dryRun && (opts.provider !== "local" || !opts.unsafeLocal)) {
+    return refuse(
+      "unknown_failure",
+      `BootProof cloned ${opts.remoteSource} for inspection but will not execute remote repository code without --provider local --unsafe-local.`,
+    );
   }
   if (opts.provider === "local" && !opts.unsafeLocal) {
     return refuse("unknown_failure", "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker.");

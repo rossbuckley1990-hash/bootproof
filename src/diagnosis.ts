@@ -130,6 +130,20 @@ export function diagnoseFailure(
         safeNextStep: "Inspect the preserved process output, fix the startup error, then rerun BootProof.",
       };
     default:
+      if (/cloned .* but will not execute remote repository code/i.test(explanation)) {
+        return {
+          whatHappened: explanation,
+          whyRefused: "A remote clone is untrusted code, and BootProof requires explicit acknowledgement before running it on the host.",
+          safeNextStep: "Review the cloned repository, then rerun with --provider local --unsafe-local only if you accept host execution.",
+        };
+      }
+      if (/Local provider runs repository code directly/i.test(explanation)) {
+        return {
+          whatHappened: explanation,
+          whyRefused: "Host execution was selected without the required explicit acknowledgement.",
+          safeNextStep: "Review the inferred commands, then rerun with --provider local --unsafe-local only if you accept host execution.",
+        };
+      }
       return {
         whatHappened: explanation,
         whyRefused: "BootProof did not observe enough evidence to issue a verified boot result.",

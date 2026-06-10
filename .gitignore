@@ -6,3 +6,5 @@ docker-compose.bootproof.yml
 .env.bootproof.example
 .DS_Store
 .git/
+*.tgz
+npm-debug.log*

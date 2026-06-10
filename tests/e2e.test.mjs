@@ -7,8 +7,11 @@ import os from "node:os";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
-const run = (args, allowFail = false, env = {}) => {
-  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: { ...process.env, ...env } }), code: 0 }; }
+const REAL_GIT = execFileSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+  .trim()
+  .split(/\r?\n/)[0];
+const run = (args, allowFail = false, env = {}, cwd = process.cwd()) => {
+  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: { ...process.env, ...env }, cwd }), code: 0 }; }
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
@@ -16,6 +19,54 @@ function freshCopy(name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bp-e2e-"));
   fs.cpSync(path.join(FIX, name), tmp, { recursive: true });
   return tmp;
+}
+
+function fakeGithubRemote(fixture) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-bin-"));
+  const driver = path.join(bin, "fake-git.cjs");
+  fs.writeFileSync(driver, `
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const realGit = process.env.BOOTPROOF_REAL_GIT;
+if (args[0] === "clone") {
+  const remote = args.at(-2);
+  const destination = args.at(-1);
+  fs.cpSync(process.env.BOOTPROOF_FAKE_REMOTE, destination, { recursive: true });
+  const commands = [
+    ["init", "-q"],
+    ["config", "user.name", "BootProof Test"],
+    ["config", "user.email", "bootproof@example.invalid"],
+    ["config", "commit.gpgsign", "false"],
+    ["add", "."],
+    ["commit", "-q", "-m", "fixture"],
+    ["remote", "add", "origin", remote],
+  ];
+  for (const command of commands) {
+    const result = spawnSync(realGit, ["-C", destination, ...command], { stdio: "inherit" });
+    if (result.status !== 0) process.exit(result.status ?? 1);
+  }
+  process.exit(0);
+}
+const result = spawnSync(realGit, args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`);
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(bin, "git.cmd"), `@node "%~dp0\\fake-git.cjs" %*\r\n`);
+  } else {
+    const fakeGit = path.join(bin, "git");
+    fs.writeFileSync(fakeGit, `#!/bin/sh\nexec node "$(dirname "$0")/fake-git.cjs" "$@"\n`);
+    fs.chmodSync(fakeGit, 0o755);
+  }
+  return {
+    cwd,
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      BOOTPROOF_REAL_GIT: REAL_GIT,
+      BOOTPROOF_FAKE_REMOTE: path.join(FIX, fixture),
+    },
+  };
 }
 
 test("honesty: dry run prints 'would', never a green check, writes nothing", () => {
@@ -148,6 +199,67 @@ test("machine interface: --ci rejects invalid providers before execution", () =>
   assert.equal(result.attestationPath, null);
   assert.match(result.explanation, /invalid --provider/);
   assert.ok(!fs.existsSync(path.join(repo, ".bootproof")), "invalid options must not start a run");
+});
+
+test("remote mode clones GitHub sources but refuses execution without the existing host safety gate", () => {
+  const remote = fakeGithubRemote("hello-app");
+  const url = "https://github.com/example/hello-app";
+  const { out, code } = run(["up", url, "--ci", "--json"], true, remote.env, remote.cwd);
+  assert.equal(code, 1);
+  assert.equal(out.trim().split("\n").length, 1);
+  const result = JSON.parse(out);
+  assert.equal(result.failureClass, "unknown_failure");
+  assert.match(result.explanation, /will not execute remote repository code/);
+  assert.match(result.attestationPath, /^\.bootproof\/remotes\/github\.com\/example\/hello-app-/);
+  const attestationPath = path.join(remote.cwd, result.attestationPath);
+  assert.ok(fs.existsSync(attestationPath));
+  const att = JSON.parse(fs.readFileSync(attestationPath, "utf8"));
+  assert.equal(att.repo.remote, "https://github.com/example/hello-app.git");
+  assert.equal(att.repo.dirty, false);
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.deepEqual(att.observed, []);
+  const verified = run(["verify", attestationPath], false, remote.env, remote.cwd);
+  assert.match(verified.out, /signature valid/);
+  assert.match(verified.out, /Replay requires explicit host execution acknowledgement/);
+
+  const replay = run(["up", att.repo.path, "--ci", "--json"], true, remote.env, remote.cwd);
+  assert.equal(replay.code, 1);
+  assert.match(JSON.parse(replay.out).explanation, /will not execute remote repository code/);
+});
+
+test("remote mode executes only after --provider local --unsafe-local and requires observed health", () => {
+  const remote = fakeGithubRemote("hello-app");
+  const port = 6800 + Math.floor(Math.random() * 150);
+  const url = "https://github.com/example/hello-app";
+  const { out, code } = run(
+    ["up", url, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000", "--ci", "--json"],
+    true,
+    remote.env,
+    remote.cwd,
+  );
+  assert.equal(code, 0);
+  const result = JSON.parse(out);
+  assert.equal(result.booted, true);
+  assert.equal(result.healthVerified, true);
+  assert.ok(result.observed.some(observed => observed.kind === "health" && observed.ok));
+  const clonedRepo = path.dirname(path.dirname(path.join(remote.cwd, result.attestationPath)));
+  for (const name of [".env", ".env.local", ".env.development", ".env.production"]) {
+    assert.ok(!fs.existsSync(path.join(clonedRepo, name)), `${name} must not be written in a remote clone`);
+  }
+});
+
+test("remote dry runs refuse before cloning because dry runs write nothing", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-dry-"));
+  const { out, code } = run(
+    ["up", "https://github.com/example/hello-app", "--provider", "local", "--unsafe-local", "--dry-run"],
+    true,
+    {},
+    cwd,
+  );
+  assert.equal(code, 1);
+  assert.match(out, /dry runs promise to write nothing/i);
+  assert.equal(fs.existsSync(path.join(cwd, ".bootproof")), false);
 });
 
 test("Superset-like app writes a signed python_flask_setup_required refusal", () => {
