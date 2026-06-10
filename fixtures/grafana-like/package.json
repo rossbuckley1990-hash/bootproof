@@ -1,0 +1,17 @@
+{
+  "name": "grafana-like",
+  "private": true,
+  "packageManager": "yarn@4.15.0",
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "e2e-playwright/test-plugins/*"
+    ]
+  },
+  "scripts": {
+    "dev": "nx exec -- webpack --watch"
+  },
+  "dependencies": {
+    "react": "18.3.1"
+  }
+}

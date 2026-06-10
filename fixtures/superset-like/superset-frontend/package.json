@@ -1,0 +1,10 @@
+{
+  "name": "superset-frontend",
+  "private": true,
+  "scripts": {
+    "dev-server": "webpack serve"
+  },
+  "dependencies": {
+    "react": "^18.2.0"
+  }
+}

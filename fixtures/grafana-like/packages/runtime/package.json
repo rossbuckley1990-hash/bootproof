@@ -1,0 +1,11 @@
+{
+  "name": "@grafana/runtime",
+  "private": true,
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "vite": "6.0.0"
+  }
+}

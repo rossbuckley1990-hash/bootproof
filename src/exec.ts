@@ -63,18 +63,78 @@ export interface HealthObservation {
   status: number | null;
   attempts: number;
   elapsedMs: number;
+  url: string | null;
+  candidates: string[];
+  discoveredCandidates: string[];
 }
 
-export async function pollHealth(url: string, timeoutMs: number, intervalMs = 1000): Promise<HealthObservation> {
+function cleanUrl(value: string): string {
+  return value.replace(/[),.;\]}]+$/, "");
+}
+
+export function extractHealthCandidates(output: string): string[] {
+  const candidates = new Set<string>();
+  for (const match of output.matchAll(/https?:\/\/(?:localhost|127\.0\.0\.1):\d{2,5}(?:\/[^\s"'<>]*)?/gi)) {
+    candidates.add(cleanUrl(match[0]));
+  }
+  for (const match of output.matchAll(/\b(?:server\s+)?listening\s+(?:on|at)\s+(?:(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0)?(?::|port\s+))(\d{2,5})\b/gi)) {
+    candidates.add(`http://localhost:${match[1]}/`);
+  }
+  for (const match of output.matchAll(/\b(?:server\s+)?listening\s+(?:on|at)\s+(\d{2,5})\b/gi)) {
+    candidates.add(`http://localhost:${match[1]}/`);
+  }
+  return [...candidates];
+}
+
+export async function pollHealthCandidates(
+  initialUrls: string[],
+  timeoutMs: number,
+  output: () => string = () => "",
+  intervalMs = 1000,
+): Promise<HealthObservation> {
   const started = Date.now();
   let attempts = 0;
+  const candidates = new Set(initialUrls);
+  const discoveredCandidates = new Set<string>();
   while (Date.now() - started < timeoutMs) {
-    attempts++;
-    const status = await probe(url);
-    if (status !== null) return { responded: true, status, attempts, elapsedMs: Date.now() - started };
+    for (const candidate of extractHealthCandidates(output())) {
+      if (!candidates.has(candidate)) discoveredCandidates.add(candidate);
+      candidates.add(candidate);
+    }
+    for (const url of candidates) {
+      attempts++;
+      const status = await probe(url);
+      if (status !== null) {
+        return {
+          responded: true,
+          status,
+          attempts,
+          elapsedMs: Date.now() - started,
+          url,
+          candidates: [...candidates],
+          discoveredCandidates: [...discoveredCandidates],
+        };
+      }
+    }
     await new Promise(r => setTimeout(r, intervalMs));
   }
-  return { responded: false, status: null, attempts, elapsedMs: Date.now() - started };
+  for (const candidate of extractHealthCandidates(output())) {
+    if (!candidates.has(candidate)) discoveredCandidates.add(candidate);
+    candidates.add(candidate);
+  }
+  return {
+    responded: false,
+    status: null,
+    attempts,
+    elapsedMs: Date.now() - started,
+    url: null,
+    candidates: [...candidates],
+    discoveredCandidates: [...discoveredCandidates],
+  };
+}
+
+export function pollHealth(url: string, timeoutMs: number, intervalMs = 1000): Promise<HealthObservation> {
+  return pollHealthCandidates([url], timeoutMs, () => "", intervalMs);
 }
 
 function probe(url: string): Promise<number | null> {

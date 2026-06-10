@@ -7,6 +7,8 @@ import { inferRepo } from "../dist/infer.js";
 import { classifyFailure } from "../dist/taxonomy.js";
 import { buildPlan, envExampleFor, PROTECTED_ENV } from "../dist/plan.js";
 import { buildAttestation, verifySignature } from "../dist/proof.js";
+import { extractHealthCandidates } from "../dist/exec.js";
+import { packageManagerVersionMatches } from "../dist/run.js";
 
 const FIX = path.resolve("fixtures");
 
@@ -33,7 +35,93 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure("Error: listen EADDRINUSE: address already in use :::3000").class, "port_in_use");
   assert.equal(classifyFailure("Cannot connect to the Docker daemon at unix:///var/run/docker.sock").class, "docker_unavailable");
   assert.equal(classifyFailure("Error: self-signed certificate SELF_SIGNED_CERT_IN_CHAIN").class, "tls_or_proxy_interception");
+  assert.equal(classifyFailure("docker: failed programming external connectivity: Bind for 0.0.0.0:5432 failed: port is already allocated").class, "service_port_allocated");
+  assert.equal(classifyFailure("only HTTP 503 observed at http://localhost:3000/").class, "health_http_error");
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
+});
+
+test("Superset-like repository is recognized as a setup-heavy Python/Flask application", () => {
+  const inf = inferRepo(path.join(FIX, "superset-like"));
+  assert.equal(inf.isApplication, true);
+  for (const stack of ["python-backend", "flask", "react-frontend", "docker-compose", "celery"]) {
+    assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
+  }
+  assert.deepEqual(inf.setupSteps, ["superset db upgrade", "superset init"]);
+  assert.equal(inf.backendCommand, "flask run -p 8088 --reload --debugger");
+  assert.equal(inf.frontendCommand, "cd superset-frontend; npm run dev-server");
+  assert.equal(inf.workerCommand, "celery --app=superset.tasks.celery_app:app worker");
+  assert.equal(inf.port, 8088);
+  assert.deepEqual(inf.healthCandidates, ["http://localhost:8088/"]);
+});
+
+test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybrid", () => {
+  const inf = inferRepo(path.join(FIX, "grafana-like"));
+  assert.equal(inf.isApplication, true);
+  for (const stack of ["go-backend", "node-frontend", "react"]) {
+    assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
+  }
+  assert.equal(inf.packageManager, "yarn");
+  assert.match(inf.packageManagerEvidence, /yarn@4\.15\.0/);
+  assert.equal(inf.frontendCommand, "yarn dev");
+  assert.equal(inf.backendCommand, "make run");
+  assert.equal(inf.incompleteAppCommand, true);
+  assert.match(inf.commandScope, /frontend\/dev pipeline only/);
+  assert.ok(inf.healthCandidates.includes("http://localhost:3000/api/health"));
+
+  const root = inf.workspaces.find(candidate => candidate.dir === ".");
+  const productionPackage = inf.workspaces.find(candidate => candidate.dir === "packages/runtime");
+  const testPlugin = inf.workspaces.find(candidate => candidate.dir.includes("test-plugins"));
+  assert.ok(root && productionPackage && testPlugin);
+  assert.ok(root.score > productionPackage.score);
+  assert.ok(productionPackage.score > testPlugin.score, "test plugin must rank below production candidates");
+});
+
+test("parallel monorepo root commands are not treated as a single application boot", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-parallel-workspaces-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "parallel-root",
+    private: true,
+    packageManager: "pnpm@10.24.0",
+    workspaces: ["apps/*"],
+    scripts: { dev: "turbo run dev --parallel" },
+    devDependencies: { turbo: "2.0.0" },
+  }));
+  for (const app of ["studio", "docs"]) {
+    fs.mkdirSync(path.join(repo, "apps", app), { recursive: true });
+    fs.writeFileSync(path.join(repo, "apps", app, "package.json"), JSON.stringify({
+      name: app,
+      private: true,
+      scripts: { dev: "next dev" },
+      dependencies: { next: "15.0.0" },
+    }));
+  }
+  const inf = inferRepo(repo);
+  assert.equal(inf.multiAppCommand, true);
+  assert.match(inf.commandScope, /multi-workspace/);
+  assert.equal(inf.workspaces[0].dir, ".");
+});
+
+test("pnpm engine mismatch is classified specifically", () => {
+  const evidence = `ERR_PNPM_UNSUPPORTED_ENGINE Unsupported environment (bad pnpm and/or Node.js version)
+Expected version: 10.24
+Got: 9.15.4`;
+  const result = classifyFailure(evidence);
+  assert.equal(result.class, "package_manager_version_mismatch");
+  assert.match(result.explanation, /Enable Corepack/);
+});
+
+test("package manager version preflight compares only exact declarations conservatively", () => {
+  assert.equal(packageManagerVersionMatches("10.24.0", "10.24.0"), true);
+  assert.equal(packageManagerVersionMatches("10.24", "10.24.7"), true);
+  assert.equal(packageManagerVersionMatches("10.24", "9.15.4"), false);
+  assert.equal(packageManagerVersionMatches("^10.24.0", "9.15.4"), true, "ranges are left to the package manager");
+});
+
+test("health candidates are extracted from common application log formats", () => {
+  assert.deepEqual(
+    extractHealthCandidates("Local: http://127.0.0.1:5173/\nserver listening on port 8088\nserver listening on 9090"),
+    ["http://127.0.0.1:5173/", "http://localhost:8088/", "http://localhost:9090/"],
+  );
 });
 
 test("env example never invents secrets", () => {

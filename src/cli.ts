@@ -68,9 +68,18 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   console.log(`${BOLD}Inference (evidence-based)${RESET}`);
   console.log(`  application: ${inf.isApplication ? "yes" : `no — ${inf.notAppReason}`}`);
   if (inf.stack.length) console.log(`  stack: ${inf.stack.join(", ")}`);
+  if (inf.backendMarkers.length) console.log(`  backend markers: ${inf.backendMarkers.join(", ")}`);
+  if (inf.frontendMarkers.length) console.log(`  frontend markers: ${inf.frontendMarkers.join(", ")}`);
+  if (inf.serviceMarkers.length) console.log(`  service markers: ${inf.serviceMarkers.join(", ")}`);
   console.log(`  package manager: ${inf.packageManager} ${DIM}(${inf.packageManagerEvidence})${RESET}`);
-  if (inf.appCommand) console.log(`  app command: ${inf.appCommand} ${DIM}(${inf.appCommandSource})${RESET}`);
+  if (inf.setupSteps.length) console.log(`  setup steps: ${inf.setupSteps.join("; ")}`);
+  if (inf.backendCommand) console.log(`  backend command: ${inf.backendCommand}`);
+  if (inf.frontendCommand) console.log(`  frontend command: ${inf.frontendCommand}`);
+  if (inf.workerCommand) console.log(`  worker command: ${inf.workerCommand}`);
+  if (inf.appCommand) console.log(`  selected command: ${inf.appCommand} ${DIM}(${inf.appCommandSource})${RESET}`);
+  console.log(`  command scope: ${inf.commandScope}`);
   console.log(`  port: ${inf.port} ${DIM}(${inf.portEvidence})${RESET}`);
+  if (inf.healthCandidates.length) console.log(`  health candidates: ${inf.healthCandidates.join(", ")}`);
   if (inf.services.length) console.log(`  services: ${inf.services.map(s => `${s.kind} (${s.evidence})`).join("; ")}`);
   if (inf.envWithoutSafeDefault.length) console.log(`  secrets you must provide: ${inf.envWithoutSafeDefault.join(", ")}`);
   if (inf.workspaces.length > 1) {
@@ -182,7 +191,9 @@ async function main() {
     printInference(outcome.inference);
     console.log("");
     if (outcome.refusal) {
-      bad(`${outcome.refusal.failureClass}: ${outcome.refusal.explanation}`);
+      for (const o of outcome.attestation?.observed ?? []) (o.observation.startsWith("skipped") ? warn : o.ok ? ok : bad)(`${o.id}: ${o.observation}`);
+      bad(`${BOLD}NOT VERIFIED${RESET}${RED} — ${outcome.refusal.failureClass}`);
+      console.log(outcome.refusal.explanation);
       if (outcome.attestation) console.log(`${DIM}evidence preserved in: ${attestationPath(outcome.inference.repoPath)}${RESET}`);
       process.exitCode = 1;
       return;
@@ -265,6 +276,8 @@ async function main() {
     console.log(att.result.booted ? `This run BOOTED: ${att.result.healthObservation}.` : `This run did NOT verify. Failure class: ${att.result.failureClass}.`);
     console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
     console.log(att.result.explanation);
+    if (att.plan.healthCandidates?.length) console.log(`Health candidates: ${att.plan.healthCandidates.join(", ")}`);
+    if (att.result.observedHealthCandidates?.length) console.log(`Observed health candidates: ${att.result.observedHealthCandidates.join(", ")}`);
     for (const o of att.observed) console.log(`  ${o.ok ? "\u2713" : "\u2717"} ${o.id}: ${o.observation}`);
     return;
   }

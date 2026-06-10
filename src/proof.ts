@@ -47,6 +47,7 @@ function canonicalBody(att: Attestation): Buffer {
 export function buildAttestation(input: {
   repo: string; plan: RunPlan; observed: ObservedStep[]; startedAt: string;
   booted: boolean; healthVerified: boolean; healthObservation: string | null;
+  observedHealthCandidates?: string[];
   failureClass: FailureClass | null; failureEvidence: string | null; explanation: string;
 }): Attestation {
   const att: Attestation = {
@@ -61,6 +62,7 @@ export function buildAttestation(input: {
       booted: input.booted,
       healthVerified: input.healthVerified,
       healthObservation: input.healthObservation,
+      observedHealthCandidates: input.observedHealthCandidates ?? [],
       failureClass: input.failureClass,
       failureEvidence: input.failureEvidence,
       explanation: input.explanation,

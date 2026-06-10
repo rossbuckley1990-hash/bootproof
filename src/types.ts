@@ -12,6 +12,9 @@ export type FailureClass =
   | "not_an_application"
   | "runtime_engine_mismatch"
   | "missing_package_manager"
+  | "package_manager_version_mismatch"
+  | "dependency_install_skipped"
+  | "python_flask_setup_required"
   | "missing_env_var"
   | "database_unreachable"
   | "postgres_auth_env_missing"
@@ -46,17 +49,30 @@ export interface Inference {
   isApplication: boolean;
   notAppReason?: string;
   stack: string[];
+  backendMarkers: string[];
+  frontendMarkers: string[];
+  serviceMarkers: string[];
+  setupSteps: string[];
   packageManager: PackageManager;
   packageManagerEvidence: string;
+  packageManagerVersion: string | null;
   installCommand: string | null;
+  dependencyInstallRequired: boolean;
   appCommand: string | null;
   appCommandSource: string;
+  backendCommand: string | null;
+  frontendCommand: string | null;
+  workerCommand: string | null;
+  commandScope: string;
+  incompleteAppCommand: boolean;
+  multiAppCommand: boolean;
   port: number;
   portEvidence: string;
+  healthCandidates: string[];
   services: ServiceNeed[];
   requiredEnv: string[];
   envWithoutSafeDefault: string[];
-  engines: { node?: string };
+  engines: { node?: string; npm?: string; pnpm?: string; yarn?: string; bun?: string };
   workspaces: WorkspaceCandidate[];
   confidence: number;
 }
@@ -73,6 +89,7 @@ export interface RunPlan {
   provider: "docker" | "local";
   steps: PlanStep[];
   healthUrl: string;
+  healthCandidates: string[];
   generatedFiles: { path: string; purpose: string }[];
 }
 
@@ -106,6 +123,7 @@ export interface Attestation {
     booted: boolean;
     healthVerified: boolean;
     healthObservation: string | null;
+    observedHealthCandidates: string[];
     failureClass: FailureClass | null;
     failureEvidence: string | null;
     explanation: string;

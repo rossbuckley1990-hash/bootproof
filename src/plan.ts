@@ -50,17 +50,21 @@ export function buildPlan(inf: Inference, provider: "docker" | "local"): RunPlan
     steps.push({ id: "services", kind: "service", command: "docker compose -f docker-compose.bootproof.yml up -d", description: `start ${inf.services.map(s => s.kind).join(", ")} in containers`, required: true });
   }
   if (inf.installCommand) {
-    steps.push({ id: "install", kind: "install", command: inf.installCommand, description: "install dependencies", required: true });
+    steps.push({ id: "install", kind: "install", command: inf.installCommand, description: "install dependencies", required: inf.dependencyInstallRequired });
   }
   if (inf.appCommand) {
     steps.push({ id: "start-app", kind: "start-app", command: inf.appCommand, description: `start app (${inf.appCommandSource})`, required: true });
   }
-  const healthUrl = `http://localhost:${inf.port}/`;
-  steps.push({ id: "health", kind: "health", description: `poll ${healthUrl} for an HTTP response`, required: true });
+  const healthCandidates = [...inf.healthCandidates];
+  const healthUrl = healthCandidates[0] ?? "";
+  if (inf.isApplication && healthUrl) {
+    steps.push({ id: "health", kind: "health", description: `poll ${healthUrl} for an HTTP response`, required: true });
+  }
   return {
     provider,
     steps,
     healthUrl,
+    healthCandidates,
     generatedFiles: [
       ...(composeFileFor(inf) ? [{ path: "docker-compose.bootproof.yml", purpose: "service containers" }] : []),
       ...(envExampleFor(inf) ? [{ path: ".env.bootproof.example", purpose: "suggested local env values (never auto-applied)" }] : []),

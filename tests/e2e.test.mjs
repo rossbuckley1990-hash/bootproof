@@ -7,8 +7,8 @@ import os from "node:os";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
-const run = (args, allowFail = false) => {
-  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8" }), code: 0 }; }
+const run = (args, allowFail = false, env = {}) => {
+  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: { ...process.env, ...env } }), code: 0 }; }
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
@@ -143,6 +143,132 @@ test("machine interface: --ci rejects invalid providers before execution", () =>
   assert.equal(result.attestationPath, null);
   assert.match(result.explanation, /invalid --provider/);
   assert.ok(!fs.existsSync(path.join(repo, ".bootproof")), "invalid options must not start a run");
+});
+
+test("Superset-like app writes a signed python_flask_setup_required refusal", () => {
+  const repo = freshCopy("superset-like");
+  const { out, code } = run(["up", repo, "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /application: yes/);
+  assert.match(out, /python-backend, flask, react-frontend, docker-compose, celery/);
+  assert.match(out, /backend command: flask run -p 8088/);
+  assert.match(out, /NOT VERIFIED — python_flask_setup_required/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "python_flask_setup_required");
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.deepEqual(att.observed, []);
+  assert.deepEqual(att.plan.generatedFiles, [], "refusal must not claim ungenerated scaffolding");
+  assert.doesNotMatch(JSON.stringify(att.plan), /docker-compose\.bootproof\.yml/, "refusal plan must not reference ungenerated scaffolding");
+  assert.ok(!fs.existsSync(path.join(repo, "docker-compose.bootproof.yml")));
+  assert.ok(att.signature);
+});
+
+test("Grafana-like hybrid fails closed when dependency installation is skipped", () => {
+  const repo = freshCopy("grafana-like");
+  const { out, code } = run(["up", repo, "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /go-backend, node-frontend, react/);
+  assert.match(out, /frontend\/dev pipeline only/);
+  assert.match(out, /NOT VERIFIED — dependency_install_skipped/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "dependency_install_skipped");
+  assert.equal(att.result.booted, false);
+  assert.equal(att.observed[0].ok, false);
+  assert.match(att.observed[0].observation, /skipped/);
+  assert.ok(att.plan.healthCandidates.includes("http://localhost:3000/api/health"));
+});
+
+test("package manager version mismatch is signed before install runs", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-pnpm-version-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "pnpm-version-fixture",
+    private: true,
+    packageManager: "pnpm@10.24.0",
+    scripts: { dev: "node server.js" },
+    devDependencies: { example: "1.0.0" },
+  }));
+  fs.writeFileSync(path.join(repo, "server.js"), "throw new Error('must not start');");
+  const bin = path.join(repo, "bin");
+  fs.mkdirSync(bin);
+  const fakePnpm = path.join(bin, "pnpm");
+  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 9.15.4; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
+  fs.chmodSync(fakePnpm, 0o755);
+
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--ci"],
+    true,
+    { PATH: `${bin}:${process.env.PATH}` },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — package_manager_version_mismatch/);
+  assert.doesNotMatch(out, /install-must-not-run/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "package_manager_version_mismatch");
+  assert.match(att.result.failureEvidence, /expected version: 10\.24\.0/);
+  assert.match(att.result.failureEvidence, /Got: 9\.15\.4/);
+  assert.equal(att.observed[0].command, "pnpm --version");
+});
+
+test("matching package manager does not make a parallel monorepo health target unambiguous", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-parallel-up-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "parallel-root",
+    private: true,
+    packageManager: "pnpm@10.24.0",
+    workspaces: ["apps/*"],
+    scripts: { dev: "turbo run dev --parallel" },
+    devDependencies: { turbo: "2.0.0" },
+  }));
+  for (const app of ["studio", "docs"]) {
+    fs.mkdirSync(path.join(repo, "apps", app), { recursive: true });
+    fs.writeFileSync(path.join(repo, "apps", app, "package.json"), JSON.stringify({
+      name: app,
+      private: true,
+      scripts: { dev: "next dev" },
+      dependencies: { next: "15.0.0" },
+    }));
+  }
+  const bin = path.join(repo, "bin");
+  fs.mkdirSync(bin);
+  const fakePnpm = path.join(bin, "pnpm");
+  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 10.24.0; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
+  fs.chmodSync(fakePnpm, 0o755);
+
+  const { out, code } = run(
+    ["up", repo, "--install", "--ci"],
+    true,
+    { PATH: `${bin}:${process.env.PATH}` },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — workspace_ambiguous/);
+  assert.match(out, /multiple workspaces in parallel/);
+  assert.doesNotMatch(out, /install-must-not-run/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "workspace_ambiguous");
+  assert.deepEqual(att.observed, []);
+});
+
+test("health URLs discovered from app logs are polled and preserved in signed proof", () => {
+  const repo = freshCopy("hello-app");
+  const actualPort = 7100 + Math.floor(Math.random() * 500);
+  const inferredPort = actualPort + 700;
+  fs.writeFileSync(path.join(repo, "server.js"), `
+const http = require("http");
+const port = ${actualPort};
+console.log("Local: http://127.0.0.1:" + port + "/ready");
+http.createServer((_req, res) => { res.statusCode = 200; res.end("ok"); }).listen(port);
+`);
+  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(inferredPort), "--timeout", "10000"], true);
+  assert.equal(code, 0);
+  assert.match(out, new RegExp(`observed HTTP 200 at http://127\\.0\\.0\\.1:${actualPort}/ready`));
+  const attestation = path.join(repo, ".bootproof", "attestation.json");
+  const att = JSON.parse(fs.readFileSync(attestation, "utf8"));
+  assert.deepEqual(att.result.observedHealthCandidates, [`http://127.0.0.1:${actualPort}/ready`]);
+  assert.ok(att.plan.healthCandidates.includes(`http://127.0.0.1:${actualPort}/ready`));
+  const explained = run(["explain", attestation]);
+  assert.match(explained.out, /Observed health candidates:/);
+  assert.match(explained.out, new RegExp(`127\\.0\\.0\\.1:${actualPort}/ready`));
 });
 
 test("honesty: failed boot writes failed attestation with classified evidence", () => {

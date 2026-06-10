@@ -1,0 +1,7 @@
+[project]
+name = "superset-like"
+dependencies = [
+  "Flask>=3",
+  "celery>=5",
+  "redis>=5"
+]
