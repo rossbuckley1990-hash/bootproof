@@ -4,9 +4,29 @@
 
 **Human diagnosis. Machine proof. One engine.**
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/rossbuckley1990-hash/bootproof/main/assets/bootproof_viral_demo.gif" alt="BootProof demo" width="900">
-</p>
+```text
+ bootproof up https://github.com/dubinc/dub
+
+Remote source: https://github.com/dubinc/dub.git
+Clone retained at: .bootproof/remotes/github.com/dubinc/dub-*/repo
+
+Inference (evidence-based)
+  application: yes
+  package manager: pnpm.15.9
+  selected command: pnpm dev
+
+✗ NOT VERIFIED — remote_code_execution_blocked
+Why BootProof refused: remote repositories are untrusted code and require explicit consent.
+
+ bootproof up . --provider local --unsafe-local --install
+
+✓ install: dependencies installed
+✓ start-app: app process started and was supervised
+✓ health: observed HTTP 200 at http://localhost:3333
+
+✓ BOOTED — HTTP 200 at http://localhost:3333
+Evidence: .bootproof/attestation.json
+```
 
 BootProof inspects a local repository, builds an evidence-based run plan, executes only what it can justify, observes HTTP health, and writes a signed attestation for success or failure.
 
