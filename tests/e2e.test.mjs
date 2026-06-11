@@ -1129,9 +1129,13 @@ test("package manager version mismatch is signed before install runs", () => {
   assert.equal(att.observed[0].command, "pnpm --version");
 });
 
-test("missing environment failures name extracted secrets without inventing values", () => {
+test("missing environment failures name extracted secrets without inventing values", async () => {
   const repo = freshCopy("missing-env-failure");
-  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--timeout", "1000", "--ci"], true);
+  const port = await getFreePort();
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--ci"],
+    true,
+  );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — missing_env_var/);
   assert.match(out, /Missing: API_SECRET — see \.env\.bootproof\.example; bootproof will not invent values\./);
