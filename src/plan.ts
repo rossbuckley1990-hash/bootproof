@@ -10,7 +10,12 @@ const SERVICE_IMAGES: Record<string, { image: string; port: number; env: Record<
 };
 
 export const REPAIRED_GENERATED_COMPOSE_MARKER = "# BootProof verified repair: remap-conflicting-service-port";
-export const REPO_COMPOSE_OVERRIDE = "docker-compose.bootproof.override.yml";
+
+export function repoComposeRepairFile(repoComposeFile: string): string {
+  const directory = path.posix.dirname(repoComposeFile.replace(/\\/g, "/"));
+  const file = "docker-compose.bootproof.override.yml";
+  return directory === "." ? file : path.posix.join(directory, file);
+}
 
 export function composeFileFor(inf: Inference): string | null {
   if (inf.repoComposeFile) return null;
@@ -60,10 +65,17 @@ export function buildPlan(inf: Inference, provider: "docker" | "local"): RunPlan
     Boolean(inf.repoComposeFile) &&
     inf.composeHealthCandidates.length > 0;
   if (provider === "docker" && inf.repoComposeFile) {
-    const override = fs.existsSync(path.join(inf.repoPath, REPO_COMPOSE_OVERRIDE))
-      ? ` -f ${REPO_COMPOSE_OVERRIDE}`
-      : "";
-    steps.push({ id: "services", kind: "service", command: `docker compose -f ${inf.repoComposeFile}${override} up -d`, description: "defer to the repository's own compose file", required: true });
+    const repairedCompose = repoComposeRepairFile(inf.repoComposeFile);
+    const usesRepairedCopy = fs.existsSync(path.join(inf.repoPath, repairedCompose));
+    steps.push({
+      id: "services",
+      kind: "service",
+      command: `docker compose -f ${usesRepairedCopy ? repairedCompose : inf.repoComposeFile} up -d`,
+      description: usesRepairedCopy
+        ? "use the BootProof repaired copy of the repository Compose file"
+        : "defer to the repository's own compose file",
+      required: true,
+    });
   } else if (inf.services.length && provider === "docker") {
     steps.push({ id: "services", kind: "service", command: "docker compose -f docker-compose.bootproof.yml up -d", description: `start ${inf.services.map(s => s.kind).join(", ")} in containers`, required: true });
   }

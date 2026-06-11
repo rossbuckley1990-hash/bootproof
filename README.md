@@ -78,6 +78,20 @@ bootproof fix . --json
 
 It emits one `bootproof/repair-result/v1` object and exits `0` only when a verified receipt exists.
 
+Public GitHub repositories use the same retained managed workspace and execution gate as `up`:
+
+```bash
+bootproof fix https://github.com/user/repo --provider local --unsafe-local
+```
+
+`fix` never applies its patch. To explicitly apply a signature-valid file repair to a local working tree:
+
+```bash
+bootproof apply-repair .
+```
+
+Application checks the receipt signature, allowed file scope, signed content hashes, and exact current preimages before writing. Environment-only and plan-only receipts have no file change to apply.
+
 See [docs/REPAIR_RECEIPT.md](docs/REPAIR_RECEIPT.md).
 
 ## What It Tells Humans
@@ -193,6 +207,7 @@ BootProof currently provides:
 - strict JSON and fail-closed CI output
 - redacted registry-entry export
 - deterministic sandboxed repairs with signed before/after receipts for the registered v0.3 classes
+- explicit repair application with signature, scope, and stale-preimage checks
 
 Detection is broader than orchestration. For example:
 
@@ -311,6 +326,7 @@ BootProof is early alpha.
 Near-term work includes:
 
 - additional remote source providers beyond public HTTPS GitHub repositories
+- broader deterministic remediation coverage
 - stronger multi-service orchestration
 - broader Python, Go, Ruby, and Make execution support
 - CI/OIDC-backed signing

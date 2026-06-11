@@ -44,10 +44,11 @@ async function getFreePort() {
   });
 }
 
-function fakeGithubRemote(fixture) {
+function fakeGithubRemote(fixture, setup) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
   const source = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-source-"));
   fs.cpSync(path.join(FIX, fixture), source, { recursive: true });
+  setup?.(source);
   const git = (...args) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
   git("init", "-q");
   git("config", "user.name", "BootProof Test");
@@ -59,6 +60,8 @@ function fakeGithubRemote(fixture) {
   const canonicalUrl = "https://github.com/example/hello-app.git";
   return {
     cwd,
+    source,
+    url: canonicalUrl,
     env: {
       GIT_ALLOW_PROTOCOL: "file",
       GIT_CONFIG_COUNT: "1",
@@ -66,6 +69,71 @@ function fakeGithubRemote(fixture) {
       GIT_CONFIG_VALUE_0: canonicalUrl,
     },
   };
+}
+
+function writeNodeTool(bin, name, source) {
+  const script = path.join(bin, `${name}-tool.cjs`);
+  fs.writeFileSync(script, source);
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(bin, `${name}.cmd`), `@echo off\r\nnode "%~dp0${name}-tool.cjs" %*\r\n`);
+    return;
+  }
+  const executable = path.join(bin, name);
+  fs.writeFileSync(executable, `#!/bin/sh\nexec node "$(dirname "$0")/${name}-tool.cjs" "$@"\n`);
+  fs.chmodSync(executable, 0o755);
+}
+
+function writePackageRepairTools(bin) {
+  fs.mkdirSync(bin, { recursive: true });
+  writeNodeTool(bin, "corepack", `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args.join(" ") !== "prepare pnpm@10.24.0 --activate" || !process.env.COREPACK_HOME) process.exit(2);
+fs.mkdirSync(process.env.COREPACK_HOME, { recursive: true });
+fs.writeFileSync(path.join(process.env.COREPACK_HOME, "pnpm-10.24.0"), "activated\\n");
+`);
+  writeNodeTool(bin, "pnpm", `
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const marker = process.env.COREPACK_HOME && path.join(process.env.COREPACK_HOME, "pnpm-10.24.0");
+const active = Boolean(marker && fs.existsSync(marker));
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log(active ? "10.24.0" : "9.15.4"); process.exit(0); }
+if (args[0] === "install") {
+  if (active) process.exit(0);
+  console.error("ERR_PNPM_UNSUPPORTED_ENGINE Unsupported environment (bad pnpm and/or Node.js version)\\nExpected version: 10.24\\nGot: 9.15.4");
+  process.exit(1);
+}
+if (args[0] === "dev") {
+  const child = spawnSync(process.execPath, ["server.js"], { stdio: "inherit", env: process.env });
+  process.exit(child.status ?? 1);
+}
+process.exit(2);
+`);
+}
+
+function writePrismaRepairTools(bin) {
+  fs.mkdirSync(bin, { recursive: true });
+  writeNodeTool(bin, "npm", `
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "install") process.exit(0);
+if (args[0] === "run" && args[1] === "start") {
+  const child = spawnSync(process.execPath, ["server.js"], { stdio: "inherit", env: process.env });
+  process.exit(child.status ?? 1);
+}
+process.exit(2);
+`);
+  writeNodeTool(bin, "npx", `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args.join(" ") !== "prisma migrate deploy") process.exit(2);
+fs.mkdirSync(path.join(process.cwd(), ".bootproof"), { recursive: true });
+fs.writeFileSync(path.join(process.cwd(), ".bootproof", "prisma-ready"), "migrated\\n");
+`);
 }
 
 function writeFakePnpm(bin, version) {
@@ -342,14 +410,22 @@ test("remote mode executes only after --provider local --unsafe-local and requir
 
 test("remote dry runs refuse before cloning because dry runs write nothing", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-dry-"));
-  const { out, code } = run(
+  const upResult = run(
     ["up", "https://github.com/example/hello-app", "--provider", "local", "--unsafe-local", "--dry-run"],
     true,
     {},
     cwd,
   );
-  assert.equal(code, 1);
-  assert.match(out, /dry runs promise to write nothing/i);
+  assert.equal(upResult.code, 1);
+  assert.match(upResult.out, /dry runs promise to write nothing/i);
+  const fixResult = run(
+    ["fix", "https://github.com/example/hello-app", "--provider", "local", "--unsafe-local", "--dry-run", "--json"],
+    true,
+    {},
+    cwd,
+  );
+  assert.equal(fixResult.code, 1);
+  assert.match(JSON.parse(fixResult.out).explanation, /dry runs promise to write nothing/i);
   assert.equal(fs.existsSync(path.join(cwd, ".bootproof")), false);
 });
 
@@ -608,7 +684,12 @@ test("repair: conflicting repository Compose port produces signed verified recei
     assert.equal(receipt.repair.kind, "plan-step");
     assert.deepEqual(receipt.repair.filesChanged, ["docker-compose.bootproof.override.yml"]);
     assert.equal(receipt.repair.diff, null);
-    assert.match(receipt.repair.planDelta, /ports: !override/);
+    assert.equal(receipt.repair.fileChanges.length, 1);
+    assert.equal(receipt.repair.fileChanges[0].beforeSha256, null);
+    assert.match(receipt.repair.fileChanges[0].afterContent, /complete repaired copy/);
+    assert.match(receipt.repair.fileChanges[0].afterContent, /build:/);
+    assert.doesNotMatch(receipt.repair.fileChanges[0].afterContent, /!override/);
+    assert.match(receipt.repair.planDelta, /complete repaired copy/);
     assert.equal(receipt.verification.before.booted, false);
     assert.equal(receipt.verification.before.failureClass, "service_port_allocated");
     assert.equal(receipt.verification.after.booted, true);
@@ -629,9 +710,36 @@ test("repair: conflicting repository Compose port produces signed verified recei
 
     const patch = fs.readFileSync(path.join(repo, result.patchPath), "utf8");
     assert.match(patch, /docker-compose\.bootproof\.override\.yml/);
-    assert.match(patch, /ports: !override/);
+    assert.match(patch, /complete repaired copy/);
+    assert.doesNotMatch(patch, /!override/);
     assert.match(run(["verify", receiptPath]).out, /repair receipt signature valid/);
     assert.match(run(["explain", receiptPath]).out, /Before: NOT VERIFIED — service_port_allocated/);
+
+    const applyDryRun = run(["apply-repair", repo, "--dry-run", "--json"], true);
+    assert.equal(applyDryRun.code, 1);
+    assert.match(JSON.parse(applyDryRun.out).explanation, /no repair files were applied/i);
+    assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.override.yml")), false);
+
+    const applied = run(["apply-repair", repo, "--json"], true);
+    assert.equal(applied.code, 0, applied.out);
+    const applyResult = JSON.parse(applied.out);
+    assert.equal(applyResult.schema, "bootproof/repair-apply-result/v1");
+    assert.equal(applyResult.applied, true);
+    assert.deepEqual(applyResult.filesChanged, ["docker-compose.bootproof.override.yml"]);
+    const appliedCompose = fs.readFileSync(path.join(repo, "docker-compose.bootproof.override.yml"), "utf8");
+    assert.match(appliedCompose, /complete repaired copy/);
+    assert.doesNotMatch(appliedCompose, /!override/);
+    for (const [name, contents] of Object.entries({
+      ".env": "REAL_SECRET=preserve\n",
+      ".env.local": "LOCAL_SECRET=preserve\n",
+      ".env.development": "DEV_SECRET=preserve\n",
+      ".env.production": "PROD_SECRET=preserve\n",
+    })) {
+      assert.equal(fs.readFileSync(path.join(repo, name), "utf8"), contents);
+    }
+    const stale = run(["apply-repair", repo, "--json"], true);
+    assert.equal(stale.code, 1);
+    assert.match(JSON.parse(stale.out).explanation, /preimage mismatch/);
 
     receipt.verification.after.booted = false;
     fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2));
@@ -653,6 +761,97 @@ test("repair: local sandbox execution still requires explicit unsafe acknowledge
   assert.match(result.explanation, /--unsafe-local/);
   assert.equal(hashWorkingTree(repo), beforeHash);
   assert.equal(fs.existsSync(path.join(repo, ".bootproof")), false, "refused repair must not write evidence for an execution that never ran");
+});
+
+test("repair: declared package manager activation is verified end to end", async () => {
+  const repo = freshCopy("pnpm-version-mismatch");
+  const bin = path.join(repo, "bin-tools");
+  writePackageRepairTools(bin);
+  const port = await getFreePort();
+  const beforeHash = hashWorkingTree(repo);
+
+  const { out, code } = run(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--json"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 0, out);
+  const result = JSON.parse(out);
+  assert.equal(result.repaired, true);
+  assert.equal(result.failureClass, "package_manager_version_mismatch");
+  assert.equal(result.repairId, "activate-declared-package-manager");
+  assert.equal(result.patchPath, null);
+  assert.equal(hashWorkingTree(repo), beforeHash);
+
+  const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
+  assert.equal(receipt.repair.kind, "environment");
+  assert.equal(receipt.repair.envDelta, "corepack prepare pnpm@10.24.0 --activate");
+  assert.deepEqual(receipt.repair.fileChanges, []);
+  assert.equal(receipt.verification.after.booted, true);
+  assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
+  assert.match(run(["verify", path.join(repo, result.receiptPath)]).out, /repair receipt signature valid/);
+});
+
+test("repair: Prisma migration preparation is verified end to end", async () => {
+  const repo = freshCopy("repair-prisma-migrations");
+  const bin = path.join(repo, "bin-tools");
+  writePrismaRepairTools(bin);
+  const port = await getFreePort();
+  const beforeHash = hashWorkingTree(repo);
+
+  const { out, code } = run(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--json"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 0, out);
+  const result = JSON.parse(out);
+  assert.equal(result.repaired, true);
+  assert.equal(result.failureClass, "migrations_missing");
+  assert.equal(result.repairId, "deploy-prisma-migrations");
+  assert.equal(result.patchPath, null);
+  assert.equal(hashWorkingTree(repo), beforeHash);
+
+  const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
+  assert.equal(receipt.repair.kind, "plan-step");
+  assert.match(receipt.repair.planDelta, /npx prisma migrate deploy/);
+  assert.deepEqual(receipt.repair.fileChanges, []);
+  assert.equal(receipt.verification.after.booted, true);
+  assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
+});
+
+test("repair: public GitHub URL runs only through the retained managed clone and current local safety gate", async () => {
+  const remote = fakeGithubRemote("pnpm-version-mismatch", source => {
+    writePackageRepairTools(path.join(source, "bin-tools"));
+    fs.writeFileSync(path.join(source, ".gitignore"), ".bootproof/\n");
+  });
+  const port = await getFreePort();
+  const sourceHash = hashWorkingTree(remote.source);
+  const bin = path.join(remote.source, "bin-tools");
+
+  const refused = run(
+    ["fix", remote.url, "--provider", "local", "--port", String(port), "--json"],
+    true,
+    { ...remote.env, PATH: pathWith(bin) },
+    remote.cwd,
+  );
+  assert.equal(refused.code, 1);
+  assert.match(JSON.parse(refused.out).explanation, /--unsafe-local/);
+
+  const repaired = run(
+    ["fix", remote.url, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--json"],
+    true,
+    { ...remote.env, PATH: pathWith(bin) },
+    remote.cwd,
+  );
+  assert.equal(repaired.code, 0, repaired.out);
+  const result = JSON.parse(repaired.out);
+  assert.equal(result.repaired, true);
+  assert.match(result.receiptPath, /^\.bootproof\/remotes\/github\.com\/example\/hello-app-[^/]+\/repo\/\.bootproof\/repair-receipt\.json$/);
+  assert.equal(fs.existsSync(path.join(remote.cwd, result.receiptPath)), true);
+  assert.equal(fs.existsSync(path.join(remote.source, ".bootproof")), false);
+  assert.equal(hashWorkingTree(remote.source), sourceHash);
+  assert.match(run(["verify", path.join(remote.cwd, result.receiptPath)]).out, /repair receipt signature valid/);
 });
 
 test("repair: dry run executes nothing, writes nothing, and proves nothing", () => {

@@ -159,7 +159,8 @@ try {
 
   const help = run(binary, ["--help"], { cwd: installDir });
   assert.match(help.stdout, /Human diagnosis\. Machine proof\. One engine\./);
-  assert.match(help.stdout, /bootproof fix <path>/);
+  assert.match(help.stdout, /bootproof fix <path\|github-url>/);
+  assert.match(help.stdout, /bootproof apply-repair <path>/);
 
   const refusalTarget = copyFixture("early-refusal-attestation");
   const refusal = run(binary, ["up", refusalTarget, "--ci", "--json"], {

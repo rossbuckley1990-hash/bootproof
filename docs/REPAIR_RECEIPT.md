@@ -7,7 +7,7 @@ No receipt is emitted unless both statements are signed evidence:
 - before: the sandbox run failed with a classified failure
 - after: the remediated sandbox run observed successful HTTP health
 
-The original repository is not edited. A human may review and apply the patch written under `.bootproof/`.
+`bootproof fix` does not edit the original repository. A human may review the patch written under `.bootproof/` and explicitly invoke `bootproof apply-repair`.
 
 ## Schema
 
@@ -41,6 +41,15 @@ bootproof/repair-receipt/v1
     "filesChanged": [
       "docker-compose.bootproof.override.yml"
     ],
+    "fileChanges": [
+      {
+        "path": "docker-compose.bootproof.override.yml",
+        "beforeSha256": null,
+        "afterSha256": "...",
+        "beforeContent": null,
+        "afterContent": "..."
+      }
+    ],
     "planDelta": "...",
     "envDelta": null
   },
@@ -70,6 +79,8 @@ The receipt uses the same Ed25519 canonical-body pattern as attestations: `signe
 
 `beforeAttestationSha256` and both verification hashes are SHA-256 hashes of the corresponding attestation JSON objects.
 
+`fileChanges` is a signed application manifest. It contains only allowlisted boot-plumbing files and binds the expected preimage and verified after-content to SHA-256 hashes.
+
 ## Result Interface
 
 ```bash
@@ -92,11 +103,37 @@ Local sandbox execution still requires:
 bootproof fix . --provider local --unsafe-local
 ```
 
+Remote repair accepts credential-free public HTTPS GitHub repositories and keeps all evidence in the retained clone:
+
+```bash
+bootproof fix https://github.com/user/repo --provider local --unsafe-local
+```
+
+Cloning is not execution consent. The existing local execution acknowledgement remains mandatory.
+
+## Explicit Application
+
+Repair generation and repair application are separate operations:
+
+```bash
+bootproof apply-repair .
+```
+
+Application exits `0` only after all signed file changes are written and re-hashed. It writes nothing when:
+
+- the receipt signature is invalid
+- a path is outside the repair allowlist
+- signed content hashes are inconsistent
+- the current file preimage differs from the verified preimage
+- the receipt is environment-only or plan-only
+
+`bootproof apply-repair . --dry-run` writes nothing. No repair is ever auto-applied by `bootproof fix`.
+
 ## v0.3 Registry
 
 | Failure class | Deterministic remediation |
 |---|---|
-| `service_port_allocated` | Remap a BootProof-generated Compose host port, or create a BootProof Compose override without editing the repository's Compose file. |
+| `service_port_allocated` | Remap a BootProof-generated Compose host port, or create a complete BootProof-owned repaired Compose copy beside the repository file without editing it. |
 | `package_manager_version_mismatch` | Run the exact declared `corepack prepare <manager>@<version> --activate` command in the sandbox. |
 | `migrations_missing` | For Prisma evidence only, insert `npx prisma migrate deploy`, or `npx prisma db push --skip-generate` when no migrations directory exists. |
 
@@ -113,7 +150,7 @@ Successful repair output is kept in the original repository's BootProof output d
 .bootproof/repair-<id>.patch
 ```
 
-The patch is present only when the repair produced a repository or override-file change. Plan-only and environment-only repairs may have no patch.
+The patch is present only when the repair produced a repository or repaired-Compose file change. Plan-only and environment-only repairs may have no patch.
 
 The after attestation is retained so its signature and receipt hash can be inspected independently. Sandbox paths in that attestation describe where verification actually occurred.
 
@@ -128,3 +165,5 @@ Repair file changes are hard-limited to:
 - Compose override files created by BootProof
 
 Application source is outside repair scope. A remediation that attempts to edit it throws an honesty-contract violation.
+
+Repository Compose repair files are complete copies invoked directly. They do not rely on the version-specific `!override` merge tag, and they are written beside the source Compose file so relative build contexts keep the same base directory.

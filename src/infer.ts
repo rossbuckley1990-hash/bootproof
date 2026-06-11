@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
+import { repoComposeRepairFile } from "./plan.js";
 import type {
   ComposeApplicationService,
   Inference,
@@ -111,11 +112,17 @@ function detectComposeApplications(repo: string, composeFile: string | null): Co
   }
 }
 
-function applyBootProofComposeOverride(repo: string, applications: ComposeApplicationService[]): ComposeApplicationService[] {
-  const overridePath = path.join(repo, "docker-compose.bootproof.override.yml");
+function applyBootProofComposeOverride(
+  repo: string,
+  repoComposeFile: string | null,
+  applications: ComposeApplicationService[],
+): ComposeApplicationService[] {
+  if (!repoComposeFile) return applications;
+  const repairFile = repoComposeRepairFile(repoComposeFile);
+  const overridePath = path.join(repo, repairFile);
   if (!fs.existsSync(overridePath)) return applications;
   try {
-    const document = parse(readText(repo, "docker-compose.bootproof.override.yml").replace(/!override\b/g, "")) as {
+    const document = parse(readText(repo, repairFile)) as {
       services?: Record<string, Record<string, any>>;
     };
     return applications.map(application => {
@@ -454,6 +461,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const repoComposeFile = detectRepoComposeFile(repo);
   const composeApplicationServices = applyBootProofComposeOverride(
     repo,
+    repoComposeFile,
     detectComposeApplications(repo, repoComposeFile),
   );
   const sourceComposeApplications = composeApplicationServices.filter(service => service.source === "build");

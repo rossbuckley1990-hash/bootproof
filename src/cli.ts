@@ -10,7 +10,14 @@ import { buildRegistryEntry, verifyRegistryEntry, writeRegistryEntry, registryEn
 import { normalizeDockerBindPath, detectHostPlatform } from "./platform.js";
 import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
 import { cloneGithubRemote, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
-import { repairRepo, verifyRepairReceipt, type RepairReceipt, type RepairResult } from "./repair.js";
+import {
+  applyVerifiedRepair,
+  repairRepo,
+  verifyRepairReceipt,
+  type RepairApplyResult,
+  type RepairReceipt,
+  type RepairResult,
+} from "./repair.js";
 import type { Attestation } from "./types.js";
 
 let GREEN = "\x1b[32m", YELLOW = "\x1b[33m", RED = "\x1b[31m", DIM = "\x1b[2m", BOLD = "\x1b[1m", RESET = "\x1b[0m";
@@ -21,7 +28,7 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "fix", "analyze", "plan", "verify", "explain", "attest", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "help", "version", "--help", "-h", "--version"];
 void normalizeDockerBindPath; void detectHostPlatform; // exported surface, used by docker provider work in progress
 
 if (process.env.NO_COLOR !== undefined) disableColor();
@@ -48,7 +55,8 @@ Usage:
                                                             inspect a repo, show evidence-based inference
   bootproof plan <path|github-url> [--workspace dir]        show the run plan and files that WOULD be generated
   bootproof up <path|github-url> [options]                  execute the plan, verify localhost, write signed proof
-  bootproof fix <path> [options]                            test a deterministic repair in a sandbox
+  bootproof fix <path|github-url> [options]                 test a deterministic repair in a sandbox
+  bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
   bootproof explain <proof.json>                            explain an attestation or repair receipt
   bootproof attest export <path>                        redacted, re-signed shareable registry entry (never uploads)
@@ -69,6 +77,7 @@ Options for up:
 Options for fix:
   --provider docker|local   execution provider (default docker)
   --unsafe-local            required acknowledgement for local sandbox execution
+  --port <n>                override inferred application port
   --timeout <ms>            before/after health timeout (default 60000)
   --dry-run                 execute nothing, write nothing, produce no repair proof
   --json                    one bootproof/repair-result/v1 object on stdout
@@ -166,6 +175,29 @@ function printRepairResult(result: RepairResult): void {
   console.log(result.explanation);
 }
 
+function printRepairApplyResult(result: RepairApplyResult): void {
+  if (result.applied) {
+    ok(`${BOLD}APPLIED VERIFIED REPAIR${RESET}`);
+    console.log(result.explanation);
+    console.log(`Receipt: ${result.receiptPath}`);
+    return;
+  }
+  bad(`${BOLD}REPAIR NOT APPLIED${RESET}`);
+  console.log(result.explanation);
+}
+
+function rebaseRemoteRepairPaths(result: RepairResult, repo: string): RepairResult {
+  const rebase = (value: string | null) => value
+    ? portableRelative(process.cwd(), path.join(repo, value))
+    : null;
+  return {
+    ...result,
+    receiptPath: rebase(result.receiptPath),
+    patchPath: rebase(result.patchPath),
+    afterAttestationPath: rebase(result.afterAttestationPath),
+  };
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return help();
@@ -182,7 +214,7 @@ async function main() {
   let target = path.resolve(targetInput);
   let remote: RemoteClone | null = null;
   let remoteSource: string | null = null;
-  if (["analyze", "plan", "up"].includes(cmd) && isRemoteTarget(targetInput)) {
+  if (["analyze", "plan", "up", "fix"].includes(cmd) && isRemoteTarget(targetInput)) {
     if (flags["dry-run"]) {
       const explanation = "Remote dry runs are refused because cloning would write files, while BootProof dry runs promise to write nothing.";
       if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
@@ -206,7 +238,7 @@ async function main() {
       return;
     }
   }
-  if (!remote && ["analyze", "plan", "up"].includes(cmd)) {
+  if (!remote && ["analyze", "plan", "up", "fix"].includes(cmd)) {
     remoteSource = managedRemoteSource(target);
     if (remoteSource && !flags.json) {
       console.log(`${DIM}Managed remote source: ${remoteSource}${RESET}`);
@@ -234,23 +266,44 @@ async function main() {
     return;
   }
 
-  if (cmd === "fix") {
+  if (cmd === "apply-repair") {
     if (isRemoteTarget(targetInput)) {
-      const result: RepairResult = {
-        schema: "bootproof/repair-result/v1",
-        repaired: false,
-        failureClass: null,
-        repairId: null,
-        receiptPath: null,
-        patchPath: null,
-        afterAttestationPath: null,
-        explanation: "bootproof fix accepts a local repository path; remote repair execution is not implemented",
+      const result: RepairApplyResult = {
+        schema: "bootproof/repair-apply-result/v1",
+        applied: false,
+        receiptPath: String(flags.receipt ?? ".bootproof/repair-receipt.json"),
+        filesChanged: [],
+        explanation: "apply-repair requires a local working tree; use the retained managed clone path for a remote repair",
       };
       if (flags.json) console.log(JSON.stringify(result));
-      else printRepairResult(result);
+      else printRepairApplyResult(result);
       process.exitCode = 1;
       return;
     }
+    if (flags["dry-run"]) {
+      const result: RepairApplyResult = {
+        schema: "bootproof/repair-apply-result/v1",
+        applied: false,
+        receiptPath: String(flags.receipt ?? ".bootproof/repair-receipt.json"),
+        filesChanged: [],
+        explanation: "Dry run — no repair files were applied.",
+      };
+      if (flags.json) console.log(JSON.stringify(result));
+      else printRepairApplyResult(result);
+      process.exitCode = 1;
+      return;
+    }
+    const receipt = flags.receipt
+      ? path.resolve(String(flags.receipt))
+      : path.join(target, ".bootproof", "repair-receipt.json");
+    const result = applyVerifiedRepair(target, receipt);
+    if (flags.json) console.log(JSON.stringify(result));
+    else printRepairApplyResult(result);
+    process.exitCode = result.applied ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "fix") {
     if (flags["dry-run"]) {
       const result: RepairResult = {
         schema: "bootproof/repair-result/v1",
@@ -269,11 +322,14 @@ async function main() {
     }
     const provider = flags.provider;
     const timeoutMs = Number(flags.timeout ?? 60_000);
+    const port = flags.port === undefined ? undefined : Number(flags.port);
     const optionError =
       provider !== undefined && provider !== "docker" && provider !== "local"
         ? `invalid --provider value: ${String(provider)} (expected docker or local)`
         : !Number.isFinite(timeoutMs) || timeoutMs <= 0
           ? `invalid --timeout value: ${String(flags.timeout)} (expected a positive number)`
+          : port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)
+            ? `invalid --port value: ${String(flags.port)} (expected an integer from 1 to 65535)`
           : null;
     if (optionError) {
       const result: RepairResult = {
@@ -291,11 +347,14 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    const result = await repairRepo(target, {
+    const repairResult = await repairRepo(target, {
       provider: provider as "docker" | "local" | undefined,
       unsafeLocal: Boolean(flags["unsafe-local"]),
       timeoutMs,
+      port,
+      remoteSource: remoteSource ?? undefined,
     });
+    const result = remote ? rebaseRemoteRepairPaths(repairResult, target) : repairResult;
     if (flags.json) console.log(JSON.stringify(result));
     else printRepairResult(result);
     process.exitCode = result.repaired ? 0 : 1;
@@ -489,6 +548,15 @@ main().catch(err => {
       receiptPath: null,
       patchPath: null,
       afterAttestationPath: null,
+      explanation: String(err?.message ?? err),
+    };
+    console.log(JSON.stringify(result));
+  } else if (argv.includes("--json") && argv[0] === "apply-repair") {
+    const result: RepairApplyResult = {
+      schema: "bootproof/repair-apply-result/v1",
+      applied: false,
+      receiptPath: ".bootproof/repair-receipt.json",
+      filesChanged: [],
       explanation: String(err?.message ?? err),
     };
     console.log(JSON.stringify(result));

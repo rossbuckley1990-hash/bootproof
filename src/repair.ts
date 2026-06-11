@@ -3,9 +3,9 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import { minimalEnv, runToCompletion } from "./exec.js";
-import { REPAIRED_GENERATED_COMPOSE_MARKER, REPO_COMPOSE_OVERRIDE } from "./plan.js";
+import { REPAIRED_GENERATED_COMPOSE_MARKER, repoComposeRepairFile } from "./plan.js";
 import {
   attestationPath,
   buildAttestation,
@@ -34,6 +34,7 @@ export interface RepairReceipt {
     description: string;
     diff: string | null;
     filesChanged: string[];
+    fileChanges: RepairReceiptFileChange[];
     planDelta: string | null;
     envDelta: string | null;
   };
@@ -58,16 +59,34 @@ export interface RepairResult {
   explanation: string;
 }
 
+export interface RepairApplyResult {
+  schema: "bootproof/repair-apply-result/v1";
+  applied: boolean;
+  receiptPath: string;
+  filesChanged: string[];
+  explanation: string;
+}
+
 export interface RepairOptions {
   provider?: "docker" | "local";
   unsafeLocal: boolean;
   timeoutMs: number;
+  port?: number;
+  remoteSource?: string;
 }
 
 export interface RepairFileChange {
   path: string;
   before: string | null;
   after: string;
+}
+
+export interface RepairReceiptFileChange {
+  path: string;
+  beforeSha256: string | null;
+  afterSha256: string;
+  beforeContent: string | null;
+  afterContent: string;
 }
 
 interface AppliedRepair {
@@ -77,6 +96,7 @@ interface AppliedRepair {
   diff: string | null;
   patch: string | null;
   filesChanged: string[];
+  fileChanges: RepairFileChange[];
   planDelta: string | null;
   envDelta: string | null;
   environment?: Record<string, string>;
@@ -107,6 +127,19 @@ function normalizedRelative(file: string): string {
   return normalized.replace(/^\.\//, "");
 }
 
+export function assertRepairTargetPath(repoPath: string, file: string): void {
+  const repo = path.resolve(repoPath);
+  const relative = normalizedRelative(file);
+  let current = repo;
+  for (const segment of relative.split("/")) {
+    current = path.join(current, segment);
+    if (!fs.existsSync(current)) continue;
+    if (fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`honesty contract violation: repair target traverses symbolic link: ${relative}`);
+    }
+  }
+}
+
 function packageJsonOutsideAllowedKeys(value: string | null): unknown {
   if (value === null) return null;
   const parsed = JSON.parse(value);
@@ -124,7 +157,7 @@ export function assertRepairScope(changes: RepairFileChange[]): void {
       LOCKFILE.test(base) ||
       BOOTPROOF_FILE.test(file) ||
       ENV_EXAMPLE.test(base) ||
-      file === REPO_COMPOSE_OVERRIDE ||
+      base === "docker-compose.bootproof.override.yml" ||
       file === "compose.bootproof.override.yml";
     if (!allowed) {
       throw new Error(`honesty contract violation: repair attempted to edit application file ${file}`);
@@ -156,6 +189,10 @@ export function sha256Attestation(attestation: Attestation): string {
   return crypto.createHash("sha256").update(JSON.stringify(attestation)).digest("hex");
 }
 
+function sha256Text(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 function unifiedDiff(change: RepairFileChange): string {
   const file = normalizedRelative(change.path);
   const beforeLines = change.before === null ? [] : change.before.replace(/\n$/, "").split("\n");
@@ -174,6 +211,7 @@ function unifiedDiff(change: RepairFileChange): string {
 function writeChanges(repo: string, changes: RepairFileChange[]): string {
   assertRepairScope(changes);
   for (const change of changes) {
+    assertRepairTargetPath(repo, change.path);
     const target = path.join(repo, normalizedRelative(change.path));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, change.after);
@@ -246,13 +284,54 @@ function composeMapping(repo: string, composeFile: string, hostPort: number): {
   return null;
 }
 
-export function composePortOverride(service: string, hostPort: number, containerPort: number): string {
+function remapComposePortValue(
+  value: unknown,
+  occupiedPort: number,
+  replacementPort: number,
+  containerPort: number,
+): unknown {
+  if (typeof value === "object" && value !== null) {
+    const item = value as Record<string, unknown>;
+    if (Number(item.published) !== occupiedPort || Number(item.target) !== containerPort) return value;
+    return {
+      ...item,
+      published: typeof item.published === "string" ? String(replacementPort) : replacementPort,
+    };
+  }
+  if (typeof value !== "string") return value;
+  const protocol = value.includes("/") ? `/${value.split("/").at(-1)}` : "";
+  const withoutProtocol = value.split("/")[0];
+  const parts = withoutProtocol.split(":");
+  if (parts.length < 2 || Number(parts.at(-2)) !== occupiedPort || Number(parts.at(-1)) !== containerPort) return value;
+  parts[parts.length - 2] = String(replacementPort);
+  return `${parts.join(":")}${protocol}`;
+}
+
+export function composePortRepair(
+  source: string,
+  service: string,
+  occupiedPort: number,
+  replacementPort: number,
+  containerPort: number,
+): string {
+  const document = parse(source) as { services?: Record<string, { ports?: unknown[] }> };
+  const definition = document.services?.[service];
+  if (!definition || !Array.isArray(definition.ports)) {
+    throw new Error(`could not find service ${service} ports in repository Compose file`);
+  }
+  let changed = false;
+  definition.ports = definition.ports.map(value => {
+    const remapped = remapComposePortValue(value, occupiedPort, replacementPort, containerPort);
+    if (remapped !== value) changed = true;
+    return remapped;
+  });
+  if (!changed) {
+    throw new Error(`could not remap ${service} port ${occupiedPort}:${containerPort}`);
+  }
   return [
-    "# Generated by BootProof repair; apply this file instead of editing the repository Compose file.",
-    "services:",
-    `  ${service}:`,
-    "    ports: !override",
-    `      - "${hostPort}:${containerPort}"`,
+    "# Generated by BootProof repair from the repository Compose file.",
+    "# This complete repaired copy avoids version-specific Compose merge tags and leaves the source file untouched.",
+    stringify(document).trimEnd(),
     "",
   ].join("\n");
 }
@@ -268,18 +347,21 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
   const replacement = await getFreePort();
 
   if (repoCompose) {
-    const override = composePortOverride(mapping.service, replacement, mapping.containerPort);
-    const change: RepairFileChange = { path: REPO_COMPOSE_OVERRIDE, before: null, after: override };
+    const source = fs.readFileSync(path.join(context.sandbox, repoCompose), "utf8");
+    const repairedCompose = composePortRepair(source, mapping.service, occupied, replacement, mapping.containerPort);
+    const repairFile = repoComposeRepairFile(repoCompose);
+    const change: RepairFileChange = { path: repairFile, before: null, after: repairedCompose };
     const patch = writeChanges(context.sandbox, [change]);
-    const command = `docker compose -f ${repoCompose} -f ${REPO_COMPOSE_OVERRIDE} up -d`;
+    const command = `docker compose -f ${repairFile} up -d`;
     return {
       id: "remap-conflicting-service-port",
       kind: "plan-step",
       description: `Remap ${mapping.service} host port ${occupied} to free port ${replacement} without editing ${repoCompose}.`,
       diff: null,
       patch,
-      filesChanged: [REPO_COMPOSE_OVERRIDE],
-      planDelta: `Create ${REPO_COMPOSE_OVERRIDE} with:\n${override}\nUse service step: ${command}`,
+      filesChanged: [repairFile],
+      fileChanges: [change],
+      planDelta: `Create ${repairFile} as a complete repaired copy of ${repoCompose}. Use service step: ${command}`,
       envDelta: null,
     };
   }
@@ -303,6 +385,7 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
     diff,
     patch: diff,
     filesChanged: [composeFile],
+    fileChanges: [change],
     planDelta: null,
     envDelta: null,
   };
@@ -333,6 +416,7 @@ async function activatePackageManager(context: RepairContext): Promise<AppliedRe
     diff: null,
     patch: null,
     filesChanged: [],
+    fileChanges: [],
     planDelta: null,
     envDelta: command,
     environment,
@@ -369,6 +453,7 @@ async function deployPrismaMigrations(context: RepairContext): Promise<AppliedRe
     diff: null,
     patch: null,
     filesChanged: [],
+    fileChanges: [],
     planDelta: `Insert after dependency installation and before application start: ${command}`,
     envDelta: null,
     additionalPreparationCommands: [preparation],
@@ -478,6 +563,13 @@ function buildRepairReceipt(
       description: applied.description,
       diff: applied.kind === "repo-diff" ? applied.diff : null,
       filesChanged: applied.filesChanged,
+      fileChanges: applied.fileChanges.map(change => ({
+        path: normalizedRelative(change.path),
+        beforeSha256: change.before === null ? null : sha256Text(change.before),
+        afterSha256: sha256Text(change.after),
+        beforeContent: change.before,
+        afterContent: change.after,
+      })),
       planDelta: applied.kind === "plan-step" ? applied.planDelta : null,
       envDelta: applied.kind === "environment" ? applied.envDelta : null,
     },
@@ -566,6 +658,111 @@ function relativeOutput(repo: string, target: string | null): string | null {
   return target ? path.relative(repo, target).replace(/\\/g, "/") : null;
 }
 
+export function applyVerifiedRepair(
+  repoPath: string,
+  receiptFile = path.join(repoPath, ".bootproof", "repair-receipt.json"),
+): RepairApplyResult {
+  const repo = path.resolve(repoPath);
+  const resolvedReceipt = path.resolve(receiptFile);
+  const displayReceipt = path.relative(repo, resolvedReceipt).replace(/\\/g, "/");
+  const fail = (explanation: string): RepairApplyResult => ({
+    schema: "bootproof/repair-apply-result/v1",
+    applied: false,
+    receiptPath: displayReceipt,
+    filesChanged: [],
+    explanation,
+  });
+
+  if (!fs.existsSync(resolvedReceipt)) return fail(`no repair receipt at ${displayReceipt}`);
+  let receipt: RepairReceipt;
+  try {
+    receipt = JSON.parse(fs.readFileSync(resolvedReceipt, "utf8")) as RepairReceipt;
+  } catch (error) {
+    return fail(`could not parse repair receipt: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (receipt.schema !== "bootproof/repair-receipt/v1" || !verifyRepairReceipt(receipt)) {
+    return fail("repair receipt signature is invalid; no files were written");
+  }
+  const changes = receipt.repair.fileChanges;
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return fail("verified repair has no repository file changes to apply");
+  }
+  const manifestPaths = changes.map(change => normalizedRelative(change.path));
+  if (
+    new Set(manifestPaths).size !== manifestPaths.length ||
+    [...manifestPaths].sort().join("\n") !== [...receipt.repair.filesChanged].map(normalizedRelative).sort().join("\n")
+  ) {
+    return fail("repair receipt file manifest is inconsistent; no files were written");
+  }
+
+  const scopeChanges: RepairFileChange[] = [];
+  for (const change of changes) {
+    if ((change.beforeContent === null) !== (change.beforeSha256 === null)) {
+      return fail(`signed preimage metadata is inconsistent for ${change.path}; no files were written`);
+    }
+    if (sha256Text(change.afterContent) !== change.afterSha256) {
+      return fail(`signed after-content hash does not match for ${change.path}; no files were written`);
+    }
+    if (
+      change.beforeContent !== null &&
+      sha256Text(change.beforeContent) !== change.beforeSha256
+    ) {
+      return fail(`signed before-content hash does not match for ${change.path}; no files were written`);
+    }
+    scopeChanges.push({ path: change.path, before: change.beforeContent, after: change.afterContent });
+  }
+  try {
+    assertRepairScope(scopeChanges);
+  } catch (error) {
+    return fail(`${error instanceof Error ? error.message : String(error)}; no files were written`);
+  }
+
+  for (const change of changes) {
+    const target = path.join(repo, normalizedRelative(change.path));
+    try {
+      assertRepairTargetPath(repo, change.path);
+    } catch (error) {
+      return fail(`${error instanceof Error ? error.message : String(error)}; no files were written`);
+    }
+    const current = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null;
+    const currentHash = current === null ? null : sha256Text(current);
+    if (currentHash !== change.beforeSha256) {
+      return fail(`preimage mismatch for ${change.path}; the working tree changed after verification, so no files were written`);
+    }
+  }
+
+  const written: RepairReceiptFileChange[] = [];
+  try {
+    for (const change of changes) {
+      const target = path.join(repo, normalizedRelative(change.path));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, change.afterContent);
+      written.push(change);
+    }
+    for (const change of changes) {
+      const target = path.join(repo, normalizedRelative(change.path));
+      if (sha256Text(fs.readFileSync(target, "utf8")) !== change.afterSha256) {
+        throw new Error(`post-write hash mismatch for ${change.path}`);
+      }
+    }
+  } catch (error) {
+    for (const change of written.reverse()) {
+      const target = path.join(repo, normalizedRelative(change.path));
+      if (change.beforeContent === null) fs.rmSync(target, { force: true });
+      else fs.writeFileSync(target, change.beforeContent);
+    }
+    return fail(`${error instanceof Error ? error.message : String(error)}; writes were rolled back`);
+  }
+
+  return {
+    schema: "bootproof/repair-apply-result/v1",
+    applied: true,
+    receiptPath: displayReceipt,
+    filesChanged: manifestPaths,
+    explanation: `applied the signature-valid verified repair to ${manifestPaths.join(", ")}`,
+  };
+}
+
 export async function repairRepo(repoPath: string, options: RepairOptions): Promise<RepairResult> {
   const repo = path.resolve(repoPath);
   const startedAt = new Date().toISOString();
@@ -593,6 +790,8 @@ export async function repairRepo(repoPath: string, options: RepairOptions): Prom
     dryRun: false,
     timeoutMs: options.timeoutMs,
     install: true,
+    port: options.port,
+    remoteSource: options.remoteSource,
     environment: { COMPOSE_PROJECT_NAME: composeProjectName },
   };
 
@@ -665,10 +864,7 @@ export async function repairRepo(repoPath: string, options: RepairOptions): Prom
       lastOutcome = afterOutcome;
       const after = afterOutcome.attestation;
       if (after?.result.booted === true && after.result.healthVerified === true && after.result.healthObservation) {
-        assertRepairScope(applied.filesChanged.map(file => {
-          const absolute = path.join(sandbox, file);
-          return { path: file, before: null, after: fs.existsSync(absolute) ? fs.readFileSync(absolute, "utf8") : "" };
-        }).filter(change => change.after));
+        assertRepairScope(applied.fileChanges);
         const receipt = buildRepairReceipt(repo, before, after, applied, startedAt);
         const output = path.join(repo, ".bootproof");
         fs.mkdirSync(output, { recursive: true });

@@ -18,9 +18,10 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 12. Confidence describes evidence found, not predicted success.
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
 14. A repair is only ever proposed with a verified before and after attestation.
-15. Repairs never touch the user's working tree; diffs are applied by the human.
+15. Repair generation never touches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
 16. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
 17. An unverified or failed remediation is reported as such and is never proposed on hope.
+18. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
 
 These behaviors are enforced by tests.
 
@@ -81,6 +82,8 @@ The original working tree is never used as the repair target. BootProof writes o
 
 If the sandbox does not reach observed HTTP health, no repair receipt or patch is emitted. The failed attempt is appended to signed failure evidence.
 
+`bootproof fix` never auto-applies a patch. `bootproof apply-repair` is a separate, explicit mutation command. It verifies the receipt signature, scope whitelist, signed content hashes, and current preimages before writing. A mismatch writes nothing.
+
 See [REPAIR_RECEIPT.md](REPAIR_RECEIPT.md).
 
 ## Trust Levels
@@ -102,6 +105,8 @@ BootProof itself does not upload telemetry or evidence.
 Commands chosen from a repository, such as package installation or application startup, may perform their own network activity. That behavior belongs to the command being executed and should be reviewed before using `--install` or unsafe local execution.
 
 Remote mode accepts only credential-free public HTTPS GitHub repository URLs. BootProof clones them into a retained `.bootproof/remotes/` workspace. Cloning does not authorize execution: a remote application command runs only with `--provider local --unsafe-local`.
+
+The same rule applies to remote repair. Receipts and patches remain inside the retained clone. Applying a file repair requires naming that local clone with the separate `apply-repair` command.
 
 Remote `--dry-run` is refused before cloning. A clone writes files, while the dry-run contract promises that nothing is written.
 

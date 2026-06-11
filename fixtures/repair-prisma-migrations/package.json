@@ -1,0 +1,11 @@
+{
+  "name": "repair-prisma-migrations",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@prisma/client": "6.0.0",
+    "prisma": "6.0.0"
+  }
+}
