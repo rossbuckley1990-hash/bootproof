@@ -51,6 +51,8 @@ const RULES: Rule[] = [
     explain: () => "The host Node version does not satisfy the project's engines requirement. Switch Node versions (nvm/fnm/corepack) and retry." },
   { class: "missing_package_manager", pattern: /\b(yarn|pnpm|bun): (command )?not found/i,
     explain: m => `The project needs ${m[1]} and it is not installed. Enable Corepack (corepack enable) or install ${m[1]} directly.` },
+  { class: "missing_runtime_tool", pattern: /(?:(?:^|\s)(go|ruby|bundle|make): (?:command )?not found\b|'(go|ruby|bundle|make)' is not recognized as an internal or external command|spawn (go|ruby|bundle|make) ENOENT)/im,
+    explain: m => `The repository's explicit run path requires ${m[1] ?? m[2] ?? m[3]}, but that executable is not available in this environment.` },
   { class: "private_registry_or_auth", pattern: /(401 Unauthorized|E401|ENEEDAUTH|authentication token not provided|Permission.*registry)/i,
     explain: () => "Dependency install needs credentials for a private registry. Bootproof will not invent credentials; provide real ones and retry." },
   { class: "native_build_dependency", pattern: /(node-gyp|gyp ERR|pg_config.*not found|fatal error: .*\.h|prebuild-install)/i,
@@ -93,7 +95,7 @@ export function classifyFailure(evidence: string): { class: FailureClass; explan
 }
 
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
-  "not_an_application", "orchestration_not_supported", "runtime_engine_mismatch", "missing_package_manager", "package_manager_version_mismatch",
+  "not_an_application", "orchestration_not_supported", "runtime_engine_mismatch", "missing_package_manager", "missing_runtime_tool", "package_manager_version_mismatch",
   "dependency_install_skipped", "python_flask_setup_required", "missing_env_var",
   "database_unreachable", "postgres_auth_env_missing", "migrations_missing", "port_in_use", "native_build_dependency",
   "private_registry_or_auth", "tls_or_proxy_interception", "service_port_allocated", "docker_unavailable", "install_failed", "app_exited_early",

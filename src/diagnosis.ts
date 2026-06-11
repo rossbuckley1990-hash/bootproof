@@ -99,6 +99,12 @@ export function diagnoseFailure(
         whyRefused: "BootProof cannot run the declared install or start command without that executable.",
         safeNextStep: "Enable Corepack or install the repository's declared package manager, then rerun BootProof.",
       };
+    case "missing_runtime_tool":
+      return {
+        whatHappened: explanation,
+        whyRefused: "BootProof cannot execute the repository's explicit run path without its declared runtime or build tool.",
+        safeNextStep: "Install the required tool at a version supported by the repository, then rerun BootProof.",
+      };
     case "runtime_engine_mismatch":
       return {
         whatHappened: "The available Node.js runtime does not satisfy the repository's declared engine requirement.",

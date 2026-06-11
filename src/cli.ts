@@ -77,12 +77,16 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   if (inf.frontendMarkers.length) console.log(`  frontend markers: ${inf.frontendMarkers.join(", ")}`);
   if (inf.serviceMarkers.length) console.log(`  service markers: ${inf.serviceMarkers.join(", ")}`);
   if (inf.repoComposeFile) console.log(`  repo compose: ${inf.repoComposeFile} (bootproof defers to it)`);
+  if (inf.composeApplicationServices.length) {
+    console.log(`  compose HTTP services: ${inf.composeApplicationServices.map(service => `${service.name} (${service.source === "build" ? "builds checked-out source" : "image only"})`).join("; ")}`);
+  }
   console.log(`  package manager: ${inf.packageManager} ${DIM}(${inf.packageManagerEvidence})${RESET}`);
   if (inf.setupSteps.length) console.log(`  setup steps: ${inf.setupSteps.join("; ")}`);
   if (inf.backendCommand) console.log(`  backend command: ${inf.backendCommand}`);
   if (inf.frontendCommand) console.log(`  frontend command: ${inf.frontendCommand}`);
   if (inf.workerCommand) console.log(`  worker command: ${inf.workerCommand}`);
   if (inf.appCommand) console.log(`  selected command: ${inf.appCommand} ${DIM}(${inf.appCommandSource})${RESET}`);
+  if (inf.preparationCommands.length) console.log(`  preparation: ${inf.preparationCommands.map(command => command.command).join("; ")}`);
   console.log(`  command scope: ${inf.commandScope}`);
   console.log(`  port: ${inf.port} ${DIM}(${inf.portEvidence})${RESET}`);
   if (inf.healthCandidates.length) console.log(`  health candidates: ${inf.healthCandidates.join(", ")}`);

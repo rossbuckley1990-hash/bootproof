@@ -47,18 +47,32 @@ export function envExampleFor(inf: Inference): string | null {
 
 export function buildPlan(inf: Inference, provider: "docker" | "local"): RunPlan {
   const steps: PlanStep[] = [];
+  const runsSourceComposeApplication =
+    provider === "docker" &&
+    Boolean(inf.repoComposeFile) &&
+    inf.composeHealthCandidates.length > 0;
   if (provider === "docker" && inf.repoComposeFile) {
     steps.push({ id: "services", kind: "service", command: `docker compose -f ${inf.repoComposeFile} up -d`, description: "defer to the repository's own compose file", required: true });
   } else if (inf.services.length && provider === "docker") {
     steps.push({ id: "services", kind: "service", command: "docker compose -f docker-compose.bootproof.yml up -d", description: `start ${inf.services.map(s => s.kind).join(", ")} in containers`, required: true });
   }
-  if (inf.installCommand) {
-    steps.push({ id: "install", kind: "install", command: inf.installCommand, description: "install dependencies", required: inf.dependencyInstallRequired });
+  if (!runsSourceComposeApplication) {
+    for (const preparation of inf.preparationCommands) {
+      steps.push({
+        id: preparation.id,
+        kind: preparation.kind,
+        command: preparation.command,
+        description: `${preparation.description} (${preparation.source})`,
+        required: true,
+      });
+    }
+    if (inf.appCommand) {
+      steps.push({ id: "start-app", kind: "start-app", command: inf.appCommand, description: `start app (${inf.appCommandSource})`, required: true });
+    }
   }
-  if (inf.appCommand) {
-    steps.push({ id: "start-app", kind: "start-app", command: inf.appCommand, description: `start app (${inf.appCommandSource})`, required: true });
-  }
-  const healthCandidates = [...inf.healthCandidates];
+  const healthCandidates = runsSourceComposeApplication
+    ? [...inf.composeHealthCandidates]
+    : [...inf.healthCandidates];
   const healthUrl = healthCandidates[0] ?? "";
   if (inf.isApplication && healthUrl) {
     steps.push({ id: "health", kind: "health", description: `poll ${healthUrl} for an HTTP response`, required: true });

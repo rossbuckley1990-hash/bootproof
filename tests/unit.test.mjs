@@ -60,6 +60,7 @@ test("classifies a library as not_an_application instead of pretending", () => {
 test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure("error TS: The engine \"node\" is incompatible with this module").class, "runtime_engine_mismatch");
   assert.equal(classifyFailure("sh: yarn: command not found").class, "missing_package_manager");
+  assert.equal(classifyFailure("/bin/sh: go: command not found").class, "missing_runtime_tool");
   assert.equal(classifyFailure("npm ERR! code E401 Unauthorized").class, "private_registry_or_auth");
   assert.equal(classifyFailure("Error: connect ECONNREFUSED 127.0.0.1:5432").class, "database_unreachable");
   assert.equal(classifyFailure("Error: listen EADDRINUSE: address already in use :::3000").class, "port_in_use");
@@ -131,15 +132,87 @@ test("Ruby backend markers are detected without claiming orchestration support",
   assert.equal(inf.appCommand, null);
 });
 
-test("custom Make-driven applications are detected without inventing a start command", () => {
+test("custom Make-driven applications select only an explicit supported target", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-make-driven-"));
   fs.writeFileSync(path.join(repo, "Makefile"), "serve:\n\t./scripts/start-custom-stack\n");
   const inf = inferRepo(repo);
   assert.equal(inf.isApplication, true);
   assert.ok(inf.stack.includes("make-driven"));
   assert.ok(inf.backendMarkers.includes("Makefile"));
-  assert.equal(inf.appCommand, null);
-  assert.deepEqual(inf.healthCandidates, []);
+  assert.equal(inf.appCommand, "make serve");
+  assert.match(inf.appCommandSource, /Makefile target: serve/);
+  assert.deepEqual(inf.healthCandidates, ["http://localhost:3000/"]);
+});
+
+test("Go, Rails, and Make fixtures expose conservative repository commands", () => {
+  const go = inferRepo(path.join(FIX, "go-react-runnable-like"));
+  assert.equal(go.appCommand, "go run ./cmd/app --port 8081 --data .bootproof/runtime/go-app");
+  assert.equal(go.appCommandSource, "Go main package: cmd/app/main.go");
+  assert.deepEqual(go.preparationCommands.map(command => command.command), ["go mod download"]);
+  assert.deepEqual(go.healthCandidates, ["http://localhost:8081/"]);
+
+  const rails = inferRepo(path.join(FIX, "ruby-rails-runnable-like"));
+  assert.equal(rails.appCommand, "bundle exec rails server -b 127.0.0.1 -p 3000");
+  assert.equal(rails.appCommandSource, "Rails entrypoint: bin/rails");
+  assert.deepEqual(rails.preparationCommands.map(command => command.command), ["bundle install"]);
+
+  const make = inferRepo(path.join(FIX, "make-runnable-like"));
+  assert.equal(make.appCommand, "make serve");
+  assert.equal(make.commandScope, "repository-defined Make target");
+});
+
+test("source-built Compose applications are runnable but image-only services are not source proof", () => {
+  const source = inferRepo(path.join(FIX, "source-compose-runnable-like"));
+  assert.deepEqual(source.composeApplicationServices, [{
+    name: "web",
+    source: "build",
+    healthCandidates: ["http://localhost:31999/ready"],
+  }]);
+  assert.deepEqual(source.composeHealthCandidates, ["http://localhost:31999/ready"]);
+  const plan = buildPlan(source, "docker");
+  assert.equal(plan.steps.find(step => step.kind === "service")?.command, "docker compose -f docker-compose.yml up -d");
+  assert.deepEqual(plan.steps.filter(step => step.kind === "start-app"), []);
+  assert.deepEqual(plan.healthCandidates, ["http://localhost:31999/ready"]);
+
+  const imageOnly = fs.mkdtempSync(path.join(os.tmpdir(), "bp-compose-image-"));
+  fs.writeFileSync(path.join(imageOnly, "docker-compose.yml"), [
+    "services:",
+    "  web:",
+    "    image: example/web:latest",
+    "    ports:",
+    "      - \"3000:3000\"",
+    "",
+  ].join("\n"));
+  const imageInference = inferRepo(imageOnly);
+  assert.deepEqual(imageInference.composeApplicationServices, [{
+    name: "web",
+    source: "image",
+    healthCandidates: ["http://localhost:3000/"],
+  }]);
+  assert.deepEqual(imageInference.composeHealthCandidates, [], "an image-only service cannot prove the checked-out source");
+  assert.equal(imageInference.isApplication, false);
+});
+
+test("multiple source-built Compose HTTP services remain ambiguous", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-compose-multiple-"));
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  web:",
+    "    build: ./web",
+    "    ports:",
+    "      - \"3101:3000\"",
+    "  admin:",
+    "    build: ./admin",
+    "    ports:",
+    "      - \"3102:3000\"",
+    "",
+  ].join("\n"));
+  fs.mkdirSync(path.join(repo, "web"));
+  fs.mkdirSync(path.join(repo, "admin"));
+  const inf = inferRepo(repo);
+  assert.equal(inf.isApplication, true);
+  assert.equal(inf.composeApplicationServices.filter(service => service.source === "build").length, 2);
+  assert.deepEqual(inf.composeHealthCandidates, [], "one responding service must not prove a multi-service application");
 });
 
 test("repository compose is deferred to and Storybook ranks below the production web app", () => {

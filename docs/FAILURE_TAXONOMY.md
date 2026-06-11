@@ -14,9 +14,10 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | Class | Meaning | Safe next step |
 |---|---|---|
 | `not_an_application` | No trustworthy runnable entrypoint was found. | Select a runnable workspace or add an explicit start command. |
-| `orchestration_not_supported` | An application stack was detected, but its backend/frontend or repository-specific orchestration is not yet supported safely. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
+| `orchestration_not_supported` | An application stack was detected, but no explicit supported entrypoint or source-built Compose web service was found. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |
 | `missing_package_manager` | The declared package manager executable is absent. | Enable Corepack or install the required manager. |
+| `missing_runtime_tool` | An explicit Go, Ruby, Bundler, or Make run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
 | `package_manager_version_mismatch` | The available package-manager version differs from the exact/simple declared version. | Activate the declared version, then rerun. |
 | `dependency_install_skipped` | A dependency-backed application was not started because install was not requested. | Review the install command and opt in with `--install`. |
 | `python_flask_setup_required` | Python/Flask setup requires migrations, initialization, workers, frontend, or service orchestration not yet supported safely. | Complete the documented setup manually; do not treat detection as full support. |

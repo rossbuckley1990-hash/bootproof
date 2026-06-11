@@ -16,6 +16,7 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 10. Failed attestations preserve available raw local evidence; exported registry entries redact it.
 11. A process starting is not enough. A health signal must be observed.
 12. Confidence describes evidence found, not predicted success.
+13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
 
 These behaviors are enforced by tests.
 
@@ -60,6 +61,8 @@ It does not prove:
 - every dependency is production-ready
 - every service in a platform is healthy
 - another machine will produce the same outcome
+
+A repository Compose receipt is equally narrow. `docker compose up -d` exit 0 proves only that Compose accepted the request. BootProof issues `BOOTED` only after HTTP responds. If health fails, it records Compose service state and logs where available.
 
 ## Trust Levels
 

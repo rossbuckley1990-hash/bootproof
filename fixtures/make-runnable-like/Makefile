@@ -1,0 +1,2 @@
+serve:
+	@node server.js

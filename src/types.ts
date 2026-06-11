@@ -13,6 +13,7 @@ export type FailureClass =
   | "orchestration_not_supported"
   | "runtime_engine_mismatch"
   | "missing_package_manager"
+  | "missing_runtime_tool"
   | "package_manager_version_mismatch"
   | "dependency_install_skipped"
   | "python_flask_setup_required"
@@ -45,6 +46,20 @@ export interface WorkspaceCandidate {
   reason: string;
 }
 
+export interface PreparationCommand {
+  id: string;
+  kind: "install" | "build";
+  command: string;
+  description: string;
+  source: string;
+}
+
+export interface ComposeApplicationService {
+  name: string;
+  source: "build" | "image";
+  healthCandidates: string[];
+}
+
 export interface Inference {
   repoPath: string;
   isApplication: boolean;
@@ -54,11 +69,14 @@ export interface Inference {
   frontendMarkers: string[];
   serviceMarkers: string[];
   repoComposeFile: string | null;
+  composeApplicationServices: ComposeApplicationService[];
+  composeHealthCandidates: string[];
   setupSteps: string[];
   packageManager: PackageManager;
   packageManagerEvidence: string;
   packageManagerVersion: string | null;
   installCommand: string | null;
+  preparationCommands: PreparationCommand[];
   dependencyInstallRequired: boolean;
   appCommand: string | null;
   appCommandSource: string;
@@ -81,7 +99,7 @@ export interface Inference {
 
 export interface PlanStep {
   id: string;
-  kind: "install" | "service" | "start-app" | "health";
+  kind: "install" | "build" | "service" | "start-app" | "health";
   command?: string;
   description: string;
   required: boolean;

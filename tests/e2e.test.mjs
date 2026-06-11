@@ -21,7 +21,7 @@ function mergeEnv(overrides = {}) {
 }
 
 const run = (args, allowFail = false, env = {}, cwd = process.cwd()) => {
-  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: mergeEnv(env), cwd }), code: 0 }; }
+  try { return { out: execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8", env: mergeEnv(env), cwd }), code: 0 }; }
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
@@ -82,6 +82,53 @@ function writeFakePnpm(bin, version) {
 
 function pathWith(bin) {
   return `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+}
+
+function writeRuntimeShim(bin, name) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(bin, `${name}.cmd`),
+      [
+        "@echo off",
+        "if \"%~1\"==\"mod\" if \"%~2\"==\"download\" exit /b 0",
+        "if \"%~1\"==\"install\" exit /b 0",
+        "node server.js %*",
+        "",
+      ].join("\r\n"),
+    );
+    return;
+  }
+  const executable = path.join(bin, name);
+  fs.writeFileSync(executable, [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"mod\" ] && [ \"$2\" = \"download\" ]; then exit 0; fi",
+    "if [ \"$1\" = \"install\" ]; then exit 0; fi",
+    "exec node server.js \"$@\"",
+    "",
+  ].join("\n"));
+  fs.chmodSync(executable, 0o755);
+}
+
+function writeDockerShim(bin) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(bin, "docker.cmd"), "@echo off\r\nnode fake-docker.js %*\r\n");
+    return;
+  }
+  const executable = path.join(bin, "docker");
+  fs.writeFileSync(executable, "#!/bin/sh\nexec node fake-docker.js \"$@\"\n");
+  fs.chmodSync(executable, 0o755);
+}
+
+function stopFixtureProcess(repo) {
+  const pidPath = path.join(repo, ".bootproof", "fake-compose.pid");
+  if (!fs.existsSync(pidPath)) return;
+  const pid = Number(fs.readFileSync(pidPath, "utf8"));
+  try {
+    if (process.platform === "win32") execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    else process.kill(pid, "SIGTERM");
+  } catch {
+    // The fixture process may already have exited.
+  }
 }
 
 test("honesty: dry run prints 'would', never a green check, writes nothing", () => {
@@ -331,7 +378,7 @@ test("Ruby and custom Make backends refuse as unsupported orchestration, not lib
     {
       name: "make",
       setup(repo) {
-        fs.writeFileSync(path.join(repo, "Makefile"), "serve:\n\t./scripts/start-custom-stack\n");
+        fs.writeFileSync(path.join(repo, "Makefile"), "bootstrap:\n\t./scripts/start-custom-stack\n");
       },
       evidence: /Detected make-driven \(Makefile\)/,
     },
@@ -350,6 +397,141 @@ test("Ruby and custom Make backends refuse as unsupported orchestration, not lib
     assert.equal(att.result.failureClass, "orchestration_not_supported");
     assert.deepEqual(att.observed, []);
   }
+});
+
+test("Go, Rails, and Make repository entrypoints require observed HTTP health", async () => {
+  const cases = [
+    { fixture: "go-react-runnable-like", executable: "go", install: true, command: /go run \.\/cmd\/app --port/ },
+    { fixture: "ruby-rails-runnable-like", executable: "bundle", install: true, command: /bundle exec rails server/ },
+    { fixture: "make-runnable-like", executable: "make", install: false, command: /make serve/ },
+  ];
+
+  for (const item of cases) {
+    const repo = freshCopy(item.fixture);
+    const port = await getFreePort();
+    const bin = path.join(repo, "bin-tools");
+    fs.mkdirSync(bin);
+    writeRuntimeShim(bin, item.executable);
+    const args = ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--ci"];
+    if (item.install) args.push("--install");
+
+    const { out, code } = run(args, true, { PATH: pathWith(bin) });
+    assert.equal(code, 0, `${item.fixture} failed:\n${out}`);
+    assert.match(out, /BOOTED/);
+    assert.match(out, item.command);
+    assert.match(out, new RegExp(`observed HTTP 200 at http://localhost:${port}/`));
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.booted, true);
+    assert.equal(att.result.healthVerified, true);
+    assert.ok(att.observed.some(observed => observed.kind === "health" && observed.ok));
+    assert.ok(att.signature);
+  }
+});
+
+test("an unavailable repository runtime is classified without guessing", () => {
+  const repo = freshCopy("go-react-runnable-like");
+  const emptyBin = path.join(repo, "empty-bin");
+  fs.mkdirSync(emptyBin);
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--ci"],
+    true,
+    { PATH: emptyBin },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — missing_runtime_tool/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "missing_runtime_tool");
+  assert.match(att.result.failureEvidence, /go.*not found|go.*not recognized/i);
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+});
+
+test("source-built repository Compose verifies only after observed HTTP health", async () => {
+  const repo = freshCopy("source-compose-runnable-like");
+  const port = await getFreePort();
+  fs.writeFileSync(
+    path.join(repo, "docker-compose.yml"),
+    fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8").replace("31999", String(port)),
+  );
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeDockerShim(bin);
+  fs.writeFileSync(path.join(repo, ".fake-compose-healthy"), "fixture mode\n");
+
+  try {
+    const { out, code } = run(
+      ["up", repo, "--provider", "docker", "--timeout", "10000", "--ci"],
+      true,
+      { PATH: pathWith(bin) },
+    );
+    assert.equal(code, 0, out);
+    assert.match(out, /compose HTTP services: web \(builds checked-out source\)/);
+    assert.match(out, /docker compose accepted the start request \(exit 0\); HTTP health not yet verified/);
+    assert.match(out, new RegExp(`observed HTTP 200 at http://localhost:${port}/ready`));
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.booted, true);
+    assert.equal(att.result.healthVerified, true);
+    assert.ok(att.observed.some(observed => observed.kind === "service" && observed.exitCode === 0));
+    assert.ok(att.observed.some(observed => observed.kind === "health" && observed.ok));
+    assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.yml")), false);
+  } finally {
+    stopFixtureProcess(repo);
+  }
+});
+
+test("source-built repository Compose failure preserves ps and log evidence", async () => {
+  const repo = freshCopy("source-compose-runnable-like");
+  const port = await getFreePort();
+  fs.writeFileSync(
+    path.join(repo, "docker-compose.yml"),
+    fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8").replace("31999", String(port)),
+  );
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeDockerShim(bin);
+
+  const { out, code } = run(
+    ["up", repo, "--provider", "docker", "--timeout", "500", "--ci"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — health_check_timeout/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.equal(att.result.failureClass, "health_check_timeout");
+  assert.match(att.result.failureEvidence, /source-built fixture did not become healthy/);
+  assert.ok(att.observed.some(observed => observed.id === "compose-ps"));
+  assert.ok(att.observed.some(observed => observed.id === "compose-logs"));
+  assert.ok(att.signature);
+});
+
+test("multiple source-built Compose HTTP services refuse before Docker executes", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-compose-ambiguous-"));
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  web:",
+    "    build: ./web",
+    "    ports:",
+    "      - \"3101:3000\"",
+    "  admin:",
+    "    build: ./admin",
+    "    ports:",
+    "      - \"3102:3000\"",
+    "",
+  ].join("\n"));
+  fs.mkdirSync(path.join(repo, "web"));
+  fs.mkdirSync(path.join(repo, "admin"));
+
+  const { out, code } = run(["up", repo, "--provider", "docker", "--ci"], true, { PATH: "" });
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — orchestration_not_supported/);
+  assert.match(out, /multiple source-built HTTP services/);
+  assert.match(out, /will not treat one responding service as proof/);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "orchestration_not_supported");
+  assert.deepEqual(att.observed, [], "Docker must not execute for an ambiguous Compose application");
 });
 
 test("Grafana-like hybrid fails closed when dependency installation is skipped", () => {

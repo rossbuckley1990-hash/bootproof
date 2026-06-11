@@ -70,7 +70,7 @@ Safe next step: Run corepack enable && corepack prepare pnpm@10.24.0 --activate,
 Evidence: .bootproof/attestation.json
 ```
 
-BootProof distinguishes diagnosis from proof. Detecting Python, Flask, React, Celery, Go, or a monorepo does not mean BootProof claims full orchestration support for that stack.
+BootProof distinguishes diagnosis from proof. It can execute a narrow explicit Go main package, Rails `bin/rails` entrypoint, or Make run target, but detection alone never implies general support for every Go, Ruby, Make, Python, or monorepo architecture.
 
 ## What It Gives Machines
 
@@ -160,9 +160,11 @@ See [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md).
 BootProof currently provides:
 
 - Node package-manager and start-command inference
+- conservative Go main-package, Rails `bin/rails`, and explicit Make run-target execution
 - Python/Flask and Go/Node hybrid detection
 - monorepo candidate ranking
 - Docker service dependency detection and scaffolding
+- repository Compose execution when a web service builds the checked-out source and publishes an HTTP port
 - localhost health-candidate discovery from repository evidence and app logs
 - classified failures
 - signed Ed25519 attestations
@@ -174,6 +176,16 @@ Detection is broader than orchestration. For example:
 - Superset-like Python/Flask/React/Celery repos are detected, then honestly refused with `python_flask_setup_required`.
 - Grafana-like Go/Node hybrids are detected without pretending a frontend watcher is the whole application.
 - Parallel monorepo root commands are refused until a specific workspace is selected.
+- Image-only or infrastructure-only Compose services are not accepted as proof of the checked-out source.
+
+The supported repository entrypoints are deliberately narrow:
+
+- Go: exactly one `main.go` or `cmd/*/main.go`
+- Ruby: `Gemfile` plus `bin/rails`
+- Make: an explicit `run`, `serve`, `server`, `start`, or `dev` target
+- Compose: a service with a repository-local build context and a published HTTP port
+
+Each path still requires an observed HTTP response. A successful Compose `up -d`, process spawn, or command exit is not a green result by itself.
 
 ## Files Written
 
@@ -182,6 +194,7 @@ Depending on the observed plan, BootProof may write:
 ```text
 .bootproof/attestation.json
 .bootproof/registry-entry.json
+.bootproof/runtime/
 docker-compose.bootproof.yml
 .env.bootproof.example
 ```
@@ -276,7 +289,7 @@ Near-term work includes:
 
 - additional remote source providers beyond public HTTPS GitHub repositories
 - stronger multi-service orchestration
-- broader Python and Go execution support
+- broader Python, Go, Ruby, and Make execution support
 - CI/OIDC-backed signing
 - proof-linked badges and a verified public index
 

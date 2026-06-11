@@ -1,0 +1,7 @@
+{
+  "name": "go-react-runnable-web",
+  "private": true,
+  "dependencies": {
+    "react": "19.0.0"
+  }
+}

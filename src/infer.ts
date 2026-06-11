@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Inference, PackageManager, ServiceNeed, WorkspaceCandidate } from "./types.js";
+import { parse } from "yaml";
+import type {
+  ComposeApplicationService,
+  Inference,
+  PackageManager,
+  PreparationCommand,
+  ServiceNeed,
+  WorkspaceCandidate,
+} from "./types.js";
 
 function readJson(p: string): any | null {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
@@ -42,6 +50,65 @@ const REPO_COMPOSE_FILES = [
 
 function detectRepoComposeFile(repo: string): string | null {
   return REPO_COMPOSE_FILES.find(file => exists(repo, file)) ?? null;
+}
+
+function composePublishedPort(value: unknown): { host: number; container: number } | null {
+  if (typeof value === "number") return null;
+  if (typeof value === "object" && value !== null) {
+    const item = value as Record<string, unknown>;
+    const host = Number(item.published);
+    const container = Number(item.target);
+    return Number.isInteger(host) && Number.isInteger(container) ? { host, container } : null;
+  }
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\$\{[^}:]+:-?(\d+)\}/g, "$1").split("/")[0];
+  const parts = normalized.split(":").map(part => part.trim());
+  if (parts.length < 2) return null;
+  const host = Number(parts.at(-2));
+  const container = Number(parts.at(-1));
+  return Number.isInteger(host) && Number.isInteger(container) ? { host, container } : null;
+}
+
+function composeHealthPath(service: Record<string, any>, containerPort: number): string {
+  const test = service.healthcheck?.test;
+  const text = Array.isArray(test) ? test.join(" ") : typeof test === "string" ? test : "";
+  const url = text.match(/https?:\/\/(?:localhost|127\.0\.0\.1):(\d{2,5})(\/[^\s"'\\]*)?/i);
+  if (!url || Number(url[1]) !== containerPort) return "/";
+  return url[2] || "/";
+}
+
+function sourceBuildUsesRepo(repo: string, composeFile: string, build: unknown): boolean {
+  const context = typeof build === "string"
+    ? build
+    : typeof build === "object" && build !== null
+      ? String((build as Record<string, unknown>).context ?? ".")
+      : null;
+  if (!context || /^(?:https?|git):/i.test(context)) return false;
+  const composeDir = path.dirname(path.join(repo, composeFile));
+  const resolved = path.resolve(composeDir, context);
+  const root = path.resolve(repo);
+  return resolved === root || resolved.startsWith(`${root}${path.sep}`);
+}
+
+function detectComposeApplications(repo: string, composeFile: string | null): ComposeApplicationService[] {
+  if (!composeFile) return [];
+  try {
+    const document = parse(readText(repo, composeFile)) as { services?: Record<string, Record<string, any>> };
+    const applications: ComposeApplicationService[] = [];
+    for (const [name, service] of Object.entries(document?.services ?? {})) {
+      const source = sourceBuildUsesRepo(repo, composeFile, service.build) ? "build" : service.image ? "image" : null;
+      if (!source) continue;
+      const healthCandidates = (Array.isArray(service.ports) ? service.ports : [])
+        .map(composePublishedPort)
+        .filter((port): port is { host: number; container: number } => Boolean(port))
+        .filter(port => ![3306, 5432, 6379, 27017].includes(port.container))
+        .map(port => `http://localhost:${port.host}${composeHealthPath(service, port.container)}`);
+      if (healthCandidates.length) applications.push({ name, source, healthCandidates: [...new Set(healthCandidates)] });
+    }
+    return applications;
+  } catch {
+    return [];
+  }
 }
 
 function packageManagerFromField(field: string | undefined): { pm: PackageManager; version: string | null } | null {
@@ -97,6 +164,41 @@ function detectNestedFrontend(repo: string): { dir: string; pkg: any } | null {
   return null;
 }
 
+function detectMakeCommand(repo: string, makefile: string): { command: string; source: string } | null {
+  for (const target of ["run", "serve", "server", "start", "dev"]) {
+    if (new RegExp(`^${target}:`, "m").test(makefile)) {
+      return { command: `make ${target}`, source: `Makefile target: ${target}` };
+    }
+  }
+  return null;
+}
+
+function detectGoEntrypoint(repo: string): { commandBase: string; source: string; sourceText: string; dataDirFlag: boolean; portFlag: boolean } | null {
+  const candidates: string[] = [];
+  if (exists(repo, "main.go")) candidates.push("main.go");
+  try {
+    for (const name of fs.readdirSync(path.join(repo, "cmd"))) {
+      if (exists(repo, `cmd/${name}/main.go`)) candidates.push(`cmd/${name}/main.go`);
+    }
+  } catch { /* no cmd directory */ }
+  if (candidates.length !== 1) return null;
+  const entry = candidates[0];
+  const sourceText = readText(repo, entry);
+  const packagePath = entry === "main.go" ? "." : `./${path.posix.dirname(entry)}`;
+  return {
+    commandBase: `go run ${packagePath}`,
+    source: `Go main package: ${entry}`,
+    sourceText,
+    dataDirFlag: /(?:String|StringVar)\(\s*["']data["']/m.test(sourceText),
+    portFlag: /(?:Int|IntVar)\(\s*["']port["']/m.test(sourceText),
+  };
+}
+
+function detectRubyCommand(repo: string): { commandBase: string; source: string } | null {
+  if (!exists(repo, "Gemfile") || !exists(repo, "bin/rails")) return null;
+  return { commandBase: "bundle exec rails server -b 127.0.0.1", source: "Rails entrypoint: bin/rails" };
+}
+
 function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: string; pkg: any } | null, repoComposeFile: string | null) {
   const makefile = readText(repo, "Makefile");
   const pyproject = readText(repo, "pyproject.toml");
@@ -120,7 +222,10 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const hasFlask = hasPythonBackend && (/\bflask\b/i.test(pyproject + setupPy + makefile) || exists(repo, "superset/app.py"));
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
   const hasRubyBackend = exists(repo, "Gemfile");
-  const hasMakeDrivenBackend = exists(repo, "Makefile") && /^\s*(?:run|serve|server|dev|start):/m.test(makefile);
+  const makeCommand = detectMakeCommand(repo, makefile);
+  const goEntrypoint = detectGoEntrypoint(repo);
+  const rubyCommand = detectRubyCommand(repo);
+  const hasMakeDrivenBackend = Boolean(makefile && /^[A-Za-z0-9_.-]+:\s*(?:[^=]|$)/m.test(makefile));
   const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend);
   const hasReact = Boolean(rootDeps.react || nestedDeps.react);
   const hasReactFrontend = Boolean(nestedFrontend && hasReact);
@@ -152,8 +257,6 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const flaskCommand = makefile.match(/^\s*(flask run[^\n]*)$/m)?.[1].trim() ?? null;
   const frontendMakeCommand = makefile.match(/^\s*(cd\s+[^;\n]+;\s*(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev-server|dev|start)[^\n]*)$/m)?.[1].trim() ?? null;
   const workerCommand = makefile.match(/^\s*(celery\s+--app=[^\n]*\sworker[^\n]*)$/m)?.[1].trim() ?? null;
-  const makeRunCommand = hasGoBackend && /^run:\s/m.test(makefile) ? "make run" : null;
-
   return {
     backendMarkers: [...new Set(backendMarkers)],
     frontendMarkers: [...new Set(frontendMarkers)],
@@ -163,7 +266,9 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     flaskCommand,
     frontendMakeCommand,
     workerCommand,
-    makeRunCommand,
+    makeCommand,
+    goEntrypoint,
+    rubyCommand,
     hasPythonBackend,
     hasFlask,
     hasGoBackend,
@@ -177,6 +282,10 @@ function detectPort(pkg: any, repo: string, commands: Array<string | null>): { p
   const sources = [JSON.stringify(pkg?.scripts ?? {}), readText(repo, "Makefile"), ...commands.filter((v): v is string => Boolean(v))].join("\n");
   const m = sources.match(/(?:-p|--port)(?:=|\s+|[\\"]+)(\d{2,5})/);
   if (m) return { port: Number(m[1]), evidence: `port flag in command evidence: ${m[0].replace(/\\"/g, "").trim()}` };
+  const goDefault = sources.match(/(?:SetDefault\(\s*["']port["']\s*,|(?:Int|IntVar)\(\s*["']port["']\s*,)\s*(\d{2,5})/);
+  if (goDefault) return { port: Number(goDefault[1]), evidence: "port default in Go entrypoint" };
+  const listen = sources.match(/ListenAndServe\(\s*["']:(\d{2,5})["']/);
+  if (listen) return { port: Number(listen[1]), evidence: "HTTP listen address in source" };
   const envEx = readText(repo, ".env.example");
   const pm = envEx.match(/^PORT=(\d{2,5})/m);
   if (pm) return { port: Number(pm[1]), evidence: "PORT in .env.example" };
@@ -311,28 +420,74 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const rootPkg = opts.workspace ? readJson(path.join(rootRepo, "package.json")) : pkg;
   const nestedFrontend = detectNestedFrontend(repo);
   const repoComposeFile = detectRepoComposeFile(repo);
+  const composeApplicationServices = detectComposeApplications(repo, repoComposeFile);
+  const sourceComposeApplications = composeApplicationServices.filter(service => service.source === "build");
+  const composeHealthCandidates = sourceComposeApplications.length === 1
+    ? sourceComposeApplications[0].healthCandidates
+    : [];
   const architecture = detectArchitecture(repo, pkg, nestedFrontend, repoComposeFile);
   const pm = detectPackageManager(repo, pkg, nestedFrontend?.dir ?? null);
   const rootApp = pickAppCommand(pkg, pm.pm);
 
-  const backendCommand = architecture.flaskCommand ?? architecture.makeRunCommand;
+  const commandEvidence = [
+    architecture.flaskCommand,
+    architecture.makeCommand?.command ?? null,
+    architecture.goEntrypoint?.sourceText ?? null,
+    architecture.rubyCommand?.commandBase ?? null,
+  ];
+  const { port, evidence: portEvidence } = detectPort(pkg, repo, commandEvidence);
+  const goCommand = architecture.goEntrypoint
+    ? [
+        architecture.goEntrypoint.commandBase,
+        architecture.goEntrypoint.portFlag ? `--port ${port}` : "",
+        architecture.goEntrypoint.dataDirFlag ? "--data .bootproof/runtime/go-app" : "",
+      ].filter(Boolean).join(" ")
+    : null;
+  const rubyCommand = architecture.rubyCommand ? `${architecture.rubyCommand.commandBase} -p ${port}` : null;
+  const repositoryBackendCommand = architecture.makeCommand?.command ?? goCommand ?? rubyCommand;
+  const backendCommand = architecture.flaskCommand ?? repositoryBackendCommand;
   const nestedFrontendCommand = architecture.frontendMakeCommand;
   const frontendCommand = nestedFrontendCommand ?? rootApp.command;
-  const appCommand = architecture.flaskCommand ?? rootApp.command;
+  const appCommand = architecture.flaskCommand
+    ?? (architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command ? rootApp.command : null)
+    ?? repositoryBackendCommand
+    ?? rootApp.command;
   const appCommandSource = architecture.flaskCommand
     ? `Makefile Flask command: ${architecture.flaskCommand}`
-    : rootApp.source;
-  const recognizedApplication = architecture.hasPythonBackend || architecture.hasGoBackend || architecture.hasRubyBackend || architecture.hasMakeDrivenBackend;
+    : architecture.makeCommand && appCommand === architecture.makeCommand.command
+      ? architecture.makeCommand.source
+      : goCommand && appCommand === goCommand
+        ? architecture.goEntrypoint?.source ?? rootApp.source
+        : rubyCommand && appCommand === rubyCommand
+          ? architecture.rubyCommand?.source ?? rootApp.source
+          : rootApp.source;
+  const recognizedApplication =
+    architecture.hasPythonBackend ||
+    architecture.hasGoBackend ||
+    architecture.hasRubyBackend ||
+    architecture.hasMakeDrivenBackend ||
+    composeApplicationServices.some(service => service.source === "build");
   const workspaces = opts.workspace ? [] : rankWorkspaces(rootRepo, rootPkg);
   const notApp = looksLikeLibrary(pkg, appCommand, workspaces.some(candidate => candidate.dir !== "."), recognizedApplication);
-  const { port, evidence: portEvidence } = detectPort(pkg, repo, [backendCommand, frontendCommand]);
   const env = detectEnv(repo);
   const services = detectServices(pkg, repo, repoComposeFile);
   const rootDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
-  const dependencyInstallRequired = Boolean(
+  const preparationCommands: PreparationCommand[] = [];
+  const nodePreparationRequired = Boolean(
     rootApp.command &&
     (Object.keys(rootDeps).length > 0 || exists(repo, "yarn.lock") || exists(repo, "pnpm-lock.yaml") || exists(repo, "package-lock.json") || exists(repo, "nx.json")),
   );
+  if (nodePreparationRequired) {
+    const command = installCommand(pm.pm, pm.packageDir);
+    if (command) preparationCommands.push({ id: "install", kind: "install", command, description: "install Node dependencies", source: pm.evidence });
+  }
+  if (goCommand && appCommand === goCommand && exists(repo, "go.sum")) {
+    preparationCommands.push({ id: "go-modules", kind: "install", command: "go mod download", description: "download declared Go modules", source: "go.sum present" });
+  }
+  if (rubyCommand && appCommand === rubyCommand) {
+    preparationCommands.push({ id: "bundle-install", kind: "install", command: "bundle install", description: "install declared Ruby gems", source: "Gemfile and bin/rails present" });
+  }
+  const dependencyInstallRequired = preparationCommands.length > 0;
   const incompleteAppCommand = Boolean(architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command);
   const multiAppCommand = Boolean(rootApp.command && /\b(?:turbo|nx)\s+run\s+dev\b[^\n]*--parallel\b/i.test(rootApp.source));
   const commandScope = multiAppCommand
@@ -341,11 +496,21 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ? "frontend/dev pipeline only; Go backend markers also detected"
     : architecture.hasPythonBackend && nestedFrontend
       ? "Python/Flask backend command; React frontend and worker require separate orchestration"
+    : goCommand && appCommand === goCommand && nestedFrontend
+        ? "Go application command serving repository-embedded frontend assets"
+        : rubyCommand && appCommand === rubyCommand
+          ? "Rails application command"
+          : architecture.makeCommand && appCommand === architecture.makeCommand.command
+            ? "repository-defined Make target"
       : appCommand
         ? "application command"
         : "no runnable command selected";
-  const healthCandidates = notApp || !appCommand
+  const healthCandidates = notApp
     ? []
+    : !appCommand && composeHealthCandidates.length
+      ? composeHealthCandidates
+      : !appCommand
+        ? []
     : architecture.hasGoBackend && architecture.hasNodeFrontend
       ? [`http://localhost:${port}/api/health`, `http://localhost:${port}/`]
       : [`http://localhost:${port}/`];
@@ -367,11 +532,14 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     frontendMarkers: architecture.frontendMarkers,
     serviceMarkers: architecture.serviceMarkers,
     repoComposeFile,
+    composeApplicationServices,
+    composeHealthCandidates,
     setupSteps: architecture.setupSteps,
     packageManager: pm.pm,
     packageManagerEvidence: pm.evidence,
     packageManagerVersion: pm.version ?? pkg?.engines?.[pm.pm] ?? rootPkg?.engines?.[pm.pm] ?? null,
-    installCommand: installCommand(pm.pm, pm.packageDir),
+    installCommand: preparationCommands.find(command => command.kind === "install")?.command ?? null,
+    preparationCommands,
     dependencyInstallRequired,
     appCommand,
     appCommandSource,
