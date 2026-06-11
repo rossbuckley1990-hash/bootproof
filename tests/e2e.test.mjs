@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 
@@ -19,6 +20,18 @@ function freshCopy(name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bp-e2e-"));
   fs.cpSync(path.join(FIX, name), tmp, { recursive: true });
   return tmp;
+}
+
+async function getFreePort() {
+  return await new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      server.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
 }
 
 function fakeGithubRemote(fixture) {
@@ -91,9 +104,9 @@ test("honesty: local provider refuses without --unsafe-local", () => {
   assert.deepEqual(att.observed, [], "a refusal must not pretend any step executed");
 });
 
-test("e2e: real boot, observed health, signed attestation that verifies", () => {
+test("e2e: real boot, observed health, signed attestation that verifies", async () => {
   const repo = freshCopy("hello-app");
-  const port = 3000 + Math.floor(Math.random() * 2000);
+  const port = await getFreePort();
   const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   assert.match(out, /BOOTED/);
   assert.match(out, new RegExp(`observed HTTP 200 at http://localhost:${port}/`));
@@ -169,9 +182,9 @@ test("machine interface: --ci --json fails closed for refusals", () => {
   assert.equal(result.failureClass, "not_an_application");
 });
 
-test("machine interface: --ci --json exits zero only for observed healthy boot", () => {
+test("machine interface: --ci --json exits zero only for observed healthy boot", async () => {
   const repo = freshCopy("hello-app");
-  const port = 6000 + Math.floor(Math.random() * 1000);
+  const port = await getFreePort();
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000", "--ci", "--json"], true);
   assert.equal(code, 0);
   assert.doesNotMatch(out, /\x1b\[/);
@@ -228,9 +241,9 @@ test("remote mode clones GitHub sources but refuses execution without the existi
   assert.match(JSON.parse(replay.out).explanation, /will not execute remote repository code/);
 });
 
-test("remote mode executes only after --provider local --unsafe-local and requires observed health", () => {
+test("remote mode executes only after --provider local --unsafe-local and requires observed health", async () => {
   const remote = fakeGithubRemote("hello-app");
-  const port = 6800 + Math.floor(Math.random() * 150);
+  const port = await getFreePort();
   const url = "https://github.com/example/hello-app";
   const { out, code } = run(
     ["up", url, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000", "--ci", "--json"],
@@ -323,9 +336,9 @@ test("package manager version mismatch is signed before install runs", () => {
   assert.equal(att.observed[0].command, "pnpm --version");
 });
 
-test("health HTTP error fixture is not mislabeled as a timeout", () => {
+test("health HTTP error fixture is not mislabeled as a timeout", async () => {
   const repo = freshCopy("health-http-error");
-  const port = 7600 + Math.floor(Math.random() * 400);
+  const port = await getFreePort();
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--ci"], true);
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — health_http_error/);
@@ -375,10 +388,11 @@ test("matching package manager does not make a parallel monorepo health target u
   assert.deepEqual(att.observed, []);
 });
 
-test("health URLs discovered from app logs are polled and preserved in signed proof", () => {
+test("health URLs discovered from app logs are polled and preserved in signed proof", async () => {
   const repo = freshCopy("hello-app");
-  const actualPort = 7100 + Math.floor(Math.random() * 500);
-  const inferredPort = actualPort + 700;
+  const actualPort = await getFreePort();
+  let inferredPort = await getFreePort();
+  while (inferredPort === actualPort) inferredPort = await getFreePort();
   fs.writeFileSync(path.join(repo, "server.js"), `
 const http = require("http");
 const port = ${actualPort};
@@ -411,8 +425,9 @@ test("honesty: failed boot writes failed attestation with classified evidence", 
   assert.ok(att.result.failureEvidence.includes("EADDRINUSE"), "raw evidence must be preserved");
 });
 
-test("honesty: real env files are never touched by a full run", () => {
+test("honesty: real env files are never touched by a full run", async () => {
   const repo = freshCopy("hello-app");
+  const port = await getFreePort();
   const protectedEnv = {
     ".env": "REAL_SECRET=do-not-touch\n",
     ".env.local": "ALSO_REAL=untouchable\n",
@@ -420,15 +435,16 @@ test("honesty: real env files are never touched by a full run", () => {
     ".env.production": "PRODUCTION_SECRET=preserve-me-too\n",
   };
   for (const [name, contents] of Object.entries(protectedEnv)) fs.writeFileSync(path.join(repo, name), contents);
-  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5790", "--timeout", "20000"]);
+  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   for (const [name, contents] of Object.entries(protectedEnv)) {
     assert.equal(fs.readFileSync(path.join(repo, name), "utf8"), contents, `${name} must remain untouched`);
   }
 });
 
-test("honesty: skipped steps are never rendered with a green check", () => {
+test("honesty: skipped steps are never rendered with a green check", async () => {
   const repo = freshCopy("hello-app");
-  const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5891", "--timeout", "20000"]);
+  const port = await getFreePort();
+  const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   for (const line of out.split("\n")) if (line.includes("skipped")) assert.ok(!line.includes("\u2713"), `skipped step rendered as success: ${line}`);
 });
 
@@ -455,9 +471,10 @@ test("monorepo ambiguity is surfaced, not guessed", () => {
   assert.deepEqual(att.observed, []);
 });
 
-test("attest export: redacted entry written locally, nothing uploaded, consent messaging shown", () => {
+test("attest export: redacted entry written locally, nothing uploaded, consent messaging shown", async () => {
   const repo = freshCopy("hello-app");
-  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5933", "--timeout", "20000"]);
+  const port = await getFreePort();
+  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   const { out } = run(["attest", "export", repo]);
   assert.match(out, /Nothing has been uploaded/);
   assert.ok(fs.existsSync(path.join(repo, ".bootproof", "registry-entry.json")));

@@ -1,17 +1,46 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { inferRepo } from "../dist/infer.js";
 import { classifyFailure } from "../dist/taxonomy.js";
 import { buildPlan, envExampleFor, PROTECTED_ENV } from "../dist/plan.js";
 import { buildAttestation, verifySignature } from "../dist/proof.js";
-import { extractHealthCandidates } from "../dist/exec.js";
+import { extractHealthCandidates, minimalEnv, pollHealth, superviseApp } from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote } from "../dist/remote.js";
 
 const FIX = path.resolve("fixtures");
+
+async function getFreePort() {
+  return await new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      server.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+async function waitForPortRelease(port, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const released = await new Promise(resolve => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.listen(port, "127.0.0.1", () => {
+        server.close(() => resolve(true));
+      });
+    });
+    if (released) return true;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return false;
+}
 
 test("infers a runnable node app with evidence", () => {
   const inf = inferRepo(path.join(FIX, "hello-app"));
@@ -121,6 +150,21 @@ test("health candidates are extracted from common application log formats", () =
     extractHealthCandidates("Local: http://127.0.0.1:5173/\nserver listening on port 8088\nserver listening on 9090"),
     ["http://127.0.0.1:5173/", "http://localhost:8088/", "http://localhost:9090/"],
   );
+});
+
+test("supervisor stop terminates the process tree and releases its port", async () => {
+  const port = await getFreePort();
+  const app = superviseApp(
+    "node server.js",
+    path.join(FIX, "hello-app"),
+    minimalEnv({ PORT: String(port) }),
+  );
+  const health = await pollHealth(`http://127.0.0.1:${port}/`, 10_000, 100);
+  assert.equal(health.responded, true, "fixture server must start before cleanup is tested");
+
+  await app.stop();
+
+  assert.equal(await waitForPortRelease(port), true, `port ${port} remained bound after supervisor stop`);
 });
 
 test("remote URL parsing accepts only credential-free HTTPS GitHub repositories", () => {

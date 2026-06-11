@@ -4,7 +4,9 @@ on:
   pull_request:
 jobs:
   test:
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: ["20.11", "22"]
@@ -14,4 +16,15 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "${{ matrix.node }}" }
       - run: npm ci
-      - run: npm run ci
+      - name: Run CI
+        shell: pwsh
+        run: |
+          npm run ci 2>&1 | Tee-Object -FilePath "test-output-${{ matrix.os }}-node-${{ matrix.node }}.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}-node-${{ matrix.node }}
+          path: test-output-${{ matrix.os }}-node-${{ matrix.node }}.log
+          if-no-files-found: warn
