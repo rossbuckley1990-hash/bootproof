@@ -111,6 +111,38 @@ function detectComposeApplications(repo: string, composeFile: string | null): Co
   }
 }
 
+function applyBootProofComposeOverride(repo: string, applications: ComposeApplicationService[]): ComposeApplicationService[] {
+  const overridePath = path.join(repo, "docker-compose.bootproof.override.yml");
+  if (!fs.existsSync(overridePath)) return applications;
+  try {
+    const document = parse(readText(repo, "docker-compose.bootproof.override.yml").replace(/!override\b/g, "")) as {
+      services?: Record<string, Record<string, any>>;
+    };
+    return applications.map(application => {
+      const service = document.services?.[application.name];
+      const port = (Array.isArray(service?.ports) ? service.ports : [])
+        .map(composePublishedPort)
+        .find((candidate): candidate is { host: number; container: number } => Boolean(candidate));
+      if (!port) return application;
+      return {
+        ...application,
+        healthCandidates: application.healthCandidates.map(candidate => {
+          try {
+            const url = new URL(candidate);
+            url.hostname = "localhost";
+            url.port = String(port.host);
+            return url.toString();
+          } catch {
+            return candidate;
+          }
+        }),
+      };
+    });
+  } catch {
+    return applications;
+  }
+}
+
 function packageManagerFromField(field: string | undefined): { pm: PackageManager; version: string | null } | null {
   if (!field) return null;
   const at = field.lastIndexOf("@");
@@ -420,7 +452,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const rootPkg = opts.workspace ? readJson(path.join(rootRepo, "package.json")) : pkg;
   const nestedFrontend = detectNestedFrontend(repo);
   const repoComposeFile = detectRepoComposeFile(repo);
-  const composeApplicationServices = detectComposeApplications(repo, repoComposeFile);
+  const composeApplicationServices = applyBootProofComposeOverride(
+    repo,
+    detectComposeApplications(repo, repoComposeFile),
+  );
   const sourceComposeApplications = composeApplicationServices.filter(service => service.source === "build");
   const composeHealthCandidates = sourceComposeApplications.length === 1
     ? sourceComposeApplications[0].healthCandidates

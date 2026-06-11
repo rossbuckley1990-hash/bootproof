@@ -58,6 +58,28 @@ They get a signed verdict and a deterministic exit code.
 
 The same engine powers both.
 
+## Verified Repairs
+
+For the small deterministic repair registry:
+
+```bash
+bootproof fix .
+```
+
+BootProof reuses a signature-valid failure only at the exact clean Git commit; otherwise it reproduces the failure in a temporary copy. It applies one known remediation there and reruns full verification. It emits a signed `bootproof/repair-receipt/v1` only when the before run failed and the after run observed successful HTTP health.
+
+The original working tree is not edited. File changes are written as a reviewable patch under `.bootproof/`; the human decides whether to apply it.
+
+Machine mode is:
+
+```bash
+bootproof fix . --json
+```
+
+It emits one `bootproof/repair-result/v1` object and exits `0` only when a verified receipt exists.
+
+See [docs/REPAIR_RECEIPT.md](docs/REPAIR_RECEIPT.md).
+
 ## What It Tells Humans
 
 A failed run is still useful:
@@ -170,6 +192,7 @@ BootProof currently provides:
 - signed Ed25519 attestations
 - strict JSON and fail-closed CI output
 - redacted registry-entry export
+- deterministic sandboxed repairs with signed before/after receipts for the registered v0.3 classes
 
 Detection is broader than orchestration. For example:
 

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -129,6 +130,34 @@ function stopFixtureProcess(repo) {
   } catch {
     // The fixture process may already have exited.
   }
+}
+
+function hashWorkingTree(repo) {
+  const hash = crypto.createHash("sha256");
+  const walk = (dir) => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+      .filter(entry => entry.name !== ".bootproof")
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const absolute = path.join(dir, entry.name);
+      const relative = path.relative(repo, absolute).replace(/\\/g, "/");
+      hash.update(relative);
+      if (entry.isDirectory()) walk(absolute);
+      else if (entry.isSymbolicLink()) hash.update(`link:${fs.readlinkSync(absolute)}`);
+      else hash.update(fs.readFileSync(absolute));
+    }
+  };
+  walk(repo);
+  return hash.digest("hex");
+}
+
+async function occupyPort(port) {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+  return server;
 }
 
 test("honesty: dry run prints 'would', never a green check, writes nothing", () => {
@@ -532,6 +561,212 @@ test("multiple source-built Compose HTTP services refuse before Docker executes"
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.failureClass, "orchestration_not_supported");
   assert.deepEqual(att.observed, [], "Docker must not execute for an ambiguous Compose application");
+});
+
+test("repair: conflicting repository Compose port produces signed verified receipt without touching the working tree", async () => {
+  const repo = freshCopy("repair-service-port-conflict");
+  for (const [name, contents] of Object.entries({
+    ".env": "REAL_SECRET=preserve\n",
+    ".env.local": "LOCAL_SECRET=preserve\n",
+    ".env.development": "DEV_SECRET=preserve\n",
+    ".env.production": "PROD_SECRET=preserve\n",
+  })) {
+    fs.writeFileSync(path.join(repo, name), contents);
+  }
+  const occupied = await getFreePort();
+  fs.writeFileSync(
+    path.join(repo, "docker-compose.yml"),
+    fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8").replace("31998", String(occupied)),
+  );
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeDockerShim(bin);
+  const blocker = await occupyPort(occupied);
+  const beforeHash = hashWorkingTree(repo);
+
+  try {
+    const { out, code } = run(
+      ["fix", repo, "--provider", "docker", "--timeout", "10000", "--json"],
+      true,
+      { PATH: pathWith(bin) },
+    );
+    assert.equal(code, 0, out);
+    assert.equal(out.trim().split("\n").length, 1, "repair JSON mode must emit one object");
+    const result = JSON.parse(out);
+    assert.equal(result.schema, "bootproof/repair-result/v1");
+    assert.equal(result.repaired, true);
+    assert.equal(result.failureClass, "service_port_allocated");
+    assert.equal(result.repairId, "remap-conflicting-service-port");
+    assert.equal(result.receiptPath, ".bootproof/repair-receipt.json");
+    assert.equal(result.patchPath, ".bootproof/repair-remap-conflicting-service-port.patch");
+
+    assert.equal(hashWorkingTree(repo), beforeHash, "repair must not mutate any original working-tree byte");
+    assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.override.yml")), false);
+    const receiptPath = path.join(repo, result.receiptPath);
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    assert.equal(receipt.schema, "bootproof/repair-receipt/v1");
+    assert.equal(receipt.repair.kind, "plan-step");
+    assert.deepEqual(receipt.repair.filesChanged, ["docker-compose.bootproof.override.yml"]);
+    assert.equal(receipt.repair.diff, null);
+    assert.match(receipt.repair.planDelta, /ports: !override/);
+    assert.equal(receipt.verification.before.booted, false);
+    assert.equal(receipt.verification.before.failureClass, "service_port_allocated");
+    assert.equal(receipt.verification.after.booted, true);
+    assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
+    assert.ok(receipt.signature);
+
+    const after = JSON.parse(fs.readFileSync(path.join(repo, result.afterAttestationPath), "utf8"));
+    assert.equal(after.result.booted, true);
+    assert.equal(after.result.healthVerified, true);
+    assert.ok(after.observed.some(observed => observed.kind === "health" && observed.ok));
+    const before = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    const beforeAttestationHash = crypto.createHash("sha256").update(JSON.stringify(before)).digest("hex");
+    const afterAttestationHash = crypto.createHash("sha256").update(JSON.stringify(after)).digest("hex");
+    assert.equal(receipt.failure.beforeAttestationSha256, beforeAttestationHash);
+    assert.equal(receipt.verification.before.attestationSha256, beforeAttestationHash);
+    assert.equal(receipt.verification.after.attestationSha256, afterAttestationHash);
+    assert.match(run(["verify", path.join(repo, result.afterAttestationPath)]).out, /signature valid/);
+
+    const patch = fs.readFileSync(path.join(repo, result.patchPath), "utf8");
+    assert.match(patch, /docker-compose\.bootproof\.override\.yml/);
+    assert.match(patch, /ports: !override/);
+    assert.match(run(["verify", receiptPath]).out, /repair receipt signature valid/);
+    assert.match(run(["explain", receiptPath]).out, /Before: NOT VERIFIED — service_port_allocated/);
+
+    receipt.verification.after.booted = false;
+    fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2));
+    const tampered = run(["verify", receiptPath], true);
+    assert.equal(tampered.code, 1);
+    assert.match(tampered.out, /signature INVALID/);
+  } finally {
+    blocker.close();
+  }
+});
+
+test("repair: local sandbox execution still requires explicit unsafe acknowledgement", () => {
+  const repo = freshCopy("hello-app");
+  const beforeHash = hashWorkingTree(repo);
+  const { out, code } = run(["fix", repo, "--provider", "local", "--json"], true);
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.equal(result.repaired, false);
+  assert.match(result.explanation, /--unsafe-local/);
+  assert.equal(hashWorkingTree(repo), beforeHash);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof")), false, "refused repair must not write evidence for an execution that never ran");
+});
+
+test("repair: dry run executes nothing, writes nothing, and proves nothing", () => {
+  const repo = freshCopy("repair-service-port-conflict");
+  const beforeHash = hashWorkingTree(repo);
+  const { out, code } = run(["fix", repo, "--dry-run", "--json"], true, { PATH: "" });
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.equal(result.repaired, false);
+  assert.match(result.explanation, /nothing was executed, nothing was written/i);
+  assert.equal(hashWorkingTree(repo), beforeHash);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof")), false);
+});
+
+test("repair: fresh signed failure at the exact clean commit is reused", async () => {
+  const repo = freshCopy("repair-service-port-conflict");
+  const occupied = await getFreePort();
+  fs.writeFileSync(
+    path.join(repo, "docker-compose.yml"),
+    fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8").replace("31998", String(occupied)),
+  );
+  fs.writeFileSync(path.join(repo, ".gitignore"), ".bootproof/\n");
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeDockerShim(bin);
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.name", "BootProof Test");
+  git("config", "user.email", "bootproof@example.invalid");
+  git("config", "commit.gpgsign", "false");
+  git("add", ".");
+  git("commit", "-q", "-m", "fixture");
+  const blocker = await occupyPort(occupied);
+
+  try {
+    const baseline = run(
+      ["up", repo, "--provider", "docker", "--timeout", "500", "--ci", "--json"],
+      true,
+      { PATH: pathWith(bin) },
+    );
+    assert.equal(baseline.code, 1);
+    assert.equal(JSON.parse(baseline.out).failureClass, "service_port_allocated");
+    const beforeAttestation = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(beforeAttestation.repo.dirty, false);
+    const treeHash = hashWorkingTree(repo);
+
+    const fixed = run(
+      ["fix", repo, "--timeout", "10000", "--json"],
+      true,
+      { PATH: pathWith(bin), BOOTPROOF_FAIL_IF_BASELINE_RERUN: "1" },
+    );
+    assert.equal(fixed.code, 0, fixed.out);
+    const result = JSON.parse(fixed.out);
+    assert.equal(result.repaired, true);
+    assert.equal(result.failureClass, "service_port_allocated");
+    assert.equal(hashWorkingTree(repo), treeHash);
+  } finally {
+    blocker.close();
+  }
+});
+
+test("repair: known remediation that does not boot writes no receipt and preserves attempt evidence", async () => {
+  const repo = freshCopy("repair-service-port-conflict");
+  const occupied = await getFreePort();
+  fs.writeFileSync(
+    path.join(repo, "docker-compose.yml"),
+    fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8").replace("31998", String(occupied)),
+  );
+  fs.writeFileSync(path.join(repo, ".fake-repair-stall"), "remain unhealthy\n");
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeDockerShim(bin);
+  const blocker = await occupyPort(occupied);
+  const beforeHash = hashWorkingTree(repo);
+
+  try {
+    const { out, code } = run(
+      ["fix", repo, "--provider", "docker", "--timeout", "500", "--json"],
+      true,
+      { PATH: pathWith(bin) },
+    );
+    assert.equal(code, 1);
+    const result = JSON.parse(out);
+    assert.equal(result.repaired, false);
+    assert.equal(result.failureClass, "service_port_allocated");
+    assert.match(result.explanation, /known remediation .* did not resolve it; evidence preserved/);
+    assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+    assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-remap-conflicting-service-port.patch")), false);
+    assert.equal(hashWorkingTree(repo), beforeHash);
+    const failed = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(failed.result.failureClass, "service_port_allocated");
+    assert.match(failed.result.failureEvidence, /Repair attempt remap-conflicting-service-port/);
+    assert.match(failed.result.failureEvidence, /did not resolve it; evidence preserved/);
+    assert.ok(failed.signature);
+  } finally {
+    blocker.close();
+  }
+});
+
+test("repair: unregistered failure exits honestly without a receipt", () => {
+  const repo = freshCopy("library-only");
+  const { out, code } = run(["fix", repo, "--json"], true);
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.equal(result.schema, "bootproof/repair-result/v1");
+  assert.equal(result.repaired, false);
+  assert.equal(result.failureClass, "not_an_application");
+  assert.equal(result.receiptPath, null);
+  assert.equal(result.patchPath, null);
+  assert.equal(result.explanation, "no verified remediation is known for not_an_application yet");
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+  const attestation = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(attestation.result.failureClass, "not_an_application");
+  assert.ok(attestation.signature);
 });
 
 test("Grafana-like hybrid fails closed when dependency installation is skipped", () => {

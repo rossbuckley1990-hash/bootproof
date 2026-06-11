@@ -1,4 +1,4 @@
-import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation } from "./types.js";
+import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation, PreparationCommand } from "./types.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,6 +25,8 @@ export interface UpOptions {
   timeoutMs: number;
   install: boolean;
   port?: number;
+  environment?: Record<string, string>;
+  additionalPreparationCommands?: PreparationCommand[];
 }
 
 export interface UpOutcome {
@@ -54,7 +56,7 @@ function commandUsesExecutable(command: string | undefined, executable: string):
   return new RegExp(`(?:^|&&|\\|\\||;)\\s*${escaped}(?:\\s|$)`).test(command);
 }
 
-function packageManagerVersionEvidence(inference: Inference, plan: RunPlan): string | null {
+function packageManagerVersionEvidence(inference: Inference, plan: RunPlan, env: NodeJS.ProcessEnv): string | null {
   if (inference.packageManager === "unknown" || !inference.packageManagerVersion) return null;
   if (!plan.steps.some(planned => commandUsesExecutable(planned.command, inference.packageManager))) return null;
   try {
@@ -62,9 +64,9 @@ function packageManagerVersionEvidence(inference: Inference, plan: RunPlan): str
       ? execFileSync(
           process.env.ComSpec ?? "cmd.exe",
           ["/d", "/s", "/c", `${inference.packageManager} --version`],
-          { cwd: inference.repoPath, encoding: "utf8" },
+          { cwd: inference.repoPath, encoding: "utf8", env },
         ).trim()
-      : execFileSync(inference.packageManager, ["--version"], { cwd: inference.repoPath, encoding: "utf8" }).trim();
+      : execFileSync(inference.packageManager, ["--version"], { cwd: inference.repoPath, encoding: "utf8", env }).trim();
     if (packageManagerVersionMatches(inference.packageManagerVersion, actual)) return null;
     return `packageManager field or engines.${inference.packageManager} expected version: ${inference.packageManagerVersion}\nGot: ${actual}`;
   } catch {
@@ -107,6 +109,10 @@ function unsupportedOrchestrationExplanation(inference: Inference): string | nul
 export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> {
   const startedAt = new Date().toISOString();
   const inference = inferRepo(repoPath, { workspace: opts.workspace });
+  if (opts.additionalPreparationCommands?.length) {
+    inference.preparationCommands.push(...opts.additionalPreparationCommands);
+    inference.dependencyInstallRequired = true;
+  }
   if (opts.port) {
     if (inference.appCommand) {
       inference.port = opts.port;
@@ -119,6 +125,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     }
   }
   const plan = buildPlan(inference, opts.provider);
+  const env = minimalEnv({ PORT: String(inference.port), ...opts.environment });
   const runsSourceComposeApplication =
     opts.provider === "docker" &&
     Boolean(inference.repoComposeFile) &&
@@ -205,7 +212,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     );
   }
   if (opts.install) {
-    const versionEvidence = packageManagerVersionEvidence(inference, plan);
+    const versionEvidence = packageManagerVersionEvidence(inference, plan, env);
     if (versionEvidence) {
       const observed = step(
         "package-manager-version",
@@ -243,7 +250,6 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     fs.mkdirSync(path.join(inference.repoPath, ".bootproof", "runtime"), { recursive: true });
   }
   const observed: ObservedStep[] = [];
-  const env = minimalEnv({ PORT: String(inference.port) });
   const explanationWithMissingEnv = (failureClass: FailureClass, evidence: string, explanation: string): string => {
     if (failureClass !== "missing_env_var") return explanation;
     const names = extractMissingEnvNames(evidence);

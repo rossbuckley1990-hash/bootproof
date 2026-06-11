@@ -17,6 +17,10 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 11. A process starting is not enough. A health signal must be observed.
 12. Confidence describes evidence found, not predicted success.
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
+14. A repair is only ever proposed with a verified before and after attestation.
+15. Repairs never touch the user's working tree; diffs are applied by the human.
+16. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
+17. An unverified or failed remediation is reported as such and is never proposed on hope.
 
 These behaviors are enforced by tests.
 
@@ -63,6 +67,21 @@ It does not prove:
 - another machine will produce the same outcome
 
 A repository Compose receipt is equally narrow. `docker compose up -d` exit 0 proves only that Compose accepted the request. BootProof issues `BOOTED` only after HTTP responds. If health fails, it records Compose service state and logs where available.
+
+## Verified Repairs
+
+`bootproof fix` copies the repository to a temporary sandbox, applies one registered deterministic remediation, and reruns the full BootProof verification engine. It reuses an existing failed attestation only when its signature is valid and it names the exact current clean Git commit; otherwise the failure is reproduced in the sandbox first.
+
+The original working tree is never used as the repair target. BootProof writes only its evidence under `.bootproof/`:
+
+- the signed failed before attestation
+- a human-reviewable patch when files changed
+- the signed healthy after attestation
+- the signed repair receipt linking both hashes
+
+If the sandbox does not reach observed HTTP health, no repair receipt or patch is emitted. The failed attempt is appended to signed failure evidence.
+
+See [REPAIR_RECEIPT.md](REPAIR_RECEIPT.md).
 
 ## Trust Levels
 
