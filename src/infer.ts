@@ -29,6 +29,21 @@ interface PackageManagerDetection {
   packageDir: string;
 }
 
+const REPO_COMPOSE_FILES = [
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "compose.yaml",
+  "compose.yml",
+  "docker-compose.dev.yml",
+  "docker-compose.dev.yaml",
+  "docker/docker-compose.yml",
+  "docker/docker-compose.yaml",
+];
+
+function detectRepoComposeFile(repo: string): string | null {
+  return REPO_COMPOSE_FILES.find(file => exists(repo, file)) ?? null;
+}
+
 function packageManagerFromField(field: string | undefined): { pm: PackageManager; version: string | null } | null {
   if (!field) return null;
   const at = field.lastIndexOf("@");
@@ -82,15 +97,15 @@ function detectNestedFrontend(repo: string): { dir: string; pkg: any } | null {
   return null;
 }
 
-function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: string; pkg: any } | null) {
+function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: string; pkg: any } | null, repoComposeFile: string | null) {
   const makefile = readText(repo, "Makefile");
   const pyproject = readText(repo, "pyproject.toml");
   const setupPy = readText(repo, "setup.py");
-  const compose = readText(repo, "docker-compose.yml") + readText(repo, "docker-compose.yaml") + readText(repo, "compose.yaml");
+  const compose = repoComposeFile ? readText(repo, repoComposeFile) : "";
   const rootDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const nestedDeps = { ...(nestedFrontend?.pkg?.dependencies ?? {}), ...(nestedFrontend?.pkg?.devDependencies ?? {}) };
 
-  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "go.mod", "go.work", "Makefile", "superset/app.py", "superset/config.py"]);
+  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "go.mod", "go.work", "Gemfile", "config/database.yml", "Makefile", "superset/app.py", "superset/config.py"]);
   if (isDirectory(repo, "pkg")) backendMarkers.push("pkg/");
 
   const frontendMarkers = present(repo, ["package.json", "yarn.lock", "pnpm-lock.yaml", "nx.json"]);
@@ -98,13 +113,15 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (isDirectory(repo, "packages")) frontendMarkers.push("packages/");
   if (nestedFrontend) frontendMarkers.push(`${nestedFrontend.dir}/package.json`);
 
-  const serviceMarkers = present(repo, ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "docker-compose-light.yml"]);
+  const serviceMarkers = present(repo, [...REPO_COMPOSE_FILES, "docker-compose-light.yml"]);
   const hasPythonBackend =
     (exists(repo, "pyproject.toml") || exists(repo, "setup.py")) &&
     (exists(repo, "superset/app.py") || exists(repo, "superset/config.py") || /\bflask\b/i.test(pyproject + setupPy + makefile));
   const hasFlask = hasPythonBackend && (/\bflask\b/i.test(pyproject + setupPy + makefile) || exists(repo, "superset/app.py"));
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
-  const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend);
+  const hasRubyBackend = exists(repo, "Gemfile");
+  const hasMakeDrivenBackend = exists(repo, "Makefile") && /^\s*(?:run|serve|server|dev|start):/m.test(makefile);
+  const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend);
   const hasReact = Boolean(rootDeps.react || nestedDeps.react);
   const hasReactFrontend = Boolean(nestedFrontend && hasReact);
   const hasCelery = /\bcelery\b/i.test(pyproject + setupPy + makefile + compose);
@@ -114,6 +131,8 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (hasPythonBackend) stack.push("python-backend");
   if (hasFlask) stack.push("flask");
   if (hasGoBackend) stack.push("go-backend");
+  if (hasRubyBackend) stack.push("ruby-backend");
+  if (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend) stack.push("make-driven");
   if (hasNodeFrontend) stack.push("node-frontend");
   if (hasReactFrontend) stack.push("react-frontend");
   if (hasReact && !hasReactFrontend) stack.push("react");
@@ -148,6 +167,8 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     hasPythonBackend,
     hasFlask,
     hasGoBackend,
+    hasRubyBackend,
+    hasMakeDrivenBackend,
     hasNodeFrontend,
   };
 }
@@ -162,11 +183,11 @@ function detectPort(pkg: any, repo: string, commands: Array<string | null>): { p
   return { port: 3000, evidence: "default assumption (3000); not evidence-based" };
 }
 
-function detectServices(pkg: any, repo: string): ServiceNeed[] {
+function detectServices(pkg: any, repo: string, repoComposeFile: string | null): ServiceNeed[] {
   const out: ServiceNeed[] = [];
   const envEx = readText(repo, ".env.example") + readText(repo, ".env.sample");
   const schema = readText(repo, "prisma/schema.prisma");
-  const compose = readText(repo, "docker-compose.yml") + readText(repo, "docker-compose.yaml") + readText(repo, "compose.yaml");
+  const compose = repoComposeFile ? readText(repo, repoComposeFile) : "";
   const pyproject = readText(repo, "pyproject.toml");
   const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   if (/postgres(ql)?:\/\//i.test(envEx) || /provider\s*=\s*"postgresql"/.test(schema) || deps.pg || /^\s{0,4}postgres:\s*$/m.test(compose))
@@ -226,6 +247,7 @@ function expandWorkspacePattern(repo: string, pattern: string): string[] {
 }
 
 const TEST_PATH = /(^|[-_/])(e2e|tests?|test-plugins|fixtures?|examples?|samples?|demos?|mocks?)([-_/]|$)/i;
+const DOCUMENTATION_PATH = /(^|[\/])(storybook|docs?)([\/]|$)/i;
 const SCAFFOLD_NAME = /^create-|-(template|example|fixture|sandbox|sample|demo|mock)$/i;
 
 function scoreWorkspace(repo: string, dir: string, wpkg: any, isRoot: boolean): WorkspaceCandidate {
@@ -247,6 +269,7 @@ function scoreWorkspace(repo: string, dir: string, wpkg: any, isRoot: boolean): 
     if (exists(repo, `${dir}/project.json`)) { score += 2; reasons.push("project.json present"); }
   }
   if (TEST_PATH.test(`${dir}/${wpkg?.name ?? ""}`)) { score -= 10; reasons.push("test/example path downranked"); }
+  if (DOCUMENTATION_PATH.test(`${dir}/${wpkg?.name ?? ""}`)) { score -= 3; reasons.push("documentation/storybook downranked"); }
   if (wpkg?.private !== true && (wpkg?.main || wpkg?.exports) && !command) { score -= 2; reasons.push("looks like a publishable library"); }
   if (SCAFFOLD_NAME.test(wpkg?.name ?? "") || SCAFFOLD_NAME.test(path.basename(dir))) { score -= 4; reasons.push("scaffold/sample name downranked"); }
   return { dir, name: wpkg?.name ?? dir, score, reason: reasons.join("; ") || "no signals" };
@@ -287,7 +310,8 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const rootRepo = path.resolve(repoPath);
   const rootPkg = opts.workspace ? readJson(path.join(rootRepo, "package.json")) : pkg;
   const nestedFrontend = detectNestedFrontend(repo);
-  const architecture = detectArchitecture(repo, pkg, nestedFrontend);
+  const repoComposeFile = detectRepoComposeFile(repo);
+  const architecture = detectArchitecture(repo, pkg, nestedFrontend, repoComposeFile);
   const pm = detectPackageManager(repo, pkg, nestedFrontend?.dir ?? null);
   const rootApp = pickAppCommand(pkg, pm.pm);
 
@@ -298,12 +322,12 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const appCommandSource = architecture.flaskCommand
     ? `Makefile Flask command: ${architecture.flaskCommand}`
     : rootApp.source;
-  const recognizedApplication = architecture.hasPythonBackend || architecture.hasGoBackend;
+  const recognizedApplication = architecture.hasPythonBackend || architecture.hasGoBackend || architecture.hasRubyBackend || architecture.hasMakeDrivenBackend;
   const workspaces = opts.workspace ? [] : rankWorkspaces(rootRepo, rootPkg);
   const notApp = looksLikeLibrary(pkg, appCommand, workspaces.some(candidate => candidate.dir !== "."), recognizedApplication);
   const { port, evidence: portEvidence } = detectPort(pkg, repo, [backendCommand, frontendCommand]);
   const env = detectEnv(repo);
-  const services = detectServices(pkg, repo);
+  const services = detectServices(pkg, repo, repoComposeFile);
   const rootDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const dependencyInstallRequired = Boolean(
     rootApp.command &&
@@ -320,7 +344,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
       : appCommand
         ? "application command"
         : "no runnable command selected";
-  const healthCandidates = notApp
+  const healthCandidates = notApp || !appCommand
     ? []
     : architecture.hasGoBackend && architecture.hasNodeFrontend
       ? [`http://localhost:${port}/api/health`, `http://localhost:${port}/`]
@@ -342,6 +366,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     backendMarkers: architecture.backendMarkers,
     frontendMarkers: architecture.frontendMarkers,
     serviceMarkers: architecture.serviceMarkers,
+    repoComposeFile,
     setupSteps: architecture.setupSteps,
     packageManager: pm.pm,
     packageManagerEvidence: pm.evidence,

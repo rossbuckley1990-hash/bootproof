@@ -70,3 +70,62 @@ Useful failure is part of the product:
 - `NOT VERIFIED` can still provide a precise diagnosis and signed evidence.
 - Detection is not the same as execution support.
 - Local proof remains `local_developer_signed`, not enterprise CI/OIDC proof.
+
+## June 11, 2026 Precision Receipts
+
+These runs used fresh shallow clones and did not install dependencies.
+
+### Memos
+
+Command:
+
+```text
+node dist/cli.js up /tmp/memos --provider local --unsafe-local --timeout 10000
+```
+
+Before (`bootproof@0.1.0`):
+
+```text
+application: yes
+stack: go-backend, react-frontend
+health candidates: http://localhost:3000/
+NOT VERIFIED — not_an_application
+```
+
+After (`bootproof@0.2.0`):
+
+```text
+application: yes
+stack: go-backend, react-frontend
+NOT VERIFIED — orchestration_not_supported
+Detected go-backend (go.mod) with react-frontend (web/package.json).
+Diagnosis only — no localhost claim.
+```
+
+Observed result: exit code 1, signed `local_developer_signed` attestation, `booted: false`, `healthVerified: false`, empty observations, and no health candidates. This is diagnosis, not boot support.
+
+### Formbricks
+
+Command:
+
+```text
+node dist/cli.js analyze /tmp/formbricks
+```
+
+Before (`bootproof@0.1.0`):
+
+```text
+services: postgres; redis
+apps/storybook ranked above apps/web
+no repository Compose file reported
+```
+
+After (`bootproof@0.2.0`):
+
+```text
+repo compose: docker-compose.dev.yml (bootproof defers to it)
+apps/web ranked above apps/storybook
+apps/storybook: documentation/storybook downranked
+```
+
+The Docker plan selects `docker compose -f docker-compose.dev.yml up -d`. `composeFileFor()` returned null, and no `docker-compose.bootproof.yml` was generated. Analysis exited 0; no application boot was attempted or claimed.

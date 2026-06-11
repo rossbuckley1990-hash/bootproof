@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { Attestation, ObservedStep, RunPlan, FailureClass } from "./types.js";
 
-export const TOOL_ID = "bootproof@0.1.0";
+export const TOOL_ID = "bootproof@0.2.0";
 
 export function gitInfo(repo: string): Attestation["repo"] {
   const git = (...args: string[]) => {

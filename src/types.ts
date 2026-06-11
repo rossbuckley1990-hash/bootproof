@@ -10,6 +10,7 @@ export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 export type FailureClass =
   | "not_an_application"
+  | "orchestration_not_supported"
   | "runtime_engine_mismatch"
   | "missing_package_manager"
   | "package_manager_version_mismatch"
@@ -52,6 +53,7 @@ export interface Inference {
   backendMarkers: string[];
   frontendMarkers: string[];
   serviceMarkers: string[];
+  repoComposeFile: string | null;
   setupSteps: string[];
   packageManager: PackageManager;
   packageManagerEvidence: string;

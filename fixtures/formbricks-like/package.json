@@ -1,0 +1,10 @@
+{
+  "name": "formbricks-like",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel"
+  }
+}

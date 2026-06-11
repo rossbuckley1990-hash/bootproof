@@ -296,6 +296,62 @@ test("Superset-like app writes a signed python_flask_setup_required refusal", ()
   assert.ok(att.signature);
 });
 
+test("Memos-like app writes a signed orchestration_not_supported diagnosis", () => {
+  const repo = freshCopy("go-react-memos-like");
+  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /application: yes/);
+  assert.match(out, /go-backend, react-frontend/);
+  assert.match(out, /NOT VERIFIED — orchestration_not_supported/);
+  assert.match(out, /Detected go-backend \(go\.mod\) with react-frontend \(web\/package\.json\)/);
+  assert.match(out, /Diagnosis only — no localhost claim/);
+  assert.doesNotMatch(out, /health candidates: http:\/\/localhost/);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "orchestration_not_supported");
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.match(att.result.explanation, /go\.mod/);
+  assert.match(att.result.explanation, /web\/package\.json/);
+  assert.deepEqual(att.observed, []);
+  assert.ok(att.signature);
+});
+
+test("Ruby and custom Make backends refuse as unsupported orchestration, not libraries", () => {
+  const cases = [
+    {
+      name: "ruby",
+      setup(repo) {
+        fs.mkdirSync(path.join(repo, "config"), { recursive: true });
+        fs.writeFileSync(path.join(repo, "Gemfile"), "source \"https://rubygems.org\"\ngem \"rails\"\n");
+        fs.writeFileSync(path.join(repo, "config", "database.yml"), "development:\n  adapter: postgresql\n");
+      },
+      evidence: /Detected ruby-backend \(Gemfile, config\/database\.yml\)/,
+    },
+    {
+      name: "make",
+      setup(repo) {
+        fs.writeFileSync(path.join(repo, "Makefile"), "serve:\n\t./scripts/start-custom-stack\n");
+      },
+      evidence: /Detected make-driven \(Makefile\)/,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), `bp-${fixture.name}-orchestration-`));
+    fixture.setup(repo);
+    const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--ci"], true);
+    assert.equal(code, 1);
+    assert.match(out, /application: yes/);
+    assert.match(out, /NOT VERIFIED — orchestration_not_supported/);
+    assert.match(out, fixture.evidence);
+    assert.doesNotMatch(out, /NOT VERIFIED — not_an_application/);
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.failureClass, "orchestration_not_supported");
+    assert.deepEqual(att.observed, []);
+  }
+});
+
 test("Grafana-like hybrid fails closed when dependency installation is skipped", () => {
   const repo = freshCopy("go-node-grafana-like");
   const { out, code } = run(["up", repo, "--ci"], true);
@@ -334,6 +390,28 @@ test("package manager version mismatch is signed before install runs", () => {
   assert.match(att.result.failureEvidence, /expected version: 10\.24\.0/);
   assert.match(att.result.failureEvidence, /Got: 9\.15\.4/);
   assert.equal(att.observed[0].command, "pnpm --version");
+});
+
+test("missing environment failures name extracted secrets without inventing values", () => {
+  const repo = freshCopy("missing-env-failure");
+  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--timeout", "1000", "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — missing_env_var/);
+  assert.match(out, /Missing: API_SECRET — see \.env\.bootproof\.example; bootproof will not invent values\./);
+
+  const generated = path.join(repo, ".env.bootproof.example");
+  assert.ok(fs.existsSync(generated), "referenced generated env example must exist");
+  assert.match(fs.readFileSync(generated, "utf8"), /# API_SECRET= \(secret with no safe local default/);
+  for (const name of [".env", ".env.local", ".env.development", ".env.production"]) {
+    assert.equal(fs.existsSync(path.join(repo, name)), false, `${name} must not be written`);
+  }
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "missing_env_var");
+  assert.match(att.result.failureEvidence, /Missing required secret: API_SECRET/);
+  assert.match(att.result.explanation, /Missing: API_SECRET/);
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
 });
 
 test("health HTTP error fixture is not mislabeled as a timeout", async () => {

@@ -1,0 +1,10 @@
+{
+  "name": "storybook",
+  "private": true,
+  "scripts": {
+    "dev": "storybook dev"
+  },
+  "dependencies": {
+    "react": "19.0.0"
+  }
+}

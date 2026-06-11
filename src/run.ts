@@ -1,9 +1,11 @@
 import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation } from "./types.js";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { inferRepo } from "./infer.js";
 import { buildPlan, writePlanFiles } from "./plan.js";
 import { runToCompletion, superviseApp, pollHealthCandidates, minimalEnv } from "./exec.js";
-import { classifyFailure } from "./taxonomy.js";
+import { classifyFailure, extractMissingEnvNames } from "./taxonomy.js";
 import { buildAttestation, writeAttestation } from "./proof.js";
 
 function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
@@ -63,6 +65,27 @@ function packageManagerVersionEvidence(inference: Inference): string | null {
   }
 }
 
+function unsupportedOrchestrationExplanation(inference: Inference): string | null {
+  if (inference.appCommand) return null;
+  const backend = inference.stack.includes("go-backend")
+    ? { stack: "go-backend", markers: inference.backendMarkers.filter(marker => marker === "go.mod" || marker === "go.work") }
+    : inference.stack.includes("ruby-backend")
+      ? { stack: "ruby-backend", markers: inference.backendMarkers.filter(marker => marker === "Gemfile" || marker === "config/database.yml") }
+      : inference.stack.includes("make-driven")
+        ? { stack: "make-driven", markers: inference.backendMarkers.filter(marker => marker === "Makefile") }
+        : null;
+  if (!backend) return null;
+  const frontendStack = inference.stack.includes("react-frontend")
+    ? "react-frontend"
+    : inference.stack.includes("node-frontend")
+      ? "node-frontend"
+      : null;
+  const frontendMarker = inference.frontendMarkers.find(marker => marker.endsWith("/package.json"))
+    ?? inference.frontendMarkers.find(marker => marker === "package.json");
+  const frontend = frontendStack && frontendMarker ? ` with ${frontendStack} (${frontendMarker})` : "";
+  return `Detected ${backend.stack} (${backend.markers.join(", ")})${frontend}. BootProof can diagnose this stack but does not yet orchestrate its boot. Diagnosis only — no localhost claim.`;
+}
+
 export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> {
   const startedAt = new Date().toISOString();
   const inference = inferRepo(repoPath, { workspace: opts.workspace });
@@ -112,6 +135,10 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       "python_flask_setup_required",
       "BootProof detected a Python/Flask + React application with setup steps. This repository requires database migration/init and service orchestration before it can be verified.",
     );
+  }
+  const orchestrationExplanation = unsupportedOrchestrationExplanation(inference);
+  if (orchestrationExplanation) {
+    return refuse("orchestration_not_supported", orchestrationExplanation);
   }
   if (!opts.workspace && inference.workspaces.length > 1 && !inference.appCommand) {
     return refuse("workspace_ambiguous", `This is a monorepo with ${inference.workspaces.length} workspace candidates. Choose one with --workspace <dir> instead of letting bootproof guess.`);
@@ -179,8 +206,19 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   const writtenFiles = writePlanFiles(inference, inference.repoPath);
   const observed: ObservedStep[] = [];
   const env = minimalEnv({ PORT: String(inference.port) });
+  const explanationWithMissingEnv = (failureClass: FailureClass, evidence: string, explanation: string): string => {
+    if (failureClass !== "missing_env_var") return explanation;
+    const names = extractMissingEnvNames(evidence);
+    if (!names.length) return explanation;
+    const generatedExample = path.join(inference.repoPath, ".env.bootproof.example");
+    const suffix = fs.existsSync(generatedExample)
+      ? `Missing: ${names.join(", ")} — see .env.bootproof.example; bootproof will not invent values.`
+      : `Missing: ${names.join(", ")}; bootproof will not invent values.`;
+    return `${explanation} ${suffix}`;
+  };
   const fail = (failureClass: FailureClass, evidence: string, explanation: string): UpOutcome => {
-    const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: false, healthVerified: false, healthObservation: null, observedHealthCandidates: [], failureClass, failureEvidence: evidence.slice(-2000), explanation });
+    const preciseExplanation = explanationWithMissingEnv(failureClass, evidence, explanation);
+    const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: false, healthVerified: false, healthObservation: null, observedHealthCandidates: [], failureClass, failureEvidence: evidence.slice(-2000), explanation: preciseExplanation });
     writeAttestation(inference.repoPath, att);
     return { inference, plan, writtenFiles, attestation: att, refusal: null };
   };
@@ -247,6 +285,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const healthExplanation = healthClass === "health_http_error"
         ? "The app responded on the configured health URL, but returned HTTP 5xx. BootProof observed a running server, but not a verified healthy boot."
         : c.explanation;
+      const preciseHealthExplanation = explanationWithMissingEnv(healthClass, `${healthFailureMessage}\n${evidence}`, healthExplanation);
       await app.stop();
       const att = buildAttestation({
         repo: inference.repoPath,
@@ -259,11 +298,11 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         observedHealthCandidates: health.discoveredCandidates,
         failureClass: healthClass,
         failureEvidence: `${healthFailureMessage}\n${evidence}`.slice(-2000),
-        explanation: healthExplanation,
+        explanation: preciseHealthExplanation,
       });
       writeAttestation(inference.repoPath, att);
       return { inference, plan, writtenFiles, attestation: att, refusal: null };
     }
   }
-  return fail("not_an_application", "", "Plan contained no runnable app step.");
+  return fail("unknown_failure", "", "Inference identified an application, but the plan contained no supported runnable app step.");
 }

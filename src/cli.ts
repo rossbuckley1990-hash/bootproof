@@ -76,6 +76,7 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   if (inf.backendMarkers.length) console.log(`  backend markers: ${inf.backendMarkers.join(", ")}`);
   if (inf.frontendMarkers.length) console.log(`  frontend markers: ${inf.frontendMarkers.join(", ")}`);
   if (inf.serviceMarkers.length) console.log(`  service markers: ${inf.serviceMarkers.join(", ")}`);
+  if (inf.repoComposeFile) console.log(`  repo compose: ${inf.repoComposeFile} (bootproof defers to it)`);
   console.log(`  package manager: ${inf.packageManager} ${DIM}(${inf.packageManagerEvidence})${RESET}`);
   if (inf.setupSteps.length) console.log(`  setup steps: ${inf.setupSteps.join("; ")}`);
   if (inf.backendCommand) console.log(`  backend command: ${inf.backendCommand}`);

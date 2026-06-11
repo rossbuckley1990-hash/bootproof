@@ -14,6 +14,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | Class | Meaning | Safe next step |
 |---|---|---|
 | `not_an_application` | No trustworthy runnable entrypoint was found. | Select a runnable workspace or add an explicit start command. |
+| `orchestration_not_supported` | An application stack was detected, but its backend/frontend or repository-specific orchestration is not yet supported safely. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |
 | `missing_package_manager` | The declared package manager executable is absent. | Enable Corepack or install the required manager. |
 | `package_manager_version_mismatch` | The available package-manager version differs from the exact/simple declared version. | Activate the declared version, then rerun. |

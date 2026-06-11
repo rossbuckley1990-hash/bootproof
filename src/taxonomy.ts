@@ -22,6 +22,28 @@ function isServicePortAllocatedEvidence(evidence: string): boolean {
 
 interface Rule { class: FailureClass; pattern: RegExp; explain: (m: RegExpMatchArray) => string }
 
+export function extractMissingEnvNames(evidence: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const patterns = [
+    /\b([A-Z][A-Z0-9_]{2,})\s+is\s+(?:not\s+set|required|missing|undefined)\b/g,
+    /\bMissing required secret:\s*([A-Z][A-Z0-9_]{2,})\b/g,
+    /^\s+([A-Z][A-Z0-9_]{2,}):\s*Required\b/gm,
+    /\bplease set\s+([A-Z][A-Z0-9_]{2,})\b/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of evidence.matchAll(pattern)) {
+      const name = match[1].toUpperCase();
+      if (!seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+      if (names.length === 10) return names;
+    }
+  }
+  return names;
+}
+
 const RULES: Rule[] = [
   { class: "package_manager_version_mismatch", pattern: /(ERR_PNPM_UNSUPPORTED_ENGINE|Unsupported environment \(bad (?:pnpm|yarn|npm|bun) and\/or Node\.js version\)|(?:pnpm|yarn|npm|bun)[\s\S]{0,160}Expected version:\s*[^\n]+[\s\S]{0,120}Got:\s*[^\n]+|packageManager field[\s\S]{0,120}(?:version|mismatch)|engines\.(?:pnpm|yarn|npm|bun))/i,
     explain: () => "The repository declares a package manager version that does not match the version available in the current environment. Enable Corepack or install the required package manager version before rerunning BootProof." },
@@ -38,10 +60,10 @@ const RULES: Rule[] = [
   { class: "postgres_auth_env_missing", pattern: /(SASL: SCRAM-SERVER-FIRST-MESSAGE|password authentication failed for user|client password must be a string)/i,
     explain: () => "Postgres was reached but authentication failed — the app's DATABASE_URL credentials don't match the running database. Inspect the repository's own env and compose examples, or rerun after generating BootProof service scaffolding; bootproof will not edit your .env." },
   { class: "database_unreachable", pattern: /(ECONNREFUSED.*:(5432|3306|6379|27017)|P1001|Can'?t reach database server|Connection refused.*postgres)/i,
-    explain: () => "The app requires a database that is not reachable. Start the generated docker-compose.bootproof.yml services first." },
+    explain: () => "The app requires a database that is not reachable. Start the repository's required database service and verify its configured address." },
   { class: "migrations_missing", pattern: /(relation .* does not exist|no such table|Migration.*pending|P3009)/i,
     explain: () => "The database schema is missing or behind. Run the project's migration command against the local database." },
-  { class: "missing_env_var", pattern: /((Missing|Please set|required) (env(ironment)? var(iable)?s?|.*[A-Z][A-Z0-9_]{3,})|Invalid environment variables)/,
+  { class: "missing_env_var", pattern: /([A-Z][A-Z0-9_]{2,}\s+is\s+(?:not\s+set|required|missing|undefined)|Missing required secret:\s*[A-Z][A-Z0-9_]{2,}|^\s+[A-Z][A-Z0-9_]{2,}:\s*Required\b|please set\s+[A-Z][A-Z0-9_]{2,}|Invalid environment variables)/im,
     explain: () => "The app refuses to start without specific environment variables. See .env.bootproof.example; secrets without safe defaults must come from you." },
   { class: "tls_or_proxy_interception", pattern: /(SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|unable to get local issuer certificate)/,
     explain: () => "A TLS-intercepting proxy or self-signed certificate chain is blocking package/tool downloads. Configure your proxy CA (NODE_EXTRA_CA_CERTS) or run outside the intercepting network." },
@@ -71,7 +93,7 @@ export function classifyFailure(evidence: string): { class: FailureClass; explan
 }
 
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
-  "not_an_application", "runtime_engine_mismatch", "missing_package_manager", "package_manager_version_mismatch",
+  "not_an_application", "orchestration_not_supported", "runtime_engine_mismatch", "missing_package_manager", "package_manager_version_mismatch",
   "dependency_install_skipped", "python_flask_setup_required", "missing_env_var",
   "database_unreachable", "postgres_auth_env_missing", "migrations_missing", "port_in_use", "native_build_dependency",
   "private_registry_or_auth", "tls_or_proxy_interception", "service_port_allocated", "docker_unavailable", "install_failed", "app_exited_early",

@@ -5,9 +5,9 @@ import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { inferRepo } from "../dist/infer.js";
-import { classifyFailure } from "../dist/taxonomy.js";
-import { buildPlan, envExampleFor, PROTECTED_ENV } from "../dist/plan.js";
-import { buildAttestation, verifySignature } from "../dist/proof.js";
+import { classifyFailure, extractMissingEnvNames, TAXONOMY_DOC_CLASSES } from "../dist/taxonomy.js";
+import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, writePlanFiles } from "../dist/plan.js";
+import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
 import { extractHealthCandidates, minimalEnv, pollHealth, superviseApp } from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote } from "../dist/remote.js";
@@ -107,6 +107,66 @@ test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybr
   assert.ok(productionPackage.score > testPlugin.score, "test plugin must rank below production candidates");
 });
 
+test("Memos-like repository is an application that requires unsupported orchestration", () => {
+  const inf = inferRepo(path.join(FIX, "go-react-memos-like"));
+  assert.equal(inf.isApplication, true);
+  assert.equal(inf.appCommand, null);
+  assert.ok(inf.stack.includes("go-backend"));
+  assert.ok(inf.stack.includes("react-frontend"));
+  assert.ok(inf.backendMarkers.includes("go.mod"));
+  assert.ok(inf.frontendMarkers.includes("web/package.json"));
+  assert.deepEqual(inf.healthCandidates, [], "no runnable command means no localhost candidate");
+});
+
+test("Ruby backend markers are detected without claiming orchestration support", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-ruby-"));
+  fs.mkdirSync(path.join(repo, "config"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "Gemfile"), "source \"https://rubygems.org\"\ngem \"rails\"\n");
+  fs.writeFileSync(path.join(repo, "config", "database.yml"), "development:\n  adapter: postgresql\n");
+  const inf = inferRepo(repo);
+  assert.equal(inf.isApplication, true);
+  assert.ok(inf.stack.includes("ruby-backend"));
+  assert.ok(inf.backendMarkers.includes("Gemfile"));
+  assert.ok(inf.backendMarkers.includes("config/database.yml"));
+  assert.equal(inf.appCommand, null);
+});
+
+test("custom Make-driven applications are detected without inventing a start command", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-make-driven-"));
+  fs.writeFileSync(path.join(repo, "Makefile"), "serve:\n\t./scripts/start-custom-stack\n");
+  const inf = inferRepo(repo);
+  assert.equal(inf.isApplication, true);
+  assert.ok(inf.stack.includes("make-driven"));
+  assert.ok(inf.backendMarkers.includes("Makefile"));
+  assert.equal(inf.appCommand, null);
+  assert.deepEqual(inf.healthCandidates, []);
+});
+
+test("repository compose is deferred to and Storybook ranks below the production web app", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-formbricks-like-"));
+  fs.cpSync(path.join(FIX, "formbricks-like"), repo, { recursive: true });
+  const inf = inferRepo(repo);
+  assert.equal(inf.repoComposeFile, "docker-compose.yml");
+  assert.ok(inf.services.some(service => service.kind === "postgres"));
+
+  const plan = buildPlan(inf, "docker");
+  const service = plan.steps.find(step => step.kind === "service");
+  assert.equal(service?.command, "docker compose -f docker-compose.yml up -d");
+  assert.equal(service?.description, "defer to the repository's own compose file");
+  assert.equal(composeFileFor(inf), null);
+  assert.ok(!plan.generatedFiles.some(file => file.path === "docker-compose.bootproof.yml"));
+
+  const written = writePlanFiles(inf, repo);
+  assert.ok(!written.includes("docker-compose.bootproof.yml"));
+  assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.yml")), false);
+
+  const web = inf.workspaces.find(candidate => candidate.dir === "apps/web");
+  const storybook = inf.workspaces.find(candidate => candidate.dir === "apps/storybook");
+  assert.ok(web && storybook);
+  assert.ok(web.score > storybook.score);
+  assert.match(storybook.reason, /documentation\/storybook downranked/);
+});
+
 test("parallel monorepo root commands are not treated as a single application boot", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-parallel-workspaces-"));
   fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
@@ -137,6 +197,35 @@ test("pnpm engine mismatch is classified specifically", () => {
   const result = classifyFailure(evidence);
   assert.equal(result.class, "package_manager_version_mismatch");
   assert.match(result.explanation, /Enable Corepack/);
+});
+
+test("missing environment names are extracted only from explicit failure contexts", () => {
+  assert.deepEqual(extractMissingEnvNames("DATABASE_URL is not set"), ["DATABASE_URL"]);
+  assert.deepEqual(extractMissingEnvNames("API_TOKEN is required"), ["API_TOKEN"]);
+  assert.deepEqual(extractMissingEnvNames("Missing required secret: SESSION_SECRET"), ["SESSION_SECRET"]);
+  assert.deepEqual(extractMissingEnvNames("Invalid environment variables:\n  SMTP_PASSWORD: Required"), ["SMTP_PASSWORD"]);
+  assert.deepEqual(extractMissingEnvNames("Startup refused; please set REDIS_URL."), ["REDIS_URL"]);
+  assert.deepEqual(
+    extractMissingEnvNames("See https://example.com/API_TOKEN and compare against CONSTANT_VALUE."),
+    [],
+    "all-caps URL segments and constants are not missing-env evidence",
+  );
+  assert.deepEqual(
+    extractMissingEnvNames("API_TOKEN is required\nAPI_TOKEN is missing\nMissing required secret: API_TOKEN"),
+    ["API_TOKEN"],
+    "names are deduplicated",
+  );
+  const many = Array.from({ length: 12 }, (_, index) => `SECRET_${index} is required`).join("\n");
+  assert.equal(extractMissingEnvNames(many).length, 10, "extraction is capped at ten names");
+});
+
+test("taxonomy documentation and tool version stay synchronized", () => {
+  const taxonomyDoc = fs.readFileSync(path.resolve("docs/FAILURE_TAXONOMY.md"), "utf8");
+  for (const failureClass of TAXONOMY_DOC_CLASSES) {
+    assert.ok(taxonomyDoc.includes(`\`${failureClass}\``), `missing taxonomy documentation for ${failureClass}`);
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
+  assert.equal(TOOL_ID, `bootproof@${pkg.version}`);
 });
 
 test("package manager version preflight compares only exact declarations conservatively", () => {

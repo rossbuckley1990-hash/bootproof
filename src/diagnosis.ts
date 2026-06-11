@@ -44,6 +44,12 @@ export function diagnoseFailure(
         whyRefused: "BootProof cannot yet orchestrate that multi-step application safely enough to claim a verified boot.",
         safeNextStep: "Review the detected setup and service commands, complete the repository's documented initialization, then rerun when orchestration support is available.",
       };
+    case "orchestration_not_supported":
+      return {
+        whatHappened: explanation,
+        whyRefused: "The detected application requires backend/frontend or repository-specific orchestration that BootProof cannot yet execute safely.",
+        safeNextStep: "Use the repository's documented runbook. Treat this attestation as diagnosis only, not proof of a localhost boot.",
+      };
     case "workspace_ambiguous":
       if (/multiple workspaces in parallel|starts multiple workspaces in parallel/i.test(explanation)) {
         return {
@@ -101,7 +107,7 @@ export function diagnoseFailure(
       };
     case "missing_env_var":
       return {
-        whatHappened: "The application reported required environment configuration that is missing.",
+        whatHappened: explanation,
         whyRefused: "BootProof will not invent secrets or write protected .env files to force startup.",
         safeNextStep: "Provide the real required values using the repository's documented configuration path, then rerun BootProof.",
       };
