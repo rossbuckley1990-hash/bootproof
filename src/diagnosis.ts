@@ -1,4 +1,5 @@
 import type { FailureClass, Inference } from "./types.js";
+import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue } from "./taxonomy.js";
 
 export interface FailureDiagnosis {
   whatHappened: string;
@@ -29,7 +30,69 @@ export function diagnoseFailure(
   explanation: string,
   inference?: Inference,
 ): FailureDiagnosis {
+  const classified = evidence ? classifyFailure(evidence) : null;
+  const precise = classified?.class === failureClass ? classified : null;
+  const preciseFailure = (whyRefused: string, fallbackSafeNextStep: string): FailureDiagnosis => ({
+    whatHappened: precise?.explanation ?? explanation,
+    whyRefused,
+    safeNextStep: precise?.safeNextStep ?? fallbackSafeNextStep,
+  });
   switch (failureClass) {
+    case "missing_ruby_version":
+      return preciseFailure(
+        "BootProof cannot execute the repository with a Ruby version that is not installed.",
+        "Install the repository-required Ruby version with rbenv, then rerun BootProof.",
+      );
+    case "missing_build_tool":
+      return preciseFailure(
+        "The dependency installation cannot complete without the required native build tool.",
+        "Install the reported build tool, then rerun BootProof.",
+      );
+    case "native_extension_compile_failed":
+      return preciseFailure(
+        "A required gem did not install, so the application cannot be started reliably.",
+        "Inspect the preserved compiler output, install the required native dependencies, then rerun BootProof.",
+      );
+    case "missing_database_config":
+      return preciseFailure(
+        "The application has no usable database configuration, so a verified boot is impossible.",
+        "Create config/database.yml from the repository's documented example, review it, then rerun BootProof.",
+      );
+    case "missing_required_config":
+      return preciseFailure(
+        "A repository-required configuration file is absent.",
+        "Restore the reported file from the repository's documented example, review it, then rerun BootProof.",
+      );
+    case "postgres_unavailable":
+      return preciseFailure(
+        "The application could not reach the PostgreSQL service required for boot.",
+        "Start PostgreSQL, verify its configured host and port, then rerun BootProof.",
+      );
+    case "postgres_role_missing":
+      return preciseFailure(
+        "PostgreSQL was reachable, but the configured role does not exist.",
+        "Create the reported PostgreSQL role or configure an existing role, then rerun BootProof.",
+      );
+    case "database_schema_missing":
+      return preciseFailure(
+        "The database is reachable but its required schema is absent or incomplete.",
+        "Run the repository's documented migration or database setup command, then rerun BootProof.",
+      );
+    case "unsupported_database_version":
+      return preciseFailure(
+        "The installed database version does not satisfy the repository's requirement.",
+        "Install or select a supported PostgreSQL version, then rerun BootProof.",
+      );
+    case "unsupported_database_config":
+      return preciseFailure(
+        "The repository's database configuration contains names the application does not support.",
+        "Update config/database.yml to use only supported database names, then rerun BootProof.",
+      );
+    case "redis_unavailable":
+      return preciseFailure(
+        "The application could not reach the Redis service required for boot.",
+        "Start Redis, verify its configured host and port, then rerun BootProof.",
+      );
     case "package_manager_version_mismatch":
       return packageManagerMismatch(evidence, inference);
     case "dependency_install_skipped":
@@ -112,6 +175,17 @@ export function diagnoseFailure(
         safeNextStep: "Switch to a compatible Node.js version, then rerun BootProof.",
       };
     case "missing_env_var":
+      {
+        const missing = extractMissingEnvNames(evidence ?? explanation);
+        const safeValue = missing.length === 1 ? safeLocalEnvValue(missing[0]) : null;
+        if (safeValue) {
+          return {
+            whatHappened: `Missing variable: ${missing[0]}. Safe local value: ${safeValue}.`,
+            whyRefused: "The application exited before BootProof could observe healthy HTTP behavior.",
+            safeNextStep: `${missing[0]}=${safeValue} bootproof up . --provider local --unsafe-local --install`,
+          };
+        }
+      }
       return {
         whatHappened: explanation,
         whyRefused: "BootProof will not invent secrets or write protected .env files to force startup.",

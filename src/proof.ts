@@ -3,13 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import type { Attestation, ObservedStep, RunPlan, FailureClass } from "./types.js";
+import type { Attestation, ObservedStep, RunPlan, FailureClass, HealthEvidence } from "./types.js";
+import { buildExecutionEnv } from "./exec.js";
 
 export const TOOL_ID = "bootproof@0.3.0";
 
 export function gitInfo(repo: string): Attestation["repo"] {
   const git = (...args: string[]) => {
-    try { return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim(); } catch { return null; }
+    try { return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: buildExecutionEnv() }).trim(); } catch { return null; }
   };
   if (!fs.existsSync(path.join(repo, ".git"))) return { path: repo, remote: null, commit: null, dirty: null };
   const status = git("status", "--porcelain");
@@ -47,6 +48,7 @@ function canonicalBody(att: Attestation): Buffer {
 export function buildAttestation(input: {
   repo: string; plan: RunPlan; observed: ObservedStep[]; startedAt: string;
   booted: boolean; healthVerified: boolean; healthObservation: string | null;
+  healthEvidence?: HealthEvidence | null;
   observedHealthCandidates?: string[];
   failureClass: FailureClass | null; failureEvidence: string | null; explanation: string;
 }): Attestation {
@@ -62,6 +64,7 @@ export function buildAttestation(input: {
       booted: input.booted,
       healthVerified: input.healthVerified,
       healthObservation: input.healthObservation,
+      healthEvidence: input.healthEvidence ?? null,
       observedHealthCandidates: input.observedHealthCandidates ?? [],
       failureClass: input.failureClass,
       failureEvidence: input.failureEvidence,

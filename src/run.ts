@@ -1,11 +1,19 @@
-import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation, PreparationCommand } from "./types.js";
+import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation, PreparationCommand, HealthEvidence } from "./types.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { inferRepo } from "./infer.js";
 import { buildPlan, writePlanFiles } from "./plan.js";
-import { runToCompletion, superviseApp, pollHealthCandidates, minimalEnv } from "./exec.js";
-import { classifyFailure, extractMissingEnvNames } from "./taxonomy.js";
+import {
+  buildExecutionEnv,
+  execResultEvidence,
+  processEvidenceText,
+  runToCompletion,
+  superviseApp,
+  pollHealthCandidates,
+  type ProcessEvidence,
+} from "./exec.js";
+import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue } from "./taxonomy.js";
 import { buildAttestation, writeAttestation } from "./proof.js";
 
 function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
@@ -13,6 +21,16 @@ function classifyHealthFailure(evidence: string): "health_http_error" | "health_
     return "health_http_error";
   }
   return "health_check_timeout";
+}
+
+function healthStatusLabel(evidence: HealthEvidence): string {
+  const status = `HTTP ${evidence.statusCode}${evidence.statusText ? ` ${evidence.statusText}` : ""}`;
+  return evidence.redirectLocation ? `${status} → ${evidence.redirectLocation}` : status;
+}
+
+function healthObservationSummary(evidence: HealthEvidence): string {
+  if (evidence.redirectLocation) return `${healthStatusLabel(evidence)} at ${evidence.requestedUrl}`;
+  return `HTTP ${evidence.statusCode} at ${evidence.requestedUrl}`;
 }
 
 
@@ -27,6 +45,7 @@ export interface UpOptions {
   port?: number;
   environment?: Record<string, string>;
   additionalPreparationCommands?: PreparationCommand[];
+  command?: string;
 }
 
 export interface UpOutcome {
@@ -37,8 +56,27 @@ export interface UpOutcome {
   writtenFiles: string[];
 }
 
-function step(id: string, kind: ObservedStep["kind"], command: string | undefined, startedAt: string, exitCode: number | null, ok: boolean, observation: string, evidenceTail?: string): ObservedStep {
-  return { id, kind, command, startedAt, finishedAt: new Date().toISOString(), exitCode, ok, observation, evidenceTail };
+function step(
+  id: string,
+  kind: ObservedStep["kind"],
+  command: string | undefined,
+  startedAt: string,
+  exitCode: number | null,
+  ok: boolean,
+  observation: string,
+  evidence?: string | ProcessEvidence,
+): ObservedStep {
+  return {
+    id,
+    kind,
+    command,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    exitCode,
+    ok,
+    observation,
+    ...(typeof evidence === "string" ? { evidenceTail: evidence } : evidence),
+  };
 }
 
 export function packageManagerVersionMatches(expected: string, actual: string): boolean {
@@ -111,6 +149,13 @@ function unsupportedOrchestrationExplanation(inference: Inference): string | nul
 export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> {
   const startedAt = new Date().toISOString();
   const inference = inferRepo(repoPath, { workspace: opts.workspace });
+  if (opts.command) {
+    inference.appCommand = opts.command;
+    inference.appCommandSource = "--command override";
+    inference.commandScope = "explicit --command override";
+    inference.incompleteAppCommand = false;
+    inference.multiAppCommand = false;
+  }
   if (opts.additionalPreparationCommands?.length) {
     inference.preparationCommands.push(...opts.additionalPreparationCommands);
     inference.dependencyInstallRequired = true;
@@ -127,7 +172,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     }
   }
   const plan = buildPlan(inference, opts.provider);
-  const env = minimalEnv({ PORT: String(inference.port), ...opts.environment });
+  const env = buildExecutionEnv({ PORT: String(inference.port), ...opts.environment });
   const runsSourceComposeApplication =
     opts.provider === "docker" &&
     Boolean(inference.repoComposeFile) &&
@@ -155,6 +200,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       booted: false,
       healthVerified: false,
       healthObservation: null,
+      healthEvidence: null,
       observedHealthCandidates: [],
       failureClass,
       failureEvidence: failureEvidence.slice(-2000),
@@ -267,15 +313,25 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     if (failureClass !== "missing_env_var") return explanation;
     const names = extractMissingEnvNames(evidence);
     if (!names.length) return explanation;
+    const safeValue = names.length === 1 ? safeLocalEnvValue(names[0]) : null;
+    if (safeValue) {
+      return `${explanation} Missing variable: ${names[0]}. Safe local value: ${safeValue}.`;
+    }
     const generatedExample = path.join(inference.repoPath, ".env.bootproof.example");
     const suffix = fs.existsSync(generatedExample)
       ? `Missing: ${names.join(", ")} — see .env.bootproof.example; bootproof will not invent values.`
-      : `Missing: ${names.join(", ")}; bootproof will not invent values.`;
+      : `Missing variable${names.length === 1 ? "" : "s"}: ${names.join(", ")}. BootProof will not invent values.`;
     return `${explanation} ${suffix}`;
   };
-  const fail = (failureClass: FailureClass, evidence: string, explanation: string): UpOutcome => {
+  const fail = (
+    failureClass: FailureClass,
+    evidence: string,
+    explanation: string,
+    healthEvidence: HealthEvidence | null = null,
+    observedHealthCandidates: string[] = [],
+  ): UpOutcome => {
     const preciseExplanation = explanationWithMissingEnv(failureClass, evidence, explanation);
-    const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: false, healthVerified: false, healthObservation: null, observedHealthCandidates: [], failureClass, failureEvidence: evidence.slice(-2000), explanation: preciseExplanation });
+    const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: false, healthVerified: false, healthObservation: null, healthEvidence, observedHealthCandidates, failureClass, failureEvidence: evidence.slice(-2000), explanation: preciseExplanation });
     writeAttestation(inference.repoPath, att);
     return { inference, plan, writtenFiles, attestation: att, refusal: null };
   };
@@ -306,7 +362,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         result.exitCode,
         result.exitCode === 0,
         result.exitCode === 0 ? diagnostic.observation : `${diagnostic.observation} failed`,
-        text || undefined,
+        result.exitCode === 0 ? text || undefined : execResultEvidence(result),
       ));
       if (text) evidence.push(`${diagnostic.command}\n${text}`);
     }
@@ -326,7 +382,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         r.exitCode,
         ok,
         ok ? "docker compose accepted the start request (exit 0); HTTP health not yet verified" : "docker compose failed",
-        r.stderr || r.stdout,
+        ok ? r.stderr || r.stdout : execResultEvidence(r),
       ));
       if (!ok) {
         const c = classifyFailure(r.stderr + r.stdout);
@@ -349,7 +405,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         r.exitCode,
         ok,
         ok ? `${planned.kind === "install" ? "dependency preparation" : "build"} completed (exit 0)` : r.timedOut ? `${planned.kind} timed out` : `${planned.kind} failed (exit ${r.exitCode})`,
-        ok ? undefined : r.stderr || r.stdout,
+        ok ? undefined : execResultEvidence(r),
       ));
       if (!ok) {
         const c = classifyFailure(r.stderr + r.stdout);
@@ -364,26 +420,31 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       if (health.url) plan.healthUrl = health.url;
       const exit = app.exited();
       if (exit && !health.responded) {
-        observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, app.output()));
-        const c = classifyFailure(app.output());
+        const processEvidence = app.evidence();
+        const evidence = processEvidenceText(processEvidence);
+        observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, processEvidence));
+        const c = classifyFailure(evidence);
         await app.stop();
-        return fail(c.class === "unknown_failure" ? "app_exited_early" : c.class, app.output(), c.explanation);
+        return fail(c.class === "unknown_failure" ? "app_exited_early" : c.class, evidence, c.explanation, health.evidence, health.discoveredCandidates);
       }
       observed.push(step(planned.id, "start-app", planned.command, t, null, true, "app process started and was supervised"));
       const ht = new Date().toISOString();
-      if (health.responded && health.status !== null && health.status < 500) {
-        const observedUrl = health.url ?? plan.healthUrl;
-        observed.push(step("health", "health", undefined, ht, null, true, `observed HTTP ${health.status} at ${observedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`));
+      if (health.evidence?.acceptedAsHealthy) {
+        const healthStep = health.evidence.redirectLocation
+          ? healthStatusLabel(health.evidence)
+          : `observed HTTP ${health.evidence.statusCode} at ${health.evidence.requestedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`;
+        observed.push(step("health", "health", undefined, ht, null, true, healthStep));
         await app.stop();
-        const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: true, healthVerified: true, healthObservation: `HTTP ${health.status} at ${observedUrl}`, observedHealthCandidates: health.discoveredCandidates, failureClass: null, failureEvidence: null, explanation: `Verified: ${observedUrl} responded HTTP ${health.status}. This attestation records what was observed, not a guarantee the app is fully functional.` });
+        const att = buildAttestation({ repo: inference.repoPath, plan, observed, startedAt, booted: true, healthVerified: true, healthObservation: healthObservationSummary(health.evidence), healthEvidence: health.evidence, observedHealthCandidates: health.discoveredCandidates, failureClass: null, failureEvidence: null, explanation: `Verified: ${health.evidence.requestedUrl} responded ${healthStatusLabel(health.evidence)}. This attestation records what was observed, not a guarantee the app is fully functional.` });
         writeAttestation(inference.repoPath, att);
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
       }
-      const evidence = app.output();
+      const processEvidence = app.evidence();
+      const evidence = processEvidenceText(processEvidence);
       const healthFailureMessage = health.responded
         ? `only HTTP ${health.status} observed at ${health.url ?? plan.healthUrl}`
         : `no HTTP response at candidates ${health.candidates.join(", ")} within ${opts.timeoutMs}ms`;
-      observed.push(step("health", "health", undefined, ht, null, false, healthFailureMessage, evidence));
+      observed.push(step("health", "health", undefined, ht, null, false, healthFailureMessage, processEvidence));
       const c = classifyFailure(`${healthFailureMessage}\n${evidence}`);
       const healthClass = health.responded && health.status !== null && health.status >= 500
         ? "health_http_error"
@@ -403,6 +464,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         booted: false,
         healthVerified: false,
         healthObservation: null,
+        healthEvidence: health.evidence,
         observedHealthCandidates: health.discoveredCandidates,
         failureClass: healthClass,
         failureEvidence: `${healthFailureMessage}\n${evidence}`.slice(-2000),
@@ -416,9 +478,11 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs);
       plan.healthCandidates = health.candidates;
       if (health.url) plan.healthUrl = health.url;
-      if (health.responded && health.status !== null && health.status < 500) {
-        const observedUrl = health.url ?? plan.healthUrl;
-        observed.push(step("health", "health", undefined, ht, null, true, `observed HTTP ${health.status} at ${observedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`));
+      if (health.evidence?.acceptedAsHealthy) {
+        const healthStep = health.evidence.redirectLocation
+          ? healthStatusLabel(health.evidence)
+          : `observed HTTP ${health.evidence.statusCode} at ${health.evidence.requestedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`;
+        observed.push(step("health", "health", undefined, ht, null, true, healthStep));
         const att = buildAttestation({
           repo: inference.repoPath,
           plan,
@@ -426,11 +490,12 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
           startedAt,
           booted: true,
           healthVerified: true,
-          healthObservation: `HTTP ${health.status} at ${observedUrl}`,
+          healthObservation: healthObservationSummary(health.evidence),
+          healthEvidence: health.evidence,
           observedHealthCandidates: health.discoveredCandidates,
           failureClass: null,
           failureEvidence: null,
-          explanation: `Verified: repository Compose started and ${observedUrl} responded HTTP ${health.status}. This proves the observed web boot, not every service or feature.`,
+          explanation: `Verified: repository Compose started and ${health.evidence.requestedUrl} responded ${healthStatusLabel(health.evidence)}. This proves the observed web boot, not every service or feature.`,
         });
         writeAttestation(inference.repoPath, att);
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
@@ -452,7 +517,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         : failureClass === "health_check_timeout"
           ? "Repository Compose accepted the start request, but no HTTP response was observed. Compose service state and logs are preserved in the attestation."
           : classified.explanation;
-      return fail(failureClass, evidence, explanation);
+      return fail(failureClass, evidence, explanation, health.evidence, health.discoveredCandidates);
     }
   }
   return fail("unknown_failure", "", "Inference identified an application, but the plan contained no supported runnable app or source-built Compose health step.");

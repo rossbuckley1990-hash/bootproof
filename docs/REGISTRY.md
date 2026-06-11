@@ -1,49 +1,54 @@
-# Git-Native Registry Design
+# Registry Export Formats
 
-BootProof does not operate a public registry service today.
+BootProof supports local, redacted registry artifacts. It does not operate a public index from
+this repository, upload evidence automatically, or call a registry service.
 
-The current primitive is portable signed evidence:
-
-```text
-.bootproof/attestation.json
-```
-
-Projects may deliberately commit that file or export a redacted entry:
+Create a local entry explicitly:
 
 ```bash
-bootproof attest export .
+bootproof registry export .
 ```
 
-This writes:
+This writes `.bootproof/registry-entry.json` using
+`bootproof/registry-entry/v1`. `bootproof attest export .` remains a compatibility alias.
 
-```text
-.bootproof/registry-entry.json
+## Public/Federated Registry
+
+Public repositories may explicitly create a public-candidate wrapper:
+
+```bash
+bootproof registry export . --federated
 ```
 
-Nothing is uploaded automatically.
+This writes a redacted, signed `bootproof/federated-receipt/v1` artifact under
+`.bootproof/registry/`. A repository owner may review and deliberately commit that receipt to
+the repository's own Git history.
 
-## Intended Design
+A future BootProof indexer could crawl public receipts, verify signatures, and build an open
+commons of verified boot, failure, and repair knowledge. The crawler and public index do not
+exist in this repository and are not implemented by this command.
 
-The proposed registry model is federated:
+## Private Cloud Registry
 
-- write path: repositories deliberately publish signed proof through Git
-- read path: a future index discovers public attestations, verifies signatures, and links claims to source commits
-- failure corpus: classified failures improve detectors without converting failures into success claims
+Organisations may later explicitly upload redacted attestations and repair receipts to
+BootProof Cloud. Private repository data would remain governed, tenant-isolated, and paid.
 
-The index, badge service, freshness tracking, and signer trust graph are roadmap items. They are not deployed capabilities.
+This repository only supports producing a `cloud_upload_candidate` local export. BootProof
+Cloud, upload transport, billing, governance, and hosted registry storage are intentionally
+not implemented here.
 
 ## Consent And Privacy
 
-1. BootProof sends no telemetry or hidden evidence upload.
-2. Sharing requires a visible local artifact and an explicit user action.
-3. Full local attestations may contain raw failure evidence.
-4. Registry export applies redaction and records which redactions were used.
-5. A future index should trust only valid signatures and public evidence.
+1. Every registry entry has `optInRequired: true`; federated wrappers contain that entry.
+2. Export builders perform no network calls and do not upload telemetry or evidence.
+3. Files are written only after an explicit export command.
+4. Raw environment values, tokens, private keys, protected `.env` contents, and local username
+   paths are excluded or redacted.
+5. Repository owner and name identifiers are hashed; a public repository URL is included only
+   when it is a credential-free URL on a supported public Git host.
+6. Full local attestations may contain raw evidence and should not be treated as public exports.
 
-Repository commands executed by BootProof may access the network independently. The no-upload promise applies to BootProof's own telemetry and evidence handling, not arbitrary install or application commands.
+The strict schemas are:
 
-## Trust
-
-Current attestations are `local_developer_signed`.
-
-CI/OIDC-backed proof will be stronger because a verifier can bind the signature to a repository workflow identity. BootProof does not claim that trust level yet.
+- [`schemas/registry-entry-v1.schema.json`](schemas/registry-entry-v1.schema.json)
+- [`schemas/federated-receipt-v1.schema.json`](schemas/federated-receipt-v1.schema.json)

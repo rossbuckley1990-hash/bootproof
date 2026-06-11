@@ -1,0 +1,7 @@
+{
+  "name": "app-exited-rails-backtrace",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -6,7 +6,16 @@ import { buildPlan, composeFileFor, envExampleFor } from "./plan.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
 import { verifySignature, attestationPath, TOOL_ID } from "./proof.js";
 import { pollHealth } from "./exec.js";
-import { buildRegistryEntry, verifyRegistryEntry, writeRegistryEntry, registryEntryPath } from "./registry.js";
+import {
+  buildFederatedReceipt,
+  buildRegistryEntry,
+  currentGitBranch,
+  verifyRegistryEntry,
+  writeFederatedReceipt,
+  writeRegistryEntry,
+  registryEntryPath,
+  type RegistryMode,
+} from "./registry.js";
 import { normalizeDockerBindPath, detectHostPlatform } from "./platform.js";
 import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
 import { cloneRemoteTarget, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
@@ -28,7 +37,18 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
+const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
+  analyze: new Set(["workspace", "json", "ci"]),
+  plan: new Set(["workspace", "provider", "ci"]),
+  "apply-repair": new Set(["receipt", "dry-run", "json", "ci"]),
+  fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci"]),
+  up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command"]),
+  verify: new Set(["ci"]),
+  attest: new Set(["ci"]),
+  registry: new Set(["mode", "federated", "ci"]),
+  explain: new Set(["ci"]),
+};
 void normalizeDockerBindPath; void detectHostPlatform; // exported surface, used by docker provider work in progress
 
 if (process.env.NO_COLOR !== undefined) disableColor();
@@ -59,8 +79,10 @@ Usage:
   bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
   bootproof explain <proof.json>                            explain an attestation or repair receipt
-  bootproof attest export <path>                        redacted, re-signed shareable registry entry (never uploads)
-  bootproof attest check <path>                         verify a registry entry signature
+  bootproof registry export <path>                          explicitly write a redacted local registry export
+  bootproof registry export <path> --federated              explicitly write a public-candidate receipt
+  bootproof attest export <path>                            compatibility alias for local registry export
+  bootproof attest check <path>                             verify a registry entry signature
   bootproof version
 
 Options for up:
@@ -68,6 +90,7 @@ Options for up:
   --unsafe-local            required acknowledgement for --provider local
   --install                 run the dependency install step (off by default)
   --workspace <dir>         pick a monorepo workspace
+  --command <command>       override the inferred application start command
   --port <n>                override inferred port
   --timeout <ms>            health verification timeout (default 60000)
   --dry-run                 show what would happen; executes nothing, writes nothing
@@ -162,6 +185,30 @@ function isRepairReceipt(value: unknown): value is RepairReceipt {
   return Boolean(value && typeof value === "object" && (value as { schema?: string }).schema === "bootproof/repair-receipt/v1");
 }
 
+function optionalRepairReceipt(repo: string): RepairReceipt | null {
+  const receipt = path.join(repo, ".bootproof", "repair-receipt.json");
+  if (!fs.existsSync(receipt)) return null;
+  try {
+    const value: unknown = JSON.parse(fs.readFileSync(receipt, "utf8"));
+    return isRepairReceipt(value) && verifyRepairReceipt(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function registryEntryFor(repo: string, registryMode: RegistryMode) {
+  const ap = attestationPath(repo);
+  if (!fs.existsSync(ap)) return null;
+  const att: Attestation = JSON.parse(fs.readFileSync(ap, "utf8"));
+  return buildRegistryEntry(att, {
+    registryMode,
+    inference: inferRepo(repo),
+    repairReceipt: optionalRepairReceipt(repo),
+    branch: currentGitBranch(repo),
+    sign: true,
+  });
+}
+
 function printRepairResult(result: RepairResult): void {
   if (result.repaired) {
     ok(`${BOLD}VERIFIED REPAIR${RESET}${GREEN} — ${result.repairId}`);
@@ -210,6 +257,14 @@ async function main() {
   }
   const { flags, positional } = parseFlags(rest);
   if (flags.ci || flags.json) disableColor();
+  const unsupportedFlag = Object.keys(flags).find(flag => !SUPPORTED_FLAGS[cmd]?.has(flag));
+  if (unsupportedFlag) {
+    const explanation = `unsupported flag for ${cmd}: --${unsupportedFlag}`;
+    if (cmd === "up" && flags.json) console.log(JSON.stringify(machineFailure(explanation)));
+    else bad(explanation);
+    process.exitCode = 1;
+    return;
+  }
   const targetInput = String(positional[0] ?? ".");
   let target = path.resolve(targetInput);
   let remote: RemoteClone | null = null;
@@ -365,6 +420,7 @@ async function main() {
     const provider = flags.provider ?? "docker";
     const timeoutMs = Number(flags.timeout ?? 60_000);
     const port = flags.port === undefined ? undefined : Number(flags.port);
+    const command = flags.command;
     const optionError =
       provider !== "docker" && provider !== "local"
         ? `invalid --provider value: ${String(provider)} (expected docker or local)`
@@ -372,6 +428,8 @@ async function main() {
           ? `invalid --timeout value: ${String(flags.timeout)} (expected a positive number)`
           : port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)
             ? `invalid --port value: ${String(flags.port)} (expected an integer from 1 to 65535)`
+            : command !== undefined && (typeof command !== "string" || command.trim().length === 0)
+              ? "--command requires a non-empty command string"
             : null;
     if (optionError) {
       if (flags.json) console.log(JSON.stringify(machineFailure(optionError)));
@@ -388,6 +446,7 @@ async function main() {
       timeoutMs,
       install: Boolean(flags.install),
       port,
+      command: typeof command === "string" ? command : undefined,
     };
     const outcome = await up(target, opts);
     const verified = outcome.attestation?.result.booted === true && outcome.attestation.result.healthVerified === true;
@@ -463,14 +522,56 @@ async function main() {
     return;
   }
 
+  if (cmd === "registry") {
+    const sub = positional[0];
+    const repo = path.resolve(String(positional[1] ?? "."));
+    if (sub !== "export") {
+      bad(`unknown registry subcommand: ${sub ?? "(none)"} — use export`);
+      process.exitCode = 1;
+      return;
+    }
+    const requestedMode = String(flags.mode ?? (flags.federated ? "federated_public_candidate" : "local_export"));
+    const registryModes: RegistryMode[] = ["local_export", "federated_public_candidate", "cloud_upload_candidate"];
+    if (!registryModes.includes(requestedMode as RegistryMode)) {
+      bad(`invalid --mode value: ${requestedMode}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (flags.federated && requestedMode !== "federated_public_candidate") {
+      bad("--federated requires --mode federated_public_candidate when --mode is provided");
+      process.exitCode = 1;
+      return;
+    }
+    const entry = registryEntryFor(repo, requestedMode as RegistryMode);
+    if (!entry) {
+      bad(`no attestation at ${attestationPath(repo)} — run bootproof up first`);
+      process.exitCode = 1;
+      return;
+    }
+    if (flags.federated) {
+      const receipt = buildFederatedReceipt(entry, { sign: true });
+      const output = writeFederatedReceipt(repo, receipt);
+      ok(`wrote redacted federated public candidate: ${output}`);
+    } else {
+      const output = writeRegistryEntry(repo, entry);
+      ok(`wrote redacted registry entry: ${output}`);
+    }
+    console.log(`${DIM}redactions applied: ${entry.redactionsApplied.join(", ")}${RESET}`);
+    console.log("Nothing has been uploaded. This export is local and opt-in.");
+    if (flags.federated) {
+      console.log("Review the receipt before deliberately committing it to the public repository.");
+    } else if (requestedMode === "cloud_upload_candidate") {
+      console.log("This is only a Cloud upload candidate. BootProof Cloud upload is not implemented here.");
+    }
+    return;
+  }
+
   if (cmd === "attest") {
     const sub = positional[0];
     const repo = path.resolve(String(positional[1] ?? "."));
     if (sub === "export") {
-      const ap = attestationPath(repo);
-      if (!fs.existsSync(ap)) { bad(`no attestation at ${ap} — run bootproof up first`); process.exitCode = 1; return; }
-      const att: Attestation = JSON.parse(fs.readFileSync(ap, "utf8"));
-      const entry = buildRegistryEntry(att);
+      const entry = registryEntryFor(repo, "local_export");
+      if (!entry) { bad(`no attestation at ${attestationPath(repo)} — run bootproof up first`); process.exitCode = 1; return; }
       const out = writeRegistryEntry(repo, entry);
       ok(`wrote redacted registry entry: ${out}`);
       console.log(`${DIM}redactions applied: ${entry.redactionsApplied.length ? entry.redactionsApplied.join(", ") : "none needed"}${RESET}`);
@@ -485,7 +586,7 @@ async function main() {
       const entry = JSON.parse(fs.readFileSync(ep, "utf8"));
       const valid = verifyRegistryEntry(entry);
       (valid ? ok : bad)(`registry entry signature ${valid ? "valid" : "INVALID"}`);
-      console.log(`${DIM}booted=${entry.result.booted} class=${entry.result.failureClass ?? "none"} commit=${entry.repo.commit?.slice(0, 8) ?? "?"}${RESET}`);
+      console.log(`${DIM}verified=${entry.verified} class=${entry.failureClass ?? "none"} commit=${entry.commitHash?.slice(0, 8) ?? "?"}${RESET}`);
       if (!valid) process.exitCode = 1;
       return;
     }

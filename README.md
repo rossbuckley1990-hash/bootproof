@@ -234,12 +234,15 @@ Depending on the observed plan, BootProof may write:
 ```text
 .bootproof/attestation.json
 .bootproof/registry-entry.json
+.bootproof/registry/<timestamp>-<hash>.json
 .bootproof/runtime/
 docker-compose.bootproof.yml
 .env.bootproof.example
 ```
 
-`registry-entry.json` is written only by `bootproof attest export`.
+Registry artifacts are written only by explicit `bootproof registry export` or
+`bootproof attest export` commands. Federated public-candidate receipts require
+`bootproof registry export . --federated`.
 
 Docker and env guidance files are listed in proof only when BootProof actually generated them.
 
@@ -290,9 +293,11 @@ See [docs/REAL_REPO_EVIDENCE.md](docs/REAL_REPO_EVIDENCE.md).
 
 ## CI And Registry
 
-BootProof does not upload attestations. A project can deliberately commit `.bootproof/` or export a redacted registry entry.
+BootProof does not upload attestations. A project can deliberately export a redacted local
+registry entry or a federated public-candidate receipt and review it before committing it.
 
-The Git-native registry and OIDC-backed trust model are designs in progress, not deployed services.
+The public crawler, private Cloud upload, and OIDC-backed trust model are future integrations,
+not deployed services in this repository.
 
 - [docs/CI_ACTION.md](docs/CI_ACTION.md)
 - [docs/REGISTRY.md](docs/REGISTRY.md)

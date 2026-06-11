@@ -291,10 +291,128 @@ test("e2e: real boot, observed health, signed attestation that verifies", async 
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.booted, true);
   assert.equal(att.result.healthVerified, true);
+  assert.equal(att.result.healthEvidence.requestedUrl, `http://localhost:${port}/`);
+  assert.equal(att.result.healthEvidence.statusCode, 200);
+  assert.equal(att.result.healthEvidence.statusText, "OK");
+  assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
+  assert.equal(att.result.healthEvidence.connectionError, null);
   assert.ok(att.signature, "attestation must be signed");
   assert.ok(att.observed.some(o => o.kind === "health" && o.ok), "health must be an observed step");
   const v = run(["verify", repo]);
   assert.match(v.out, /signature valid/);
+});
+
+test("parent environment including RAILS_ENV and PATH reaches the app process", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  fs.writeFileSync(path.join(repo, "server.js"), `
+const http = require("http");
+const required = {
+  BOOTPROOF_PARENT_TEST: "inherited",
+  RAILS_ENV: "development",
+  NODE_ENV: "development",
+  DATABASE_URL: "postgresql://localhost/mastodon",
+  REDIS_URL: "redis://localhost:6379",
+  BUNDLE_PATH: "/tmp/bootproof-bundle",
+  GEM_HOME: "/tmp/bootproof-gems",
+  RBENV_VERSION: "3.3.0",
+  RUBYOPT: "-W0",
+};
+for (const [name, expected] of Object.entries(required)) {
+  if (process.env[name] !== expected) {
+    console.error(name + " was not preserved");
+    process.exit(1);
+  }
+}
+if (!process.env.PATH) {
+  console.error("PATH was not preserved");
+  process.exit(1);
+}
+http.createServer((_request, response) => response.end("env ok")).listen(process.env.PORT);
+`);
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000"],
+    true,
+    {
+      BOOTPROOF_PARENT_TEST: "inherited",
+      RAILS_ENV: "development",
+      NODE_ENV: "development",
+      DATABASE_URL: "postgresql://localhost/mastodon",
+      REDIS_URL: "redis://localhost:6379",
+      BUNDLE_PATH: "/tmp/bootproof-bundle",
+      GEM_HOME: "/tmp/bootproof-gems",
+      RBENV_VERSION: "3.3.0",
+      RUBYOPT: "-W0",
+    },
+  );
+  assert.equal(code, 0);
+  assert.match(out, /BOOTED/);
+});
+
+test("--command is executed and reflected in terminal output, plan, and attestation", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  const command = "RAILS_ENV=development node override-server.cjs";
+  fs.writeFileSync(path.join(repo, "server.js"), "throw new Error('inferred command must not run');");
+  fs.writeFileSync(path.join(repo, "override-server.cjs"), `
+const http = require("http");
+if (process.env.RAILS_ENV !== "development") process.exit(2);
+http.createServer((_request, response) => response.end("override ok")).listen(process.env.PORT);
+`);
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--command", command, "--port", String(port), "--timeout", "10000"],
+    true,
+  );
+  assert.equal(code, 0);
+  assert.match(out, /selected command: RAILS_ENV=development node override-server\.cjs/);
+  assert.match(out, /--command override/);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  const plannedStart = att.plan.steps.find(step => step.kind === "start-app");
+  const observedStart = att.observed.find(step => step.kind === "start-app");
+  assert.equal(plannedStart.command, command);
+  assert.equal(observedStart.command, command);
+  assert.equal(att.result.booted, true);
+  assert.equal(att.result.healthVerified, true);
+});
+
+test("GitLab-style sign-in redirect verifies and replaces transient health errors", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  fs.writeFileSync(path.join(repo, "server.js"), `
+const http = require("http");
+const port = process.env.PORT || 3000;
+let requests = 0;
+http.createServer((_request, response) => {
+  requests++;
+  if (requests === 1) {
+    response.statusCode = 500;
+    response.end("warming up");
+    return;
+  }
+  response.writeHead(302, { location: "/users/sign_in", "x-app": "gitlab" });
+  response.end("redirecting");
+}).listen(port);
+`);
+  const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000"], true);
+  assert.equal(code, 0);
+  assert.match(out, /✓ health: HTTP 302 Found → \/users\/sign_in/);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.booted, true);
+  assert.equal(att.result.healthVerified, true);
+  assert.equal(att.result.healthEvidence.requestedUrl, `http://localhost:${port}/`);
+  assert.equal(att.result.healthEvidence.statusCode, 302);
+  assert.equal(att.result.healthEvidence.statusText, "Found");
+  assert.equal(att.result.healthEvidence.headers.location, "/users/sign_in");
+  assert.equal(att.result.healthEvidence.headers["x-app"], "gitlab");
+  assert.equal(att.result.healthEvidence.redirectLocation, "/users/sign_in");
+  assert.equal(att.result.healthEvidence.bodyExcerpt, "redirecting");
+  assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
+  assert.equal(att.result.healthEvidence.connectionError, null);
+  assert.ok(!Number.isNaN(Date.parse(att.result.healthEvidence.timestamp)));
+  assert.doesNotMatch(JSON.stringify(att.result.healthEvidence), /500|warming up/);
+  assert.doesNotMatch(JSON.stringify(att.observed.filter(step => step.kind === "health")), /500|warming up/);
 });
 
 test("honesty: early refusal fixture writes signed proof that explains and verifies without touching env", () => {
@@ -390,6 +508,16 @@ test("machine interface: --ci rejects invalid providers before execution", () =>
   assert.equal(result.attestationPath, null);
   assert.match(result.explanation, /invalid --provider/);
   assert.ok(!fs.existsSync(path.join(repo, ".bootproof")), "invalid options must not start a run");
+});
+
+test("unsupported CLI flags are rejected before execution", () => {
+  const repo = freshCopy("hello-app");
+  const { out, code } = run(["up", repo, "--unsupported-test-flag", "--json"], true);
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.match(result.explanation, /unsupported flag for up: --unsupported-test-flag/);
+  assert.equal(result.attestationPath, null);
+  assert.ok(!fs.existsSync(path.join(repo, ".bootproof")), "unsupported flags must not start a run");
 });
 
 test("remote mode clones GitHub sources but refuses execution without the existing host safety gate", () => {
@@ -1142,7 +1270,10 @@ test("missing environment failures name extracted secrets without inventing valu
 
   const generated = path.join(repo, ".env.bootproof.example");
   assert.ok(fs.existsSync(generated), "referenced generated env example must exist");
-  assert.match(fs.readFileSync(generated, "utf8"), /# API_SECRET= \(secret with no safe local default/);
+  const generatedContents = fs.readFileSync(generated, "utf8");
+  assert.match(generatedContents, /# API_SECRET= \(secret with no safe local default/);
+  assert.doesNotMatch(generatedContents, /^API_SECRET=.+/m, "secret-looking variables must not receive invented values");
+  assert.doesNotMatch(out, /API_SECRET=[^\s]/, "terminal guidance must not invent a secret value");
   for (const name of [".env", ".env.local", ".env.development", ".env.production"]) {
     assert.equal(fs.existsSync(path.join(repo, name)), false, `${name} must not be written`);
   }
@@ -1155,6 +1286,69 @@ test("missing environment failures name extracted secrets without inventing valu
   assert.equal(att.result.healthVerified, false);
 });
 
+test("missing RAILS_ENV gives a safe local value without claiming an env example exists", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  const protectedFiles = {
+    ".env": "KEEP_ENV=unchanged\n",
+    ".env.local": "KEEP_LOCAL=unchanged\n",
+    ".env.development": "KEEP_DEVELOPMENT=unchanged\n",
+    ".env.production": "KEEP_PRODUCTION=unchanged\n",
+  };
+  for (const [name, contents] of Object.entries(protectedFiles)) {
+    fs.writeFileSync(path.join(repo, name), contents);
+  }
+  fs.writeFileSync(path.join(repo, "server.js"), `
+console.error("The RAILS_ENV environment variable is not set.");
+process.exit(1);
+`);
+
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--port", String(port), "--timeout", "1200", "--ci"],
+    true,
+    { RAILS_ENV: "" },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — missing_env_var/);
+  assert.match(out, /What happened: Missing variable: RAILS_ENV\. Safe local value: development\./);
+  assert.match(out, /Safe next step: RAILS_ENV=development bootproof up \. --provider local --unsafe-local --install/);
+  assert.doesNotMatch(out, /\.env\.bootproof\.example/);
+  assert.equal(fs.existsSync(path.join(repo, ".env.bootproof.example")), false);
+
+  for (const [name, contents] of Object.entries(protectedFiles)) {
+    assert.equal(fs.readFileSync(path.join(repo, name), "utf8"), contents, `${name} must not be mutated`);
+  }
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "missing_env_var");
+  assert.match(att.result.failureEvidence, /RAILS_ENV environment variable is not set/);
+  assert.match(att.result.explanation, /Missing variable: RAILS_ENV\. Safe local value: development\./);
+  assert.doesNotMatch(att.result.explanation, /\.env\.bootproof\.example/);
+});
+
+test("app exited early preserves evidence head, tail, and extracted Rails cause", async () => {
+  const repo = freshCopy("app-exited-rails-backtrace");
+  const port = await getFreePort();
+  const { code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "1200", "--ci"],
+    true,
+  );
+  assert.equal(code, 1);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "app_exited_early");
+  const start = att.observed.find(step => step.kind === "start-app");
+  assert.equal(start.ok, false);
+  assert.match(start.evidenceHead, /config\/database\.yml is missing \(RuntimeError\)/);
+  assert.match(start.evidenceTail, /rails-299\.rb:300:in 'boot'/);
+  assert.doesNotMatch(start.evidenceTail, /config\/database\.yml is missing/, "the fixture must prove the cause fell outside the retained tail");
+  assert.equal(start.firstErrorLine, "config/database.yml is missing (RuntimeError)");
+  assert.equal(start.firstExceptionLine, "config/database.yml is missing (RuntimeError)");
+  assert.equal(start.detectedCause, "missing config/database.yml");
+  assert.ok(start.evidenceTail.length <= 4000, "existing bounded evidenceTail behavior must remain intact");
+  assert.match(att.result.failureEvidence, /Detected cause: missing config\/database\.yml/);
+});
+
 test("health HTTP error fixture is not mislabeled as a timeout", async () => {
   const repo = freshCopy("health-http-error");
   const port = await getFreePort();
@@ -1165,7 +1359,35 @@ test("health HTTP error fixture is not mislabeled as a timeout", async () => {
   assert.doesNotMatch(out, /NOT VERIFIED — health_check_timeout/);
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.failureClass, "health_http_error");
+  assert.equal(att.result.healthEvidence.requestedUrl, `http://localhost:${port}/`);
+  assert.equal(att.result.healthEvidence.statusCode, 500);
+  assert.equal(att.result.healthEvidence.statusText, "Internal Server Error");
+  assert.equal(att.result.healthEvidence.bodyExcerpt, "fixture failure");
+  assert.equal(att.result.healthEvidence.acceptedAsHealthy, false);
+  assert.equal(att.result.healthEvidence.connectionError, null);
   assert.ok(att.observed.some(step => step.kind === "health" && step.ok === false));
+});
+
+test("connection refusal is not verified and is preserved in health evidence", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  fs.writeFileSync(path.join(repo, "server.js"), "setInterval(() => {}, 1000);");
+  const { code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "1200", "--ci"],
+    true,
+  );
+  assert.equal(code, 1);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.equal(att.result.healthEvidence.requestedUrl, `http://localhost:${port}/`);
+  assert.equal(att.result.healthEvidence.statusCode, null);
+  assert.equal(att.result.healthEvidence.statusText, null);
+  assert.deepEqual(att.result.healthEvidence.headers, {});
+  assert.equal(att.result.healthEvidence.redirectLocation, null);
+  assert.equal(att.result.healthEvidence.bodyExcerpt, "");
+  assert.equal(att.result.healthEvidence.acceptedAsHealthy, false);
+  assert.match(att.result.healthEvidence.connectionError, /ECONNREFUSED|connect/i);
 });
 
 test("matching package manager does not make a parallel monorepo health target unambiguous", () => {
@@ -1292,9 +1514,35 @@ test("attest export: redacted entry written locally, nothing uploaded, consent m
   const repo = freshCopy("hello-app");
   const port = await getFreePort();
   run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "registry-entry.json")), false);
   const { out } = run(["attest", "export", repo]);
   assert.match(out, /Nothing has been uploaded/);
   assert.ok(fs.existsSync(path.join(repo, ".bootproof", "registry-entry.json")));
+  const entry = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "registry-entry.json"), "utf8"));
+  assert.equal(entry.schema, "bootproof/registry-entry/v1");
+  assert.equal(entry.optInRequired, true);
   const check = run(["attest", "check", repo]);
   assert.match(check.out, /signature valid/);
+});
+
+test("registry export: explicit federated receipt write is local, signed, and opt-in", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "registry")), false);
+
+  const { out, code } = run(["registry", "export", repo, "--federated"]);
+  assert.equal(code, 0, out);
+  assert.match(out, /Nothing has been uploaded/);
+  assert.match(out, /public candidate/);
+  const registryDir = path.join(repo, ".bootproof", "registry");
+  const files = fs.readdirSync(registryDir);
+  assert.equal(files.length, 1);
+  const receipt = JSON.parse(fs.readFileSync(path.join(registryDir, files[0]), "utf8"));
+  assert.equal(receipt.schema, "bootproof/federated-receipt/v1");
+  assert.equal(receipt.registryEntry.registryMode, "federated_public_candidate");
+  assert.equal(receipt.registryEntry.optInRequired, true);
+  assert.equal(receipt.publicRepoDeclaration, true);
+  assert.equal(receipt.noSecretsIncluded, true);
+  assert.equal(receipt.signature.algorithm, "ed25519");
 });

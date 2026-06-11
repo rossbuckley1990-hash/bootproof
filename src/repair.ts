@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import { minimalEnv, runToCompletion } from "./exec.js";
+import { buildExecutionEnv, runToCompletion } from "./exec.js";
 import { REPAIRED_GENERATED_COMPOSE_MARKER, repoComposeRepairFile } from "./plan.js";
 import {
   attestationPath,
@@ -414,7 +414,7 @@ async function activatePackageManager(context: RepairContext): Promise<AppliedRe
   if (!command || !packageManagerVersion) return null;
   const corepackHome = path.join(context.sandbox, ".bootproof", "corepack");
   const environment = { COREPACK_HOME: corepackHome };
-  const result = await runToCompletion(command, context.sandbox, 120_000, minimalEnv(environment));
+  const result = await runToCompletion(command, context.sandbox, 120_000, buildExecutionEnv(environment));
   if (result.exitCode !== 0 || result.timedOut) {
     throw new Error(`environment remediation failed: ${command}\n${result.stderr || result.stdout}`);
   }
@@ -1036,7 +1036,7 @@ export async function repairRepo(repoPath: string, options: RepairOptions): Prom
       explanation: `known remediation for ${failureClass} did not resolve it; evidence preserved`,
     };
   } finally {
-    await cleanupServices(lastOutcome, minimalEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
+    await cleanupServices(lastOutcome, buildExecutionEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
     fs.rmSync(root, { recursive: true, force: true });
   }
 }

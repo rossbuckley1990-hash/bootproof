@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/federated-receipt-v1.schema.json",
+  "title": "BootProof Federated Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "createdAt",
+    "registryEntry",
+    "attestationHash",
+    "publicRepoDeclaration",
+    "crawlerHint",
+    "redactionsApplied",
+    "noSecretsIncluded"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/federated-receipt/v1" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "registryEntry": { "$ref": "registry-entry-v1.schema.json" },
+    "attestationHash": { "$ref": "#/$defs/hash" },
+    "repairReceiptHash": { "$ref": "#/$defs/hash" },
+    "signature": { "$ref": "#/$defs/signature" },
+    "publicRepoDeclaration": { "const": true },
+    "crawlerHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commitHash", "branch"],
+      "properties": {
+        "repoUrl": { "type": "string", "format": "uri" },
+        "commitHash": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] }
+      }
+    },
+    "redactionsApplied": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "noSecretsIncluded": { "const": true }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "publicKey", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "publicKey": { "type": "string" },
+        "value": { "type": "string" }
+      }
+    }
+  }
+}
+

@@ -12,13 +12,24 @@ export type FailureClass =
   | "not_an_application"
   | "orchestration_not_supported"
   | "runtime_engine_mismatch"
+  | "missing_ruby_version"
   | "missing_package_manager"
   | "missing_runtime_tool"
+  | "missing_build_tool"
+  | "native_extension_compile_failed"
   | "package_manager_version_mismatch"
   | "dependency_install_skipped"
   | "python_flask_setup_required"
   | "missing_env_var"
+  | "missing_database_config"
+  | "missing_required_config"
   | "database_unreachable"
+  | "postgres_unavailable"
+  | "postgres_role_missing"
+  | "database_schema_missing"
+  | "unsupported_database_version"
+  | "unsupported_database_config"
+  | "redis_unavailable"
   | "postgres_auth_env_missing"
   | "migrations_missing"
   | "port_in_use"
@@ -122,7 +133,23 @@ export interface ObservedStep {
   exitCode: number | null;
   ok: boolean;
   observation: string;
+  evidenceHead?: string;
   evidenceTail?: string;
+  firstErrorLine?: string;
+  firstExceptionLine?: string;
+  detectedCause?: string;
+}
+
+export interface HealthEvidence {
+  requestedUrl: string;
+  statusCode: number | null;
+  statusText: string | null;
+  headers: Record<string, string>;
+  redirectLocation: string | null;
+  bodyExcerpt: string;
+  timestamp: string;
+  acceptedAsHealthy: boolean;
+  connectionError: string | null;
 }
 
 export interface AttestationTrust {
@@ -143,6 +170,7 @@ export interface Attestation {
     booted: boolean;
     healthVerified: boolean;
     healthObservation: string | null;
+    healthEvidence: HealthEvidence | null;
     observedHealthCandidates: string[];
     failureClass: FailureClass | null;
     failureEvidence: string | null;

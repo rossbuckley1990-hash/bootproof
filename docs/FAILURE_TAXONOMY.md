@@ -16,13 +16,24 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `not_an_application` | No trustworthy runnable entrypoint was found. | Select a runnable workspace or add an explicit start command. |
 | `orchestration_not_supported` | An application stack was detected, but no explicit supported entrypoint or source-built Compose web service was found. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |
+| `missing_ruby_version` | The exact Ruby version selected by rbenv is not installed. | Run `rbenv install <version>`. |
 | `missing_package_manager` | The declared package manager executable is absent. | Enable Corepack or install the required manager. |
 | `missing_runtime_tool` | An explicit Go, Ruby, Bundler, or Make run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
+| `missing_build_tool` | A named native build tool required by a dependency is absent. | Install the reported tool, such as `brew install cmake`. |
+| `native_extension_compile_failed` | A gem native extension failed to compile. | Install the affected gem's native dependencies and rerun installation. |
 | `package_manager_version_mismatch` | The available package-manager version differs from the exact/simple declared version. | Activate the declared version, then rerun. |
 | `dependency_install_skipped` | A dependency-backed application was not started because install was not requested. | Review the install command and opt in with `--install`. |
 | `python_flask_setup_required` | Python/Flask setup requires migrations, initialization, workers, frontend, or service orchestration not yet supported safely. | Complete the documented setup manually; do not treat detection as full support. |
 | `missing_env_var` | Required environment configuration is missing. | Supply real values through the repository's documented path. BootProof will not edit `.env`. |
+| `missing_database_config` | `config/database.yml` could not be loaded or is absent. | Create it from the repository's documented example and review it. |
+| `missing_required_config` | Another explicitly named required configuration file is absent. | Restore the reported file from the repository's documented example. |
 | `database_unreachable` | A required database or cache could not be reached. | Start the real required service and verify its address. |
+| `postgres_unavailable` | PostgreSQL refused or could not accept the connection. | Start PostgreSQL and verify the configured host and port. |
+| `postgres_role_missing` | PostgreSQL is reachable, but the configured role does not exist. | Create the role or configure an existing one. |
+| `database_schema_missing` | PostgreSQL reports an undefined table or missing relation. | Run the repository's documented migrations or database setup. |
+| `unsupported_database_version` | The installed PostgreSQL version is outside the repository's supported range. | Install or select a supported version. |
+| `unsupported_database_config` | `config/database.yml` contains unsupported database names. | Use only the repository-supported names. |
+| `redis_unavailable` | Redis refused or could not accept the connection. | Start Redis and verify the configured host and port. |
 | `postgres_auth_env_missing` | Postgres was reached but authentication or env configuration did not match. | Correct the real database configuration; BootProof will not invent credentials. |
 | `migrations_missing` | The database schema is absent or behind. | Run the repository's documented migration flow. Repair is attempted only for one unambiguous recognized framework. |
 | `port_in_use` | The application port is occupied. | Stop the process or use a supported explicit port. |

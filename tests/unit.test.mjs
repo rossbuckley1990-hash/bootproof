@@ -1,15 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { inferRepo } from "../dist/infer.js";
-import { classifyFailure, extractMissingEnvNames, TAXONOMY_DOC_CLASSES } from "../dist/taxonomy.js";
+import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue, TAXONOMY_DOC_CLASSES } from "../dist/taxonomy.js";
 import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, repoComposeRepairFile, writePlanFiles } from "../dist/plan.js";
 import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
-import { extractHealthCandidates, minimalEnv, pollHealth, superviseApp } from "../dist/exec.js";
+import { buildExecutionEnv, extractHealthCandidates, extractProcessEvidence, pollHealth, superviseApp } from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
+import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
 import {
   assertRepairScope,
@@ -51,6 +53,21 @@ async function waitForPortRelease(port, timeoutMs = 5000) {
   return false;
 }
 
+async function withHttpServer(handler, run) {
+  const server = await new Promise((resolve, reject) => {
+    const candidate = http.createServer(handler);
+    candidate.once("error", reject);
+    candidate.listen(0, "127.0.0.1", () => resolve(candidate));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    return await run(`http://127.0.0.1:${address.port}/`);
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
+
 test("infers a runnable node app with evidence", () => {
   const inf = inferRepo(path.join(FIX, "hello-app"));
   assert.equal(inf.isApplication, true);
@@ -78,6 +95,153 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure(fs.readFileSync(path.join(FIX, "service-port-allocated", "evidence.txt"), "utf8")).class, "service_port_allocated");
   assert.equal(classifyFailure("only HTTP 503 observed at http://localhost:3000/").class, "health_http_error");
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
+});
+
+test("Mastodon and GitLab failures have precise classes, metadata, and safe next steps", () => {
+  const cases = [
+    {
+      evidence: "rbenv: version '3.3.11' is not installed",
+      failureClass: "missing_ruby_version",
+      metadata: { requiredVersion: "3.3.11" },
+      safeNextStep: "rbenv install 3.3.11",
+    },
+    {
+      evidence: "ERROR: CMake is required to build Rugged",
+      failureClass: "missing_build_tool",
+      metadata: { tool: "cmake", affectedGem: "rugged" },
+      safeNextStep: "brew install cmake",
+    },
+    {
+      evidence: "Gem::Ext::BuildError: ERROR: Failed to build gem native extension.",
+      failureClass: "native_extension_compile_failed",
+      metadata: undefined,
+      safeNextStep: "Inspect the preserved compiler output, install the required native build dependencies, then rerun bundle install.",
+    },
+    {
+      evidence: "An error occurred while installing idn-ruby (0.1.0), and Bundler cannot continue.",
+      failureClass: "native_extension_compile_failed",
+      metadata: { affectedGem: "idn-ruby" },
+      safeNextStep: "Install the native build dependencies required by idn-ruby, then rerun bundle install.",
+    },
+    {
+      evidence: "Could not load database configuration",
+      failureClass: "missing_database_config",
+      metadata: { filePath: "config/database.yml" },
+      safeNextStep: "Create config/database.yml from the repository's documented example, review it, then rerun BootProof.",
+    },
+    {
+      evidence: 'No such file - ["config/database.yml"]',
+      failureClass: "missing_database_config",
+      metadata: { filePath: "config/database.yml" },
+      safeNextStep: "Create config/database.yml from the repository's documented example, review it, then rerun BootProof.",
+    },
+    {
+      evidence: "No such file or directory @ rb_sysopen - config/gitlab.yml",
+      failureClass: "missing_required_config",
+      metadata: { filePath: "config/gitlab.yml" },
+      safeNextStep: "Create config/gitlab.yml from the repository's documented example, review it, then rerun BootProof.",
+    },
+    {
+      evidence: 'connection to server at "127.0.0.1", port 5432 failed: Connection refused',
+      failureClass: "postgres_unavailable",
+      metadata: { host: "127.0.0.1", port: "5432" },
+      safeNextStep: "Start PostgreSQL, verify the configured host and port are reachable, then rerun BootProof.",
+    },
+    {
+      evidence: "PG::ConnectionBad",
+      failureClass: "postgres_unavailable",
+      metadata: undefined,
+      safeNextStep: "Start PostgreSQL, verify the configured host and port are reachable, then rerun BootProof.",
+    },
+    {
+      evidence: 'FATAL: role "postgres" does not exist',
+      failureClass: "postgres_role_missing",
+      metadata: { role: "postgres" },
+      safeNextStep: "Create the PostgreSQL role postgres or configure the application to use an existing role, then rerun BootProof.",
+    },
+    {
+      evidence: "PG::UndefinedTable",
+      failureClass: "database_schema_missing",
+      metadata: undefined,
+      safeNextStep: "Run the repository's documented database migration or setup command, then rerun BootProof.",
+    },
+    {
+      evidence: 'PG::UndefinedTable: ERROR: relation "application_settings" does not exist',
+      failureClass: "database_schema_missing",
+      metadata: { table: "application_settings" },
+      safeNextStep: "Run the repository's documented database migration or setup command, then rerun BootProof.",
+    },
+    {
+      evidence: "PostgreSQL 16.14 is installed, but GitLab requires PostgreSQL >= 17",
+      failureClass: "unsupported_database_version",
+      metadata: { foundVersion: "16.14", requiredVersion: ">= 17" },
+      safeNextStep: "Install or select PostgreSQL >= 17, then rerun BootProof.",
+    },
+    {
+      evidence: "unsupported database names in 'config/database.yml': geo, embedding\nSupported database names: main, ci",
+      failureClass: "unsupported_database_config",
+      metadata: { unsupportedNames: ["geo", "embedding"], supportedNames: ["main", "ci"] },
+      safeNextStep: "Use only the supported database names (main, ci) in config/database.yml, then rerun BootProof.",
+    },
+    {
+      evidence: "Redis::CannotConnectError: Error connecting to Redis on redis://localhost:6379",
+      failureClass: "redis_unavailable",
+      metadata: { host: "localhost", port: "6379" },
+      safeNextStep: "Start Redis, verify the configured host and port are reachable, then rerun BootProof.",
+    },
+    {
+      evidence: "Connection refused - connect(2) for 127.0.0.1:6379",
+      failureClass: "redis_unavailable",
+      metadata: { host: "127.0.0.1", port: "6379" },
+      safeNextStep: "Start Redis, verify the configured host and port are reachable, then rerun BootProof.",
+    },
+    {
+      evidence: "Redis connection failed at redis://localhost:6379",
+      failureClass: "redis_unavailable",
+      metadata: { host: "localhost", port: "6379" },
+      safeNextStep: "Start Redis, verify the configured host and port are reachable, then rerun BootProof.",
+    },
+  ];
+
+  for (const expected of cases) {
+    const result = classifyFailure(expected.evidence);
+    assert.equal(result.class, expected.failureClass, expected.evidence);
+    assert.deepEqual(result.metadata, expected.metadata, expected.evidence);
+    assert.equal(result.safeNextStep, expected.safeNextStep, expected.evidence);
+    const diagnosis = diagnoseFailure(result.class, expected.evidence, result.explanation);
+    assert.equal(diagnosis.safeNextStep, expected.safeNextStep, expected.evidence);
+  }
+});
+
+test("real-world classifiers do not overclassify unrelated evidence", () => {
+  const unrelated = [
+    "rbenv version 3.3.11 is installed",
+    "CMake project generated successfully",
+    "Rugged loaded successfully",
+    "config/gitlab.yml loaded",
+    'PostgreSQL role "postgres" exists',
+    "PostgreSQL 17.1 is installed and supported",
+    "Redis URL configured: redis://localhost:6379",
+  ];
+  for (const evidence of unrelated) {
+    const failureClass = classifyFailure(evidence).class;
+    assert.ok(
+      ![
+        "missing_ruby_version",
+        "missing_build_tool",
+        "native_extension_compile_failed",
+        "missing_database_config",
+        "missing_required_config",
+        "postgres_unavailable",
+        "postgres_role_missing",
+        "database_schema_missing",
+        "unsupported_database_version",
+        "unsupported_database_config",
+        "redis_unavailable",
+      ].includes(failureClass),
+      `${evidence} was overclassified as ${failureClass}`,
+    );
+  }
 });
 
 test("Superset-like repository is recognized as a setup-heavy Python/Flask application", () => {
@@ -293,6 +457,7 @@ test("pnpm engine mismatch is classified specifically", () => {
 
 test("missing environment names are extracted only from explicit failure contexts", () => {
   assert.deepEqual(extractMissingEnvNames("DATABASE_URL is not set"), ["DATABASE_URL"]);
+  assert.deepEqual(extractMissingEnvNames("The RAILS_ENV environment variable is not set."), ["RAILS_ENV"]);
   assert.deepEqual(extractMissingEnvNames("API_TOKEN is required"), ["API_TOKEN"]);
   assert.deepEqual(extractMissingEnvNames("Missing required secret: SESSION_SECRET"), ["SESSION_SECRET"]);
   assert.deepEqual(extractMissingEnvNames("Invalid environment variables:\n  SMTP_PASSWORD: Required"), ["SMTP_PASSWORD"]);
@@ -309,6 +474,12 @@ test("missing environment names are extracted only from explicit failure context
   );
   const many = Array.from({ length: 12 }, (_, index) => `SECRET_${index} is required`).join("\n");
   assert.equal(extractMissingEnvNames(many).length, 10, "extraction is capped at ten names");
+  assert.equal(safeLocalEnvValue("RAILS_ENV"), "development");
+  assert.equal(safeLocalEnvValue("API_SECRET"), null, "secret-looking variables must never receive invented defaults");
+  const railsFailure = classifyFailure("The RAILS_ENV environment variable is not set.");
+  assert.equal(railsFailure.class, "missing_env_var");
+  assert.doesNotMatch(railsFailure.explanation, /\.env\.bootproof\.example/);
+  assert.notEqual(classifyFailure("config/database.yml is missing (RuntimeError)").class, "missing_env_var");
 });
 
 test("taxonomy documentation and tool version stay synchronized", () => {
@@ -478,12 +649,187 @@ test("health candidates are extracted from common application log formats", () =
   );
 });
 
+test("execution environment preserves parent variables and applies explicit overrides", () => {
+  const names = [
+    "BOOTPROOF_PARENT_TEST",
+    "RAILS_ENV",
+    "NODE_ENV",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "BUNDLE_PATH",
+    "GEM_HOME",
+    "RBENV_VERSION",
+    "RUBYOPT",
+  ];
+  const before = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.BOOTPROOF_PARENT_TEST = "inherited";
+    process.env.RAILS_ENV = "development";
+    process.env.NODE_ENV = "test";
+    process.env.DATABASE_URL = "postgresql://localhost/app";
+    process.env.REDIS_URL = "redis://localhost:6379";
+    process.env.BUNDLE_PATH = "/tmp/bundle";
+    process.env.GEM_HOME = "/tmp/gems";
+    process.env.RBENV_VERSION = "3.3.0";
+    process.env.RUBYOPT = "-W0";
+
+    const env = buildExecutionEnv({ PORT: "6006", NODE_ENV: "development" });
+    assert.equal(env.PATH, process.env.PATH);
+    assert.equal(env.HOME, process.env.HOME);
+    assert.equal(env.SHELL, process.env.SHELL);
+    assert.equal(env.BOOTPROOF_PARENT_TEST, "inherited");
+    assert.equal(env.RAILS_ENV, "development");
+    assert.equal(env.NODE_ENV, "development");
+    assert.equal(env.DATABASE_URL, "postgresql://localhost/app");
+    assert.equal(env.REDIS_URL, "redis://localhost:6379");
+    assert.equal(env.BUNDLE_PATH, "/tmp/bundle");
+    assert.equal(env.GEM_HOME, "/tmp/gems");
+    assert.equal(env.RBENV_VERSION, "3.3.0");
+    assert.equal(env.RUBYOPT, "-W0");
+    assert.equal(env.PORT, "6006");
+    assert.equal(env.CI, "true");
+    assert.equal(env.BOOTPROOF, "1");
+  } finally {
+    for (const [name, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("failed process evidence extracts Rails and PostgreSQL root causes deterministically", () => {
+  const rails = extractProcessEvidence(
+    "config/database.yml is missing (RuntimeError)\n/app/config/application.rb:1:in 'boot'\n",
+    "/app/vendor/bundle/rails.rb:99:in 'run'\n",
+  );
+  assert.equal(rails.firstErrorLine, "config/database.yml is missing (RuntimeError)");
+  assert.equal(rails.firstExceptionLine, "config/database.yml is missing (RuntimeError)");
+  assert.equal(rails.detectedCause, "missing config/database.yml");
+
+  const cases = [
+    ["config/gitlab.yml does not exist (RuntimeError)", "missing config/gitlab.yml"],
+    ["PG::ConnectionBad: connection refused for PostgreSQL on port 5432", "PostgreSQL connection refused"],
+    ['PG::ConnectionBad: FATAL: role "gitlab" does not exist', "PostgreSQL role missing"],
+    ['ActiveRecord::StatementInvalid: PG::UndefinedTable: relation "users" does not exist', "database schema missing"],
+    ["Unsupported PostgreSQL database version 13", "unsupported database version"],
+    ["Unsupported database configuration: load_balancing", "unsupported database configuration"],
+  ];
+  for (const [line, expected] of cases) {
+    assert.equal(extractProcessEvidence(line, "").detectedCause, expected);
+  }
+});
+
+test("health verification accepts HTTP 200 and preserves response evidence", async () => {
+  await withHttpServer((_request, response) => {
+    response.setHeader("x-bootproof-test", "ready");
+    response.statusCode = 200;
+    response.end("healthy");
+  }, async url => {
+    const health = await pollHealth(url, 1000, 20);
+    assert.equal(health.responded, true);
+    assert.equal(health.evidence.acceptedAsHealthy, true);
+    assert.equal(health.evidence.statusCode, 200);
+    assert.equal(health.evidence.statusText, "OK");
+    assert.equal(health.evidence.headers["x-bootproof-test"], "ready");
+    assert.equal(health.evidence.bodyExcerpt, "healthy");
+    assert.equal(health.evidence.connectionError, null);
+    assert.ok(!Number.isNaN(Date.parse(health.evidence.timestamp)));
+  });
+});
+
+test("health verification accepts HTTP 204", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 204;
+    response.end();
+  }, async url => {
+    const health = await pollHealth(url, 1000, 20);
+    assert.equal(health.evidence.statusCode, 204);
+    assert.equal(health.evidence.acceptedAsHealthy, true);
+    assert.equal(health.evidence.bodyExcerpt, "");
+  });
+});
+
+test("health verification accepts HTTP 302 to /users/sign_in without following it", async () => {
+  let requests = 0;
+  await withHttpServer((_request, response) => {
+    requests++;
+    response.writeHead(302, { location: "/users/sign_in" });
+    response.end("redirect");
+  }, async url => {
+    const health = await pollHealth(url, 1000, 20);
+    assert.equal(requests, 1);
+    assert.equal(health.evidence.statusCode, 302);
+    assert.equal(health.evidence.statusText, "Found");
+    assert.equal(health.evidence.redirectLocation, "/users/sign_in");
+    assert.equal(health.evidence.acceptedAsHealthy, true);
+  });
+});
+
+test("health verification accepts HTTP 302 to /login", async () => {
+  await withHttpServer((_request, response) => {
+    response.writeHead(302, { location: "/login" });
+    response.end();
+  }, async url => {
+    const health = await pollHealth(url, 1000, 20);
+    assert.equal(health.evidence.statusCode, 302);
+    assert.equal(health.evidence.redirectLocation, "/login");
+    assert.equal(health.evidence.acceptedAsHealthy, true);
+  });
+});
+
+test("health verification rejects HTTP 500 and preserves response evidence", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 500;
+    response.end("server failed");
+  }, async url => {
+    const health = await pollHealth(url, 80, 10);
+    assert.equal(health.responded, true);
+    assert.equal(health.evidence.statusCode, 500);
+    assert.equal(health.evidence.statusText, "Internal Server Error");
+    assert.equal(health.evidence.bodyExcerpt, "server failed");
+    assert.equal(health.evidence.acceptedAsHealthy, false);
+  });
+});
+
+test("health verification rejects connection refusal and preserves connection evidence", async () => {
+  const port = await getFreePort();
+  const url = `http://127.0.0.1:${port}/`;
+  const health = await pollHealth(url, 80, 10);
+  assert.equal(health.responded, false);
+  assert.equal(health.evidence.requestedUrl, url);
+  assert.equal(health.evidence.statusCode, null);
+  assert.equal(health.evidence.acceptedAsHealthy, false);
+  assert.match(health.evidence.connectionError, /ECONNREFUSED|connect/i);
+});
+
+test("health verification replaces a transient 500 with a later healthy 302", async () => {
+  let requests = 0;
+  await withHttpServer((_request, response) => {
+    requests++;
+    if (requests === 1) {
+      response.statusCode = 500;
+      response.end("warming up");
+      return;
+    }
+    response.writeHead(302, { location: "/users/sign_in" });
+    response.end("ready");
+  }, async url => {
+    const health = await pollHealth(url, 1000, 20);
+    assert.ok(requests >= 2);
+    assert.equal(health.evidence.statusCode, 302);
+    assert.equal(health.evidence.redirectLocation, "/users/sign_in");
+    assert.equal(health.evidence.bodyExcerpt, "ready");
+    assert.equal(health.evidence.acceptedAsHealthy, true);
+    assert.doesNotMatch(JSON.stringify(health.evidence), /500|warming up/);
+  });
+});
+
 test("supervisor stop terminates the process tree and releases its port", async () => {
   const port = await getFreePort();
   const app = superviseApp(
     "node server.js",
     path.join(FIX, "hello-app"),
-    minimalEnv({ PORT: String(port) }),
+    buildExecutionEnv({ PORT: String(port) }),
   );
   const health = await pollHealth(`http://127.0.0.1:${port}/`, 10_000, 100);
   assert.equal(health.responded, true, "fixture server must start before cleanup is tested");
@@ -572,11 +918,132 @@ test("registry entry: redacted, re-signed, tamper-detectable", async () => {
   const inf = inferRepo(path.join(FIX, "hello-app"));
   const plan = buildPlan(inf, "local");
   const att = buildAttestation({ repo: inf.repoPath, plan, observed: [], startedAt: new Date().toISOString(), booted: false, healthVerified: false, healthObservation: null, failureClass: "database_unreachable", failureEvidence: "postgresql://admin:Pw123@host/db refused", explanation: "t" });
-  const entry = buildRegistryEntry(att);
+  const entry = buildRegistryEntry(att, { inference: inf, sign: true });
   assert.doesNotMatch(JSON.stringify(entry), /Pw123/, "registry entry must not leak credentials");
   assert.equal(verifyRegistryEntry(entry), true);
-  entry.result.booted = true;
+  entry.verified = true;
   assert.equal(verifyRegistryEntry(entry), false, "tampered registry entry must fail verification");
+});
+
+test("registry and federated exports are stable, strict, redacted, local-only builders", async () => {
+  const {
+    buildFederatedReceipt,
+    buildRegistryEntry,
+    validateFederatedReceipt,
+    validateRegistryEntry,
+  } = await import("../dist/registry.js");
+  const inf = inferRepo(path.join(FIX, "hello-app"));
+  const plan = buildPlan(inf, "local");
+  const start = plan.steps.find(step => step.kind === "start-app");
+  assert.ok(start);
+  start.command = "RAILS_ENV=development API_TOKEN=top-secret bundle exec rails server --config /Users/alice/private/app.yml";
+  const att = buildAttestation({
+    repo: inf.repoPath,
+    plan,
+    observed: [{
+      id: "start-app",
+      kind: "start-app",
+      command: start.command,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:01.000Z",
+      exitCode: 1,
+      ok: false,
+      observation: "app exited",
+      evidenceHead: "API_TOKEN=top-secret\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----\n/Users/alice/private/app",
+      evidenceTail: "DATABASE_URL=postgresql://admin:db-password@localhost/app refused in /Users/alice/private/app",
+    }],
+    startedAt: "2026-01-01T00:00:00.000Z",
+    booted: false,
+    healthVerified: false,
+    healthObservation: "only HTTP 500 observed",
+    healthEvidence: {
+      requestedUrl: "http://localhost:3000/users/42?token=raw-token",
+      statusCode: 500,
+      statusText: "Internal Server Error",
+      headers: {},
+      redirectLocation: "/login?token=raw-token",
+      bodyExcerpt: "",
+      timestamp: "2026-01-01T00:00:02.000Z",
+      acceptedAsHealthy: false,
+      connectionError: null,
+    },
+    failureClass: "postgres_unavailable",
+    failureEvidence: "DATABASE_URL=postgresql://admin:db-password@localhost/app refused",
+    explanation: "failed",
+  });
+  att.repo.path = "/Users/alice/private/app";
+  att.repo.remote = "https://github.com/acme/example.git";
+  att.repo.commit = "0123456789abcdef";
+
+  const buildOptions = {
+    registryMode: "federated_public_candidate",
+    inference: inf,
+    branch: "main",
+    createdAt: "2026-01-02T03:04:05.000Z",
+  };
+  const before = fs.existsSync(path.join(inf.repoPath, ".bootproof"));
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls++;
+    throw new Error("registry export must not call fetch");
+  };
+  let entry;
+  let second;
+  try {
+    entry = buildRegistryEntry(att, buildOptions);
+    second = buildRegistryEntry(att, buildOptions);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(fetchCalls, 0);
+  assert.equal(fs.existsSync(path.join(inf.repoPath, ".bootproof")), before, "builders must not write files");
+  assert.equal(entry.schema, "bootproof/registry-entry/v1");
+  assert.equal(entry.optInRequired, true);
+  assert.equal(entry.registryMode, "federated_public_candidate");
+  assert.equal(entry.publicRepoHint, "https://github.com/acme/example");
+  assert.equal(entry.healthStatus, "unhealthy");
+  assert.equal(entry.healthUrlPattern, "http://localhost:<port>/users/:id");
+  assert.equal(entry.healthRedirectLocationPattern, "/login");
+  assert.equal(entry.repoFingerprint, second.repoFingerprint);
+  assert.equal(entry.selectedCommandHash, second.selectedCommandHash);
+  assert.equal(entry.failureEvidenceFingerprint, second.failureEvidenceFingerprint);
+  assert.equal(entry.attestationHash, second.attestationHash);
+  assert.equal(entry.signature, undefined, "pure builders are unsigned unless an explicit export requests signing");
+  assert.deepEqual(validateRegistryEntry(entry), []);
+
+  const serialized = JSON.stringify(entry);
+  assert.doesNotMatch(serialized, /top-secret|db-password|private-material|\/Users\/alice|RAILS_ENV=development/);
+  assert.match(entry.selectedCommandRedacted, /RAILS_ENV=\[redacted\]/);
+  assert.match(entry.evidenceHeadRedacted, /\[redacted-private-key\]/);
+
+  const privateRemoteAttestation = structuredClone(att);
+  privateRemoteAttestation.repo.remote = "git@code.example.internal:platform/private-app.git";
+  const privateEntry = buildRegistryEntry(privateRemoteAttestation, buildOptions);
+  assert.equal(privateEntry.repoHost, "code.example.internal");
+  assert.equal(privateEntry.publicRepoHint, undefined);
+  assert.doesNotMatch(JSON.stringify(privateEntry), /platform\/private-app|private-app\.git/);
+
+  const receipt = buildFederatedReceipt(entry, { createdAt: "2026-01-02T03:04:05.000Z" });
+  assert.equal(receipt.schema, "bootproof/federated-receipt/v1");
+  assert.equal(receipt.publicRepoDeclaration, true);
+  assert.equal(receipt.noSecretsIncluded, true);
+  assert.equal(receipt.crawlerHint.repoUrl, "https://github.com/acme/example");
+  assert.equal(receipt.signature, undefined);
+  assert.deepEqual(validateFederatedReceipt(receipt), []);
+  assert.doesNotMatch(JSON.stringify(receipt), /top-secret|db-password|private-material|\/Users\/alice/);
+});
+
+test("registry JSON schemas are strict v1 machine interfaces", () => {
+  const registrySchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "registry-entry-v1.schema.json"), "utf8"));
+  const federatedSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "federated-receipt-v1.schema.json"), "utf8"));
+  assert.equal(registrySchema.additionalProperties, false);
+  assert.equal(registrySchema.properties.schema.const, "bootproof/registry-entry/v1");
+  assert.ok(registrySchema.required.includes("optInRequired"));
+  assert.equal(federatedSchema.additionalProperties, false);
+  assert.equal(federatedSchema.properties.schema.const, "bootproof/federated-receipt/v1");
+  assert.ok(federatedSchema.required.includes("noSecretsIncluded"));
 });
 
 test("ported: docker bind path normalization (windows + wsl2 literals)", async () => {

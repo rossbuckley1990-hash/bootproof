@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { buildExecutionEnv } from "./exec.js";
 
 export type RemoteProvider = "github" | "gitlab" | "bitbucket" | "codeberg";
 
@@ -117,13 +118,12 @@ export function cloneRemoteTarget(value: string, cwd: string): RemoteClone {
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
+        env: buildExecutionEnv({
           GIT_ASKPASS: "",
           GIT_CONFIG_GLOBAL: isolatedGitConfig,
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_TERMINAL_PROMPT: "0",
-        },
+        }),
       },
     );
     fs.rmSync(isolatedGitConfig, { force: true });
