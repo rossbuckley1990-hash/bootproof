@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 
 export interface ExecResult {
@@ -53,7 +53,9 @@ export function superviseApp(command: string, cwd: string, env: NodeJS.ProcessEn
 function killTree(pid: number | undefined, signal: NodeJS.Signals = "SIGTERM"): void {
   if (!pid) return;
   try {
-    if (process.platform === "win32") process.kill(pid, signal);
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    }
     else process.kill(-pid, signal); // negative pid = whole process group
   } catch { /* already gone */ }
 }
@@ -146,7 +148,23 @@ function probe(url: string): Promise<number | null> {
 }
 
 export function minimalEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const keep = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "TEMP", "LANG", "TERM", "NODE_OPTIONS", "COREPACK_HOME", "npm_config_cache"];
+  const keep = [
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "LANG",
+    "TERM",
+    "NODE_OPTIONS",
+    "COREPACK_HOME",
+    "npm_config_cache",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "ComSpec",
+    "PATHEXT",
+  ];
   const env: NodeJS.ProcessEnv = {};
   for (const k of keep) if (process.env[k]) env[k] = process.env[k];
   return { ...env, ...extra, CI: "true", BOOTPROOF: "1" };

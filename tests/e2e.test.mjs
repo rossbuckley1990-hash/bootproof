@@ -2,16 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
-const REAL_GIT = execFileSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
-  .trim()
-  .split(/\r?\n/)[0];
+
+function mergeEnv(overrides = {}) {
+  const merged = { ...process.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    const existing = Object.keys(merged).find(candidate => candidate.toLowerCase() === key.toLowerCase());
+    if (existing && existing !== key) delete merged[existing];
+    merged[key] = value;
+  }
+  return merged;
+}
+
 const run = (args, allowFail = false, env = {}, cwd = process.cwd()) => {
-  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: { ...process.env, ...env }, cwd }), code: 0 }; }
+  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: mergeEnv(env), cwd }), code: 0 }; }
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
@@ -21,52 +31,57 @@ function freshCopy(name) {
   return tmp;
 }
 
+async function getFreePort() {
+  return await new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      server.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
 function fakeGithubRemote(fixture) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-bin-"));
-  const driver = path.join(bin, "fake-git.cjs");
-  fs.writeFileSync(driver, `
-const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-const realGit = process.env.BOOTPROOF_REAL_GIT;
-if (args[0] === "clone") {
-  const remote = args.at(-2);
-  const destination = args.at(-1);
-  fs.cpSync(process.env.BOOTPROOF_FAKE_REMOTE, destination, { recursive: true });
-  const commands = [
-    ["init", "-q"],
-    ["config", "user.name", "BootProof Test"],
-    ["config", "user.email", "bootproof@example.invalid"],
-    ["config", "commit.gpgsign", "false"],
-    ["add", "."],
-    ["commit", "-q", "-m", "fixture"],
-    ["remote", "add", "origin", remote],
-  ];
-  for (const command of commands) {
-    const result = spawnSync(realGit, ["-C", destination, ...command], { stdio: "inherit" });
-    if (result.status !== 0) process.exit(result.status ?? 1);
-  }
-  process.exit(0);
-}
-const result = spawnSync(realGit, args, { stdio: "inherit" });
-process.exit(result.status ?? 1);
-`);
-  if (process.platform === "win32") {
-    fs.writeFileSync(path.join(bin, "git.cmd"), `@node "%~dp0\\fake-git.cjs" %*\r\n`);
-  } else {
-    const fakeGit = path.join(bin, "git");
-    fs.writeFileSync(fakeGit, `#!/bin/sh\nexec node "$(dirname "$0")/fake-git.cjs" "$@"\n`);
-    fs.chmodSync(fakeGit, 0o755);
-  }
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-source-"));
+  fs.cpSync(path.join(FIX, fixture), source, { recursive: true });
+  const git = (...args) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.name", "BootProof Test");
+  git("config", "user.email", "bootproof@example.invalid");
+  git("config", "commit.gpgsign", "false");
+  git("add", ".");
+  git("commit", "-q", "-m", "fixture");
+
+  const canonicalUrl = "https://github.com/example/hello-app.git";
   return {
     cwd,
     env: {
-      PATH: `${bin}:${process.env.PATH}`,
-      BOOTPROOF_REAL_GIT: REAL_GIT,
-      BOOTPROOF_FAKE_REMOTE: path.join(FIX, fixture),
+      GIT_ALLOW_PROTOCOL: "file",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.${pathToFileURL(source).href}.insteadOf`,
+      GIT_CONFIG_VALUE_0: canonicalUrl,
     },
   };
+}
+
+function writeFakePnpm(bin, version) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(bin, "pnpm.cmd"),
+      `@echo off\r\nif "%~1"=="--version" (\r\n  echo ${version}\r\n  exit /b 0\r\n)\r\necho install-must-not-run 1>&2\r\nexit /b 99\r\n`,
+    );
+    return;
+  }
+  const fakePnpm = path.join(bin, "pnpm");
+  fs.writeFileSync(fakePnpm, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${version}; exit 0; fi\necho install-must-not-run >&2\nexit 99\n`);
+  fs.chmodSync(fakePnpm, 0o755);
+}
+
+function pathWith(bin) {
+  return `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
 }
 
 test("honesty: dry run prints 'would', never a green check, writes nothing", () => {
@@ -91,9 +106,9 @@ test("honesty: local provider refuses without --unsafe-local", () => {
   assert.deepEqual(att.observed, [], "a refusal must not pretend any step executed");
 });
 
-test("e2e: real boot, observed health, signed attestation that verifies", () => {
+test("e2e: real boot, observed health, signed attestation that verifies", async () => {
   const repo = freshCopy("hello-app");
-  const port = 3000 + Math.floor(Math.random() * 2000);
+  const port = await getFreePort();
   const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   assert.match(out, /BOOTED/);
   assert.match(out, new RegExp(`observed HTTP 200 at http://localhost:${port}/`));
@@ -169,9 +184,9 @@ test("machine interface: --ci --json fails closed for refusals", () => {
   assert.equal(result.failureClass, "not_an_application");
 });
 
-test("machine interface: --ci --json exits zero only for observed healthy boot", () => {
+test("machine interface: --ci --json exits zero only for observed healthy boot", async () => {
   const repo = freshCopy("hello-app");
-  const port = 6000 + Math.floor(Math.random() * 1000);
+  const port = await getFreePort();
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000", "--ci", "--json"], true);
   assert.equal(code, 0);
   assert.doesNotMatch(out, /\x1b\[/);
@@ -228,9 +243,9 @@ test("remote mode clones GitHub sources but refuses execution without the existi
   assert.match(JSON.parse(replay.out).explanation, /will not execute remote repository code/);
 });
 
-test("remote mode executes only after --provider local --unsafe-local and requires observed health", () => {
+test("remote mode executes only after --provider local --unsafe-local and requires observed health", async () => {
   const remote = fakeGithubRemote("hello-app");
-  const port = 6800 + Math.floor(Math.random() * 150);
+  const port = await getFreePort();
   const url = "https://github.com/example/hello-app";
   const { out, code } = run(
     ["up", url, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000", "--ci", "--json"],
@@ -300,14 +315,12 @@ test("package manager version mismatch is signed before install runs", () => {
   const repo = freshCopy("pnpm-version-mismatch");
   const bin = path.join(repo, "bin");
   fs.mkdirSync(bin);
-  const fakePnpm = path.join(bin, "pnpm");
-  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 9.15.4; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
-  fs.chmodSync(fakePnpm, 0o755);
+  writeFakePnpm(bin, "9.15.4");
 
   const { out, code } = run(
     ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--ci"],
     true,
-    { PATH: `${bin}:${process.env.PATH}` },
+    { PATH: pathWith(bin) },
   );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — package_manager_version_mismatch/);
@@ -323,9 +336,9 @@ test("package manager version mismatch is signed before install runs", () => {
   assert.equal(att.observed[0].command, "pnpm --version");
 });
 
-test("health HTTP error fixture is not mislabeled as a timeout", () => {
+test("health HTTP error fixture is not mislabeled as a timeout", async () => {
   const repo = freshCopy("health-http-error");
-  const port = 7600 + Math.floor(Math.random() * 400);
+  const port = await getFreePort();
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--ci"], true);
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — health_http_error/);
@@ -357,14 +370,12 @@ test("matching package manager does not make a parallel monorepo health target u
   }
   const bin = path.join(repo, "bin");
   fs.mkdirSync(bin);
-  const fakePnpm = path.join(bin, "pnpm");
-  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 10.24.0; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
-  fs.chmodSync(fakePnpm, 0o755);
+  writeFakePnpm(bin, "10.24.0");
 
   const { out, code } = run(
     ["up", repo, "--install", "--ci"],
     true,
-    { PATH: `${bin}:${process.env.PATH}` },
+    { PATH: pathWith(bin) },
   );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — workspace_ambiguous/);
@@ -375,10 +386,11 @@ test("matching package manager does not make a parallel monorepo health target u
   assert.deepEqual(att.observed, []);
 });
 
-test("health URLs discovered from app logs are polled and preserved in signed proof", () => {
+test("health URLs discovered from app logs are polled and preserved in signed proof", async () => {
   const repo = freshCopy("hello-app");
-  const actualPort = 7100 + Math.floor(Math.random() * 500);
-  const inferredPort = actualPort + 700;
+  const actualPort = await getFreePort();
+  let inferredPort = await getFreePort();
+  while (inferredPort === actualPort) inferredPort = await getFreePort();
   fs.writeFileSync(path.join(repo, "server.js"), `
 const http = require("http");
 const port = ${actualPort};
@@ -411,8 +423,9 @@ test("honesty: failed boot writes failed attestation with classified evidence", 
   assert.ok(att.result.failureEvidence.includes("EADDRINUSE"), "raw evidence must be preserved");
 });
 
-test("honesty: real env files are never touched by a full run", () => {
+test("honesty: real env files are never touched by a full run", async () => {
   const repo = freshCopy("hello-app");
+  const port = await getFreePort();
   const protectedEnv = {
     ".env": "REAL_SECRET=do-not-touch\n",
     ".env.local": "ALSO_REAL=untouchable\n",
@@ -420,15 +433,16 @@ test("honesty: real env files are never touched by a full run", () => {
     ".env.production": "PRODUCTION_SECRET=preserve-me-too\n",
   };
   for (const [name, contents] of Object.entries(protectedEnv)) fs.writeFileSync(path.join(repo, name), contents);
-  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5790", "--timeout", "20000"]);
+  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   for (const [name, contents] of Object.entries(protectedEnv)) {
     assert.equal(fs.readFileSync(path.join(repo, name), "utf8"), contents, `${name} must remain untouched`);
   }
 });
 
-test("honesty: skipped steps are never rendered with a green check", () => {
+test("honesty: skipped steps are never rendered with a green check", async () => {
   const repo = freshCopy("hello-app");
-  const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5891", "--timeout", "20000"]);
+  const port = await getFreePort();
+  const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   for (const line of out.split("\n")) if (line.includes("skipped")) assert.ok(!line.includes("\u2713"), `skipped step rendered as success: ${line}`);
 });
 
@@ -455,9 +469,10 @@ test("monorepo ambiguity is surfaced, not guessed", () => {
   assert.deepEqual(att.observed, []);
 });
 
-test("attest export: redacted entry written locally, nothing uploaded, consent messaging shown", () => {
+test("attest export: redacted entry written locally, nothing uploaded, consent messaging shown", async () => {
   const repo = freshCopy("hello-app");
-  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", "5933", "--timeout", "20000"]);
+  const port = await getFreePort();
+  run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   const { out } = run(["attest", "export", repo]);
   assert.match(out, /Nothing has been uploaded/);
   assert.ok(fs.existsSync(path.join(repo, ".bootproof", "registry-entry.json")));

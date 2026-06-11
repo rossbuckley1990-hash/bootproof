@@ -49,7 +49,13 @@ export function packageManagerVersionMatches(expected: string, actual: string): 
 function packageManagerVersionEvidence(inference: Inference): string | null {
   if (inference.packageManager === "unknown" || !inference.packageManagerVersion) return null;
   try {
-    const actual = execFileSync(inference.packageManager, ["--version"], { cwd: inference.repoPath, encoding: "utf8" }).trim();
+    const actual = process.platform === "win32"
+      ? execFileSync(
+          process.env.ComSpec ?? "cmd.exe",
+          ["/d", "/s", "/c", `${inference.packageManager} --version`],
+          { cwd: inference.repoPath, encoding: "utf8" },
+        ).trim()
+      : execFileSync(inference.packageManager, ["--version"], { cwd: inference.repoPath, encoding: "utf8" }).trim();
     if (packageManagerVersionMatches(inference.packageManagerVersion, actual)) return null;
     return `packageManager field or engines.${inference.packageManager} expected version: ${inference.packageManagerVersion}\nGot: ${actual}`;
   } catch {

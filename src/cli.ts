@@ -18,6 +18,7 @@ const would = (s: string) => console.log(`${DIM}\u25cb would: ${s}${RESET}`);
 const warn = (s: string) => console.log(`${YELLOW}! ${s}${RESET}`);
 const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
+const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
 const COMMANDS = ["up", "analyze", "plan", "verify", "explain", "attest", "help", "version", "--help", "-h", "--version"];
 void normalizeDockerBindPath; void detectHostPlatform; // exported surface, used by docker provider work in progress
@@ -164,7 +165,7 @@ async function main() {
       remoteSource = remote.canonicalUrl;
       if (!flags.json) {
         console.log(`${DIM}Remote source: ${remote.canonicalUrl}${RESET}`);
-        console.log(`${DIM}Clone retained at: ${path.relative(process.cwd(), remote.repoPath)}${RESET}`);
+        console.log(`${DIM}Clone retained at: ${portableRelative(process.cwd(), remote.repoPath)}${RESET}`);
       }
     } catch (error) {
       const explanation = error instanceof Error ? error.message : String(error);
@@ -181,7 +182,7 @@ async function main() {
     }
   }
   const evidencePath = remote
-    ? path.relative(process.cwd(), attestationPath(target))
+    ? portableRelative(process.cwd(), attestationPath(target))
     : ".bootproof/attestation.json";
 
   if (cmd === "analyze") {

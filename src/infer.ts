@@ -210,14 +210,15 @@ function workspacePatterns(repo: string, pkg: any): string[] {
 }
 
 function expandWorkspacePattern(repo: string, pattern: string): string[] {
-  if (!pattern.includes("*")) return exists(repo, `${pattern}/package.json`) ? [pattern] : [];
-  const beforeStar = pattern.slice(0, pattern.indexOf("*"));
+  const normalizedPattern = pattern.replace(/\\/g, "/");
+  if (!normalizedPattern.includes("*")) return exists(repo, `${normalizedPattern}/package.json`) ? [normalizedPattern] : [];
+  const beforeStar = normalizedPattern.slice(0, normalizedPattern.indexOf("*"));
   const base = beforeStar.replace(/\/$/, "");
-  const suffix = pattern.slice(pattern.indexOf("*") + 1).replace(/^\//, "");
+  const suffix = normalizedPattern.slice(normalizedPattern.indexOf("*") + 1).replace(/^\//, "");
   const baseAbs = path.join(repo, base);
   try {
     return fs.readdirSync(baseAbs)
-      .map(name => path.join(base, name, suffix))
+      .map(name => path.posix.join(base, name, suffix))
       .filter(dir => exists(repo, `${dir}/package.json`));
   } catch {
     return [];
