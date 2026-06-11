@@ -5,14 +5,23 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
-const REAL_GIT = execFileSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
-  .trim()
-  .split(/\r?\n/)[0];
+
+function mergeEnv(overrides = {}) {
+  const merged = { ...process.env };
+  for (const [key, value] of Object.entries(overrides)) {
+    const existing = Object.keys(merged).find(candidate => candidate.toLowerCase() === key.toLowerCase());
+    if (existing && existing !== key) delete merged[existing];
+    merged[key] = value;
+  }
+  return merged;
+}
+
 const run = (args, allowFail = false, env = {}, cwd = process.cwd()) => {
-  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: { ...process.env, ...env }, cwd }), code: 0 }; }
+  try { return { out: execFileSync("node", [CLI, ...args], { encoding: "utf8", env: mergeEnv(env), cwd }), code: 0 }; }
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
@@ -36,50 +45,43 @@ async function getFreePort() {
 
 function fakeGithubRemote(fixture) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-bin-"));
-  const driver = path.join(bin, "fake-git.cjs");
-  fs.writeFileSync(driver, `
-const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-const realGit = process.env.BOOTPROOF_REAL_GIT;
-if (args[0] === "clone") {
-  const remote = args.at(-2);
-  const destination = args.at(-1);
-  fs.cpSync(process.env.BOOTPROOF_FAKE_REMOTE, destination, { recursive: true });
-  const commands = [
-    ["init", "-q"],
-    ["config", "user.name", "BootProof Test"],
-    ["config", "user.email", "bootproof@example.invalid"],
-    ["config", "commit.gpgsign", "false"],
-    ["add", "."],
-    ["commit", "-q", "-m", "fixture"],
-    ["remote", "add", "origin", remote],
-  ];
-  for (const command of commands) {
-    const result = spawnSync(realGit, ["-C", destination, ...command], { stdio: "inherit" });
-    if (result.status !== 0) process.exit(result.status ?? 1);
-  }
-  process.exit(0);
-}
-const result = spawnSync(realGit, args, { stdio: "inherit" });
-process.exit(result.status ?? 1);
-`);
-  if (process.platform === "win32") {
-    fs.writeFileSync(path.join(bin, "git.cmd"), `@node "%~dp0\\fake-git.cjs" %*\r\n`);
-  } else {
-    const fakeGit = path.join(bin, "git");
-    fs.writeFileSync(fakeGit, `#!/bin/sh\nexec node "$(dirname "$0")/fake-git.cjs" "$@"\n`);
-    fs.chmodSync(fakeGit, 0o755);
-  }
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-source-"));
+  fs.cpSync(path.join(FIX, fixture), source, { recursive: true });
+  const git = (...args) => execFileSync("git", args, { cwd: source, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.name", "BootProof Test");
+  git("config", "user.email", "bootproof@example.invalid");
+  git("config", "commit.gpgsign", "false");
+  git("add", ".");
+  git("commit", "-q", "-m", "fixture");
+
+  const canonicalUrl = "https://github.com/example/hello-app.git";
   return {
     cwd,
     env: {
-      PATH: `${bin}:${process.env.PATH}`,
-      BOOTPROOF_REAL_GIT: REAL_GIT,
-      BOOTPROOF_FAKE_REMOTE: path.join(FIX, fixture),
+      GIT_ALLOW_PROTOCOL: "file",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.${pathToFileURL(source).href}.insteadOf`,
+      GIT_CONFIG_VALUE_0: canonicalUrl,
     },
   };
+}
+
+function writeFakePnpm(bin, version) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(bin, "pnpm.cmd"),
+      `@echo off\r\nif "%~1"=="--version" (\r\n  echo ${version}\r\n  exit /b 0\r\n)\r\necho install-must-not-run 1>&2\r\nexit /b 99\r\n`,
+    );
+    return;
+  }
+  const fakePnpm = path.join(bin, "pnpm");
+  fs.writeFileSync(fakePnpm, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${version}; exit 0; fi\necho install-must-not-run >&2\nexit 99\n`);
+  fs.chmodSync(fakePnpm, 0o755);
+}
+
+function pathWith(bin) {
+  return `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
 }
 
 test("honesty: dry run prints 'would', never a green check, writes nothing", () => {
@@ -313,14 +315,12 @@ test("package manager version mismatch is signed before install runs", () => {
   const repo = freshCopy("pnpm-version-mismatch");
   const bin = path.join(repo, "bin");
   fs.mkdirSync(bin);
-  const fakePnpm = path.join(bin, "pnpm");
-  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 9.15.4; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
-  fs.chmodSync(fakePnpm, 0o755);
+  writeFakePnpm(bin, "9.15.4");
 
   const { out, code } = run(
     ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--ci"],
     true,
-    { PATH: `${bin}:${process.env.PATH}` },
+    { PATH: pathWith(bin) },
   );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — package_manager_version_mismatch/);
@@ -370,14 +370,12 @@ test("matching package manager does not make a parallel monorepo health target u
   }
   const bin = path.join(repo, "bin");
   fs.mkdirSync(bin);
-  const fakePnpm = path.join(bin, "pnpm");
-  fs.writeFileSync(fakePnpm, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 10.24.0; exit 0; fi\necho install-must-not-run >&2\nexit 99\n");
-  fs.chmodSync(fakePnpm, 0o755);
+  writeFakePnpm(bin, "10.24.0");
 
   const { out, code } = run(
     ["up", repo, "--install", "--ci"],
     true,
-    { PATH: `${bin}:${process.env.PATH}` },
+    { PATH: pathWith(bin) },
   );
   assert.equal(code, 1);
   assert.match(out, /NOT VERIFIED — workspace_ambiguous/);

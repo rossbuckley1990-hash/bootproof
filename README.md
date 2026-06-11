@@ -1,5 +1,7 @@
 # BootProof
 
+[![CI](https://github.com/bootproof/bootproof/actions/workflows/ci.yml/badge.svg)](https://github.com/bootproof/bootproof/actions/workflows/ci.yml)
+
 > **The honest Run Button for repos — with proof, not vibes.**
 
 **Human diagnosis. Machine proof. One engine.**

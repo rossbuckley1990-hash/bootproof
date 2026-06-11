@@ -15,7 +15,7 @@ export function gitInfo(repo: string): Attestation["repo"] {
   const status = git("status", "--porcelain");
   return {
     path: repo,
-    remote: git("remote", "get-url", "origin"),
+    remote: git("config", "--get", "remote.origin.url"),
     commit: git("rev-parse", "HEAD"),
     dirty: status === null ? null : status.length > 0,
   };

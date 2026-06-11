@@ -102,6 +102,7 @@ test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybr
   const productionPackage = inf.workspaces.find(candidate => candidate.dir === "packages/runtime");
   const testPlugin = inf.workspaces.find(candidate => candidate.dir.includes("test-plugins"));
   assert.ok(root && productionPackage && testPlugin);
+  assert.ok(inf.workspaces.every(candidate => !candidate.dir.includes("\\")), "workspace paths must be platform-neutral");
   assert.ok(root.score > productionPackage.score);
   assert.ok(productionPackage.score > testPlugin.score, "test plugin must rank below production candidates");
 });
