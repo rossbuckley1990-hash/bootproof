@@ -50,6 +50,12 @@ bootproof/repair-receipt/v1
         "afterContent": "..."
       }
     ],
+    "preconditions": [
+      {
+        "path": "docker-compose.yml",
+        "sha256": "..."
+      }
+    ],
     "planDelta": "...",
     "envDelta": null
   },
@@ -79,7 +85,7 @@ The receipt uses the same Ed25519 canonical-body pattern as attestations: `signe
 
 `beforeAttestationSha256` and both verification hashes are SHA-256 hashes of the corresponding attestation JSON objects.
 
-`fileChanges` is a signed application manifest. It contains only allowlisted boot-plumbing files and binds the expected preimage and verified after-content to SHA-256 hashes.
+`fileChanges` is a signed application manifest. It contains only allowlisted boot-plumbing files and binds the expected preimage and verified after-content to SHA-256 hashes. `preconditions` binds read-only source inputs, such as the repository Compose file from which a repaired copy was derived.
 
 ## Result Interface
 
@@ -124,6 +130,7 @@ Application exits `0` only after all signed file changes are written and re-hash
 - the receipt signature is invalid
 - a path is outside the repair allowlist
 - signed content hashes are inconsistent
+- a signed read-only repair prerequisite changed
 - the current file preimage differs from the verified preimage
 - the receipt is environment-only or plan-only
 

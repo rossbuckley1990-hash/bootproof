@@ -35,6 +35,7 @@ export interface RepairReceipt {
     diff: string | null;
     filesChanged: string[];
     fileChanges: RepairReceiptFileChange[];
+    preconditions: RepairReceiptPrecondition[];
     planDelta: string | null;
     envDelta: string | null;
   };
@@ -89,6 +90,11 @@ export interface RepairReceiptFileChange {
   afterContent: string;
 }
 
+export interface RepairReceiptPrecondition {
+  path: string;
+  sha256: string;
+}
+
 interface AppliedRepair {
   id: string;
   kind: RepairKind;
@@ -97,6 +103,7 @@ interface AppliedRepair {
   patch: string | null;
   filesChanged: string[];
   fileChanges: RepairFileChange[];
+  preconditions: { path: string; content: string }[];
   planDelta: string | null;
   envDelta: string | null;
   environment?: Record<string, string>;
@@ -361,6 +368,7 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
       patch,
       filesChanged: [repairFile],
       fileChanges: [change],
+      preconditions: [{ path: repoCompose, content: source }],
       planDelta: `Create ${repairFile} as a complete repaired copy of ${repoCompose}. Use service step: ${command}`,
       envDelta: null,
     };
@@ -386,6 +394,7 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
     patch: diff,
     filesChanged: [composeFile],
     fileChanges: [change],
+    preconditions: [],
     planDelta: null,
     envDelta: null,
   };
@@ -417,6 +426,7 @@ async function activatePackageManager(context: RepairContext): Promise<AppliedRe
     patch: null,
     filesChanged: [],
     fileChanges: [],
+    preconditions: [],
     planDelta: null,
     envDelta: command,
     environment,
@@ -454,6 +464,7 @@ async function deployPrismaMigrations(context: RepairContext): Promise<AppliedRe
     patch: null,
     filesChanged: [],
     fileChanges: [],
+    preconditions: [],
     planDelta: `Insert after dependency installation and before application start: ${command}`,
     envDelta: null,
     additionalPreparationCommands: [preparation],
@@ -569,6 +580,10 @@ function buildRepairReceipt(
         afterSha256: sha256Text(change.after),
         beforeContent: change.before,
         afterContent: change.after,
+      })),
+      preconditions: applied.preconditions.map(precondition => ({
+        path: normalizedRelative(precondition.path),
+        sha256: sha256Text(precondition.content),
       })),
       planDelta: applied.kind === "plan-step" ? applied.planDelta : null,
       envDelta: applied.kind === "environment" ? applied.envDelta : null,
@@ -715,6 +730,23 @@ export function applyVerifiedRepair(
     assertRepairScope(scopeChanges);
   } catch (error) {
     return fail(`${error instanceof Error ? error.message : String(error)}; no files were written`);
+  }
+
+  const preconditions = receipt.repair.preconditions;
+  if (!Array.isArray(preconditions)) {
+    return fail("repair receipt prerequisites are malformed; no files were written");
+  }
+  for (const precondition of preconditions) {
+    const relative = normalizedRelative(precondition.path);
+    try {
+      assertRepairTargetPath(repo, relative);
+    } catch (error) {
+      return fail(`${error instanceof Error ? error.message : String(error)}; no files were written`);
+    }
+    const target = path.join(repo, relative);
+    if (!fs.existsSync(target) || sha256Text(fs.readFileSync(target, "utf8")) !== precondition.sha256) {
+      return fail(`prerequisite mismatch for ${relative}; the repair inputs changed after verification, so no files were written`);
+    }
   }
 
   for (const change of changes) {

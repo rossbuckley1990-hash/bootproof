@@ -392,6 +392,7 @@ test("repair receipt schema and honesty additions are documented", () => {
   assert.match(schema, /bootproof\/repair-receipt\/v1/);
   assert.match(schema, /bootproof apply-repair/);
   assert.match(schema, /fileChanges/);
+  assert.match(schema, /preconditions/);
   assert.match(schema, /beforeAttestationSha256/);
   const honesty = fs.readFileSync(path.resolve("docs/HONESTY_CONTRACT.md"), "utf8");
   assert.match(honesty, /only ever proposed with a verified before and after attestation/i);

@@ -689,6 +689,7 @@ test("repair: conflicting repository Compose port produces signed verified recei
     assert.match(receipt.repair.fileChanges[0].afterContent, /complete repaired copy/);
     assert.match(receipt.repair.fileChanges[0].afterContent, /build:/);
     assert.doesNotMatch(receipt.repair.fileChanges[0].afterContent, /!override/);
+    assert.deepEqual(receipt.repair.preconditions.map(precondition => precondition.path), ["docker-compose.yml"]);
     assert.match(receipt.repair.planDelta, /complete repaired copy/);
     assert.equal(receipt.verification.before.booted, false);
     assert.equal(receipt.verification.before.failureClass, "service_port_allocated");
@@ -719,6 +720,14 @@ test("repair: conflicting repository Compose port produces signed verified recei
     assert.equal(applyDryRun.code, 1);
     assert.match(JSON.parse(applyDryRun.out).explanation, /no repair files were applied/i);
     assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.override.yml")), false);
+
+    const sourceCompose = fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8");
+    fs.writeFileSync(path.join(repo, "docker-compose.yml"), `${sourceCompose}# changed after verification\n`);
+    const staleInput = run(["apply-repair", repo, "--json"], true);
+    assert.equal(staleInput.code, 1);
+    assert.match(JSON.parse(staleInput.out).explanation, /prerequisite mismatch/);
+    assert.equal(fs.existsSync(path.join(repo, "docker-compose.bootproof.override.yml")), false);
+    fs.writeFileSync(path.join(repo, "docker-compose.yml"), sourceCompose);
 
     const applied = run(["apply-repair", repo, "--json"], true);
     assert.equal(applied.code, 0, applied.out);
