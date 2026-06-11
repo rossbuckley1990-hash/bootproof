@@ -109,7 +109,7 @@ Local sandbox execution still requires:
 bootproof fix . --provider local --unsafe-local
 ```
 
-Remote repair accepts credential-free public HTTPS GitHub repositories and keeps all evidence in the retained clone:
+Remote repair accepts credential-free public HTTPS repositories from GitHub, GitLab, Bitbucket, and Codeberg and keeps all evidence in the retained clone:
 
 ```bash
 bootproof fix https://github.com/user/repo --provider local --unsafe-local
@@ -142,9 +142,11 @@ Application exits `0` only after all signed file changes are written and re-hash
 |---|---|
 | `service_port_allocated` | Remap a BootProof-generated Compose host port, or create a complete BootProof-owned repaired Compose copy beside the repository file without editing it. |
 | `package_manager_version_mismatch` | Run the exact declared `corepack prepare <manager>@<version> --activate` command in the sandbox. |
-| `migrations_missing` | For Prisma evidence only, insert `npx prisma migrate deploy`, or `npx prisma db push --skip-generate` when no migrations directory exists. |
+| `migrations_missing` | Select one exact migration framework from repository markers plus preserved evidence: Prisma, Django, Rails, Knex, or Drizzle. Ambiguous matches refuse instead of guessing. |
 
 There are no LLM calls in the repair registry.
+
+Local host execution still requires `--unsafe-local`, and `fix` never auto-applies a repair. These are honesty boundaries. The separate application command exists so mutation is deliberate and independently verified.
 
 ## Files
 

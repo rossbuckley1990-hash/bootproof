@@ -78,7 +78,7 @@ bootproof fix . --json
 
 It emits one `bootproof/repair-result/v1` object and exits `0` only when a verified receipt exists.
 
-Public GitHub repositories use the same retained managed workspace and execution gate as `up`:
+Public GitHub, GitLab, Bitbucket, and Codeberg repositories use the same retained managed workspace and execution gate as `up`:
 
 ```bash
 bootproof fix https://github.com/user/repo --provider local --unsafe-local
@@ -158,13 +158,13 @@ npx bootproof explain .bootproof/attestation.json
 npx bootproof verify .bootproof/attestation.json
 ```
 
-Run against a public GitHub repository:
+Run against a public HTTPS Git repository on GitHub, GitLab, Bitbucket, or Codeberg:
 
 ```bash
 npx bootproof up https://github.com/user/repo
 ```
 
-BootProof clones credential-free HTTPS GitHub URLs into `.bootproof/remotes/` and retains the clone so its evidence and any generated files continue to exist. It inspects the clone but refuses to execute remote code until host execution is explicitly acknowledged:
+BootProof clones credential-free HTTPS URLs from those named providers into `.bootproof/remotes/` and retains the clone so its evidence and any generated files continue to exist. It inspects the clone but refuses to execute remote code until host execution is explicitly acknowledged:
 
 ```bash
 npx bootproof up https://github.com/user/repo --provider local --unsafe-local
@@ -179,6 +179,7 @@ Contributors working from this source repository can use `npm ci`, `npm run buil
 BootProof is constrained on purpose:
 
 - no verified boot without an observed health signal
+- no Docker-to-host execution fallback; host commands require `--provider local --unsafe-local`
 - no success rendering for skipped steps
 - no invented secrets
 - no writes to `.env`, `.env.local`, `.env.development`, or `.env.production`
@@ -208,6 +209,7 @@ BootProof currently provides:
 - redacted registry-entry export
 - deterministic sandboxed repairs with signed before/after receipts for the registered v0.3 classes
 - explicit repair application with signature, scope, and stale-preimage checks
+- marker-and-evidence-backed migration repair for Prisma, Django, Rails, Knex, and Drizzle
 
 Detection is broader than orchestration. For example:
 
@@ -325,7 +327,7 @@ BootProof is early alpha.
 
 Near-term work includes:
 
-- additional remote source providers beyond public HTTPS GitHub repositories
+- additional remote source providers beyond GitHub, GitLab, Bitbucket, and Codeberg
 - broader deterministic remediation coverage
 - stronger multi-service orchestration
 - broader Python, Go, Ruby, and Make execution support

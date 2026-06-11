@@ -439,33 +439,127 @@ export function prismaRepairCommand(repo: string): string {
     : "npx prisma db push --skip-generate";
 }
 
-async function deployPrismaMigrations(context: RepairContext): Promise<AppliedRepair | null> {
+export interface MigrationRepair {
+  id: string;
+  framework: "prisma" | "django" | "rails" | "knex" | "drizzle";
+  command: string;
+  source: string;
+}
+
+function readPackageJson(repo: string): Record<string, any> | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")) as Record<string, any>;
+  } catch {
+    return null;
+  }
+}
+
+function hasAnyFile(repo: string, files: string[]): string | null {
+  return files.find(file => fs.existsSync(path.join(repo, file))) ?? null;
+}
+
+export function migrationRepairFor(repo: string, evidence: string): MigrationRepair | null {
+  const pkg = readPackageJson(repo);
+  const dependencies = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
+  const pyproject = fs.existsSync(path.join(repo, "pyproject.toml"))
+    ? fs.readFileSync(path.join(repo, "pyproject.toml"), "utf8")
+    : "";
+  const requirements = fs.existsSync(path.join(repo, "requirements.txt"))
+    ? fs.readFileSync(path.join(repo, "requirements.txt"), "utf8")
+    : "";
+  const gemfile = fs.existsSync(path.join(repo, "Gemfile"))
+    ? fs.readFileSync(path.join(repo, "Gemfile"), "utf8")
+    : "";
+  const genericSchemaEvidence = /(relation .* does not exist|no such table|Migration.*pending|unapplied migrations?)/i.test(evidence);
+  const candidates: MigrationRepair[] = [];
+
+  if (
+    fs.existsSync(path.join(repo, "prisma", "schema.prisma")) &&
+    (/\bprisma\b|\bP\d{4}\b/i.test(evidence) || genericSchemaEvidence)
+  ) {
+    const hasMigrations = fs.existsSync(path.join(repo, "prisma", "migrations"));
+    candidates.push({
+      id: hasMigrations ? "deploy-prisma-migrations" : "push-prisma-schema",
+      framework: "prisma",
+      command: prismaRepairCommand(repo),
+      source: hasMigrations ? "prisma/schema.prisma and prisma/migrations" : "prisma/schema.prisma without migrations directory",
+    });
+  }
+  if (
+    fs.existsSync(path.join(repo, "manage.py")) &&
+    /\bdjango\b/i.test(pyproject + requirements) &&
+    (/\bdjango\b|unapplied migrations?/i.test(evidence) || genericSchemaEvidence)
+  ) {
+    candidates.push({
+      id: "apply-django-migrations",
+      framework: "django",
+      command: "python manage.py migrate --noinput",
+      source: "manage.py and declared Django dependency",
+    });
+  }
+  if (
+    fs.existsSync(path.join(repo, "bin", "rails")) &&
+    /\b(?:rails|activerecord)\b/i.test(gemfile) &&
+    (/\bActiveRecord\b|pending migration/i.test(evidence) || genericSchemaEvidence)
+  ) {
+    candidates.push({
+      id: "apply-rails-migrations",
+      framework: "rails",
+      command: "bundle exec rails db:migrate",
+      source: "bin/rails and Rails/ActiveRecord Gemfile entry",
+    });
+  }
+  const knexFile = hasAnyFile(repo, ["knexfile.js", "knexfile.cjs", "knexfile.mjs", "knexfile.ts"]);
+  if (
+    knexFile &&
+    dependencies.knex &&
+    (/\bknex\b/i.test(evidence) || genericSchemaEvidence)
+  ) {
+    candidates.push({
+      id: "apply-knex-migrations",
+      framework: "knex",
+      command: "npx knex migrate:latest",
+      source: `${knexFile} and knex dependency`,
+    });
+  }
+  const drizzleConfig = hasAnyFile(repo, ["drizzle.config.ts", "drizzle.config.js", "drizzle.config.mjs", "drizzle.config.cjs"]);
+  if (
+    drizzleConfig &&
+    (dependencies["drizzle-kit"] || dependencies["drizzle-orm"]) &&
+    (/\bdrizzle\b/i.test(evidence) || genericSchemaEvidence)
+  ) {
+    candidates.push({
+      id: "apply-drizzle-migrations",
+      framework: "drizzle",
+      command: "npx drizzle-kit migrate",
+      source: `${drizzleConfig} and Drizzle dependency`,
+    });
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+async function deployFrameworkMigrations(context: RepairContext): Promise<AppliedRepair | null> {
   const evidence = context.before.attestation?.result.failureEvidence ?? "";
-  const prismaDetected =
-    context.before.inference.stack.includes("prisma") &&
-    (/\bprisma\b|\bP\d{4}\b/i.test(evidence) || fs.existsSync(path.join(context.sandbox, "prisma", "schema.prisma")));
-  if (!prismaDetected) return null;
-  const hasMigrations = fs.existsSync(path.join(context.sandbox, "prisma", "migrations"));
-  const command = prismaRepairCommand(context.sandbox);
+  const migration = migrationRepairFor(context.sandbox, evidence);
+  if (!migration) return null;
   const preparation: PreparationCommand = {
-    id: "repair-prisma-schema",
+    id: `repair-${migration.framework}-schema`,
     kind: "build",
-    command,
-    description: "apply the repository's Prisma schema before application start",
-    source: hasMigrations ? "prisma/migrations present" : "Prisma schema present without migrations directory",
+    command: migration.command,
+    description: `apply the repository's ${migration.framework} migrations before application start`,
+    source: migration.source,
   };
   return {
-    id: hasMigrations ? "deploy-prisma-migrations" : "push-prisma-schema",
+    id: migration.id,
     kind: "plan-step",
-    description: hasMigrations
-      ? "Run the repository's deployed Prisma migrations before application start."
-      : "Synchronize the Prisma schema before application start because no migrations directory exists.",
+    description: `Run the repository's ${migration.framework} migration command before application start.`,
     diff: null,
     patch: null,
     filesChanged: [],
     fileChanges: [],
     preconditions: [],
-    planDelta: `Insert after dependency installation and before application start: ${command}`,
+    planDelta: `Insert after dependency installation and before application start: ${migration.command}`,
     envDelta: null,
     additionalPreparationCommands: [preparation],
   };
@@ -483,9 +577,9 @@ const REGISTRY: Partial<Record<FailureClass, RegisteredRemediation[]>> = {
     apply: activatePackageManager,
   }],
   migrations_missing: [{
-    id: "deploy-prisma-migrations",
+    id: "apply-framework-migrations",
     kind: "plan-step",
-    apply: deployPrismaMigrations,
+    apply: deployFrameworkMigrations,
   }],
 };
 

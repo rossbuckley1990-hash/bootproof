@@ -75,7 +75,9 @@ function packageManagerVersionEvidence(inference: Inference, plan: RunPlan, env:
 }
 
 function commandWithPort(command: string, port: number): string {
-  return command.replace(/((?:--port(?:=|\s+)|-p\s+))\d{2,5}\b/, `$1${port}`);
+  return command
+    .replace(/((?:--port(?:=|\s+)|-p\s+))\d{2,5}\b/, `$1${port}`)
+    .replace(/(\bmanage\.py\s+runserver\s+(?:127\.0\.0\.1|localhost):)\d{2,5}\b/, `$1${port}`);
 }
 
 function unsupportedOrchestrationExplanation(inference: Inference): string | null {
@@ -194,6 +196,12 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     return refuse("unknown_failure", "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker.");
   }
   if (opts.dryRun) return { ...base, attestation: null, refusal: null };
+  if (inference.multiAppCommand) {
+    return refuse(
+      "workspace_ambiguous",
+      "BootProof detected a root command that starts multiple workspaces in parallel. Choose a specific application with --workspace <dir>; one responding workspace is not proof that the whole repository booted.",
+    );
+  }
   const preparationSteps = plan.steps.filter(planned => planned.kind === "install" || planned.kind === "build");
   if (preparationSteps.length > 0 && !opts.install) {
     const skipped = step(
@@ -209,6 +217,17 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       "dependency_install_skipped",
       "The inferred application command depends on project packages, but dependency installation was not requested. BootProof did not start the partial application pipeline.",
       [skipped],
+    );
+  }
+  const hostExecutionSteps = plan.steps.filter(planned =>
+    planned.kind === "install" ||
+    planned.kind === "build" ||
+    planned.kind === "start-app"
+  );
+  if (opts.provider === "docker" && !runsSourceComposeApplication && hostExecutionSteps.length > 0) {
+    return refuse(
+      "orchestration_not_supported",
+      `Docker provider selected, but the inferred plan contains host commands (${hostExecutionSteps.map(planned => planned.command).filter(Boolean).join("; ")}). BootProof will not silently run them on the host. Use a source-built repository Compose application, or explicitly choose --provider local --unsafe-local after review.`,
     );
   }
   if (opts.install) {
@@ -231,12 +250,6 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         versionEvidence,
       );
     }
-  }
-  if (inference.multiAppCommand) {
-    return refuse(
-      "workspace_ambiguous",
-      "BootProof detected a root command that starts multiple workspaces in parallel. Choose a specific application with --workspace <dir>; one responding workspace is not proof that the whole repository booted.",
-    );
   }
   if (inference.incompleteAppCommand) {
     return refuse(

@@ -24,7 +24,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `missing_env_var` | Required environment configuration is missing. | Supply real values through the repository's documented path. BootProof will not edit `.env`. |
 | `database_unreachable` | A required database or cache could not be reached. | Start the real required service and verify its address. |
 | `postgres_auth_env_missing` | Postgres was reached but authentication or env configuration did not match. | Correct the real database configuration; BootProof will not invent credentials. |
-| `migrations_missing` | The database schema is absent or behind. | Run the repository's documented migration flow. |
+| `migrations_missing` | The database schema is absent or behind. | Run the repository's documented migration flow. Repair is attempted only for one unambiguous recognized framework. |
 | `port_in_use` | The application port is occupied. | Stop the process or use a supported explicit port. |
 | `native_build_dependency` | An OS toolchain or native dependency is missing. | Install the required build dependency and rerun. |
 | `private_registry_or_auth` | Package installation requires credentials. | Provide real registry credentials outside BootProof. |

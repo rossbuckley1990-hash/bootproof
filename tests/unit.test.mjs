@@ -10,11 +10,12 @@ import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, repoComposeRep
 import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
 import { extractHealthCandidates, minimalEnv, pollHealth, superviseApp } from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
-import { isRemoteTarget, managedRemoteSource, parseGithubRemote } from "../dist/remote.js";
+import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
 import {
   assertRepairScope,
   assertRepairTargetPath,
   composePortRepair,
+  migrationRepairFor,
   packageManagerActivationCommand,
   prismaRepairCommand,
   registeredRemediationsFor,
@@ -150,6 +151,16 @@ test("custom Make-driven applications select only an explicit supported target",
   assert.equal(inf.appCommand, "make serve");
   assert.match(inf.appCommandSource, /Makefile target: serve/);
   assert.deepEqual(inf.healthCandidates, ["http://localhost:3000/"]);
+});
+
+test("Django repository markers select the explicit management entrypoint", () => {
+  const inf = inferRepo(path.join(FIX, "repair-django-migrations"));
+  assert.equal(inf.isApplication, true);
+  assert.ok(inf.stack.includes("python-backend"));
+  assert.ok(inf.stack.includes("django"));
+  assert.ok(inf.backendMarkers.includes("manage.py"));
+  assert.equal(inf.appCommand, "python manage.py runserver 127.0.0.1:3000");
+  assert.equal(inf.appCommandSource, "Django entrypoint: manage.py");
 });
 
 test("Go, Rails, and Make fixtures expose conservative repository commands", () => {
@@ -359,7 +370,7 @@ test("repair registry exposes only deterministic v0.3 remediations", () => {
     kind: "environment",
   }]);
   assert.deepEqual(registeredRemediationsFor("migrations_missing"), [{
-    id: "deploy-prisma-migrations",
+    id: "apply-framework-migrations",
     kind: "plan-step",
   }]);
   assert.deepEqual(registeredRemediationsFor("missing_env_var"), []);
@@ -385,6 +396,57 @@ test("repair registry exposes only deterministic v0.3 remediations", () => {
   assert.equal(prismaRepairCommand(prisma), "npx prisma db push --skip-generate");
   fs.mkdirSync(path.join(prisma, "prisma", "migrations"));
   assert.equal(prismaRepairCommand(prisma), "npx prisma migrate deploy");
+
+  const django = fs.mkdtempSync(path.join(os.tmpdir(), "bp-repair-django-"));
+  fs.writeFileSync(path.join(django, "manage.py"), "");
+  fs.writeFileSync(path.join(django, "requirements.txt"), "Django==5.2.1\n");
+  assert.deepEqual(
+    migrationRepairFor(django, "django.db.utils.OperationalError: no such table: app_widget"),
+    {
+      id: "apply-django-migrations",
+      framework: "django",
+      command: "python manage.py migrate --noinput",
+      source: "manage.py and declared Django dependency",
+    },
+  );
+
+  const rails = fs.mkdtempSync(path.join(os.tmpdir(), "bp-repair-rails-"));
+  fs.mkdirSync(path.join(rails, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(rails, "bin", "rails"), "");
+  fs.writeFileSync(path.join(rails, "Gemfile"), "gem \"rails\"\n");
+  assert.equal(
+    migrationRepairFor(rails, "ActiveRecord::PendingMigrationError Migrations are pending").command,
+    "bundle exec rails db:migrate",
+  );
+
+  const knex = fs.mkdtempSync(path.join(os.tmpdir(), "bp-repair-knex-"));
+  fs.writeFileSync(path.join(knex, "knexfile.js"), "module.exports = {};\n");
+  fs.writeFileSync(path.join(knex, "package.json"), JSON.stringify({ dependencies: { knex: "3.1.0" } }));
+  assert.equal(
+    migrationRepairFor(knex, "Knex: no such table: widgets").command,
+    "npx knex migrate:latest",
+  );
+
+  const drizzle = fs.mkdtempSync(path.join(os.tmpdir(), "bp-repair-drizzle-"));
+  fs.writeFileSync(path.join(drizzle, "drizzle.config.ts"), "export default {};\n");
+  fs.writeFileSync(path.join(drizzle, "package.json"), JSON.stringify({ devDependencies: { "drizzle-kit": "0.31.0" } }));
+  assert.equal(
+    migrationRepairFor(drizzle, "Drizzle migration pending: relation widgets does not exist").command,
+    "npx drizzle-kit migrate",
+  );
+
+  fs.mkdirSync(path.join(django, "prisma"), { recursive: true });
+  fs.writeFileSync(path.join(django, "prisma", "schema.prisma"), "");
+  assert.equal(
+    migrationRepairFor(django, "no such table: app_widget"),
+    null,
+    "multiple matching migration frameworks must refuse instead of guessing",
+  );
+  assert.equal(
+    migrationRepairFor(fs.mkdtempSync(path.join(os.tmpdir(), "bp-repair-no-framework-")), "no such table: app_widget"),
+    null,
+    "migration evidence without an exact framework marker must not produce a command",
+  );
 });
 
 test("repair receipt schema and honesty additions are documented", () => {
@@ -431,7 +493,7 @@ test("supervisor stop terminates the process tree and releases its port", async 
   assert.equal(await waitForPortRelease(port), true, `port ${port} remained bound after supervisor stop`);
 });
 
-test("remote URL parsing accepts only credential-free HTTPS GitHub repositories", () => {
+test("remote URL parsing accepts only credential-free HTTPS repositories from named providers", () => {
   assert.equal(isRemoteTarget("https://github.com/example/app"), true);
   assert.deepEqual(parseGithubRemote("https://github.com/example/app"), {
     originalUrl: "https://github.com/example/app",
@@ -439,10 +501,22 @@ test("remote URL parsing accepts only credential-free HTTPS GitHub repositories"
     owner: "example",
     repo: "app",
   });
-  assert.throws(() => parseGithubRemote("http://github.com/example/app"), /only public HTTPS GitHub/);
+  assert.deepEqual(parseRemoteTarget("https://gitlab.com/example/platform/app"), {
+    originalUrl: "https://gitlab.com/example/platform/app",
+    canonicalUrl: "https://gitlab.com/example/platform/app.git",
+    provider: "gitlab",
+    host: "gitlab.com",
+    namespace: "example/platform",
+    repo: "app",
+  });
+  assert.equal(parseRemoteTarget("https://bitbucket.org/example/app").provider, "bitbucket");
+  assert.equal(parseRemoteTarget("https://codeberg.org/example/app.git").provider, "codeberg");
+  assert.throws(() => parseGithubRemote("http://github.com/example/app"), /accepts credential-free HTTPS/);
   assert.throws(() => parseGithubRemote("https://token@github.com/example/app"), /must not contain credentials/);
-  assert.throws(() => parseGithubRemote("https://gitlab.com/example/app"), /only public HTTPS GitHub/);
-  assert.throws(() => parseGithubRemote("https://github.com/example/app/tree/main"), /exactly one repository/);
+  assert.throws(() => parseGithubRemote("https://gitlab.com/example/app"), /Expected a public HTTPS GitHub/);
+  assert.throws(() => parseRemoteTarget("https://example.com/example/app"), /GitHub, GitLab, Bitbucket, or Codeberg/);
+  assert.throws(() => parseRemoteTarget("https://gitlab.com/example/app/-/tree/main"), /unsupported characters/);
+  assert.throws(() => parseGithubRemote("https://github.com/example/app/tree/main"), /exactly one .*repository/);
 
   const managed = fs.mkdtempSync(path.join(os.tmpdir(), "bp-managed-remote-"));
   const repo = path.join(managed, "repo");

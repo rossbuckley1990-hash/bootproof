@@ -1,6 +1,18 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+
+export type RemoteProvider = "github" | "gitlab" | "bitbucket" | "codeberg";
+
+export interface GitRemote {
+  originalUrl: string;
+  canonicalUrl: string;
+  provider: RemoteProvider;
+  host: string;
+  namespace: string;
+  repo: string;
+}
 
 export interface GithubRemote {
   originalUrl: string;
@@ -9,70 +21,114 @@ export interface GithubRemote {
   repo: string;
 }
 
-export interface RemoteClone extends GithubRemote {
+export interface RemoteClone extends GitRemote {
   repoPath: string;
 }
 
 interface RemoteSourceMarker {
   schema: "bootproof/remote-source/v1";
   canonicalUrl: string;
+  provider?: RemoteProvider;
   repoDirectory: "repo";
 }
+
+const REMOTE_PROVIDERS: Record<string, RemoteProvider> = {
+  "github.com": "github",
+  "gitlab.com": "gitlab",
+  "bitbucket.org": "bitbucket",
+  "codeberg.org": "codeberg",
+};
 
 export function isRemoteTarget(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^git@/i.test(value);
 }
 
-export function parseGithubRemote(value: string): GithubRemote {
+export function parseRemoteTarget(value: string): GitRemote {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error("Remote targets must be full HTTPS GitHub repository URLs.");
+    throw new Error("Remote targets must be full HTTPS Git repository URLs.");
   }
 
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") {
-    throw new Error("Remote mode currently accepts only public HTTPS GitHub repository URLs.");
+  const host = url.hostname.toLowerCase();
+  const provider = REMOTE_PROVIDERS[host];
+  if (url.protocol !== "https:" || !provider) {
+    throw new Error("Remote mode accepts credential-free HTTPS repositories from GitHub, GitLab, Bitbucket, or Codeberg.");
   }
   if (url.username || url.password || url.port || url.search || url.hash) {
     throw new Error("Remote URLs must not contain credentials, custom ports, query strings, or fragments.");
   }
 
   const parts = url.pathname.split("/").filter(Boolean);
-  if (parts.length !== 2) {
-    throw new Error("Remote GitHub URLs must identify exactly one repository: https://github.com/owner/repo.");
+  if (parts.length < 2 || (provider !== "gitlab" && parts.length !== 2)) {
+    throw new Error(
+      provider === "gitlab"
+        ? "GitLab URLs must identify a namespace and repository."
+        : `Remote ${provider} URLs must identify exactly one namespace and repository.`,
+    );
   }
-  const owner = parts[0];
-  const repo = parts[1].replace(/\.git$/i, "");
+  const repo = parts.at(-1)!.replace(/\.git$/i, "");
+  const namespaceParts = parts.slice(0, -1);
   const safeSegment = /^[A-Za-z0-9_.-]+$/;
-  if (!safeSegment.test(owner) || !safeSegment.test(repo) || owner === "." || owner === ".." || repo === "." || repo === "..") {
-    throw new Error("Remote GitHub owner and repository names contain unsupported characters.");
+  if (
+    !namespaceParts.length ||
+    [...namespaceParts, repo].some(segment => !safeSegment.test(segment) || segment === "." || segment === ".." || segment === "-")
+  ) {
+    throw new Error("Remote namespace or repository names contain unsupported characters.");
   }
+  const namespace = namespaceParts.join("/");
 
   return {
     originalUrl: value,
-    canonicalUrl: `https://github.com/${owner}/${repo}.git`,
-    owner,
+    canonicalUrl: `https://${host}/${namespace}/${repo}.git`,
+    provider,
+    host,
+    namespace,
     repo,
   };
 }
 
-export function cloneGithubRemote(value: string, cwd: string): RemoteClone {
-  const remote = parseGithubRemote(value);
-  const ownerRoot = path.join(cwd, ".bootproof", "remotes", "github.com", remote.owner);
-  fs.mkdirSync(ownerRoot, { recursive: true });
-  const runRoot = fs.mkdtempSync(path.join(ownerRoot, `${remote.repo}-`));
+export function parseGithubRemote(value: string): GithubRemote {
+  const remote = parseRemoteTarget(value);
+  if (remote.provider !== "github") {
+    throw new Error("Expected a public HTTPS GitHub repository URL.");
+  }
+  return {
+    originalUrl: remote.originalUrl,
+    canonicalUrl: remote.canonicalUrl,
+    owner: remote.namespace,
+    repo: remote.repo,
+  };
+}
+
+export function cloneRemoteTarget(value: string, cwd: string): RemoteClone {
+  const remote = parseRemoteTarget(value);
+  const namespaceRoot = path.join(cwd, ".bootproof", "remotes", remote.host, ...remote.namespace.split("/"));
+  fs.mkdirSync(namespaceRoot, { recursive: true });
+  const runRoot = fs.mkdtempSync(path.join(namespaceRoot, `${remote.repo}-`));
   const repoPath = path.join(runRoot, "repo");
 
   try {
     execFileSync(
       "git",
-      ["clone", "--depth", "1", "--single-branch", "--no-tags", "--", remote.canonicalUrl, repoPath],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      ["-c", "credential.helper=", "clone", "--depth", "1", "--single-branch", "--no-tags", "--", remote.canonicalUrl, repoPath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          GIT_ASKPASS: "",
+          GIT_CONFIG_GLOBAL: os.devNull,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
+      },
     );
     const marker: RemoteSourceMarker = {
       schema: "bootproof/remote-source/v1",
       canonicalUrl: remote.canonicalUrl,
+      provider: remote.provider,
       repoDirectory: "repo",
     };
     fs.writeFileSync(path.join(runRoot, "source.json"), JSON.stringify(marker, null, 2) + "\n");
@@ -83,6 +139,11 @@ export function cloneGithubRemote(value: string, cwd: string): RemoteClone {
   }
 
   return { ...remote, repoPath };
+}
+
+export function cloneGithubRemote(value: string, cwd: string): RemoteClone {
+  parseGithubRemote(value);
+  return cloneRemoteTarget(value, cwd);
 }
 
 export function managedRemoteSource(repoPath: string): string | null {

@@ -69,7 +69,11 @@ const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 const realGit = process.env.BOOTPROOF_REAL_GIT;
-if (args[0] === "clone") {
+let commandIndex = 0;
+while (args[commandIndex] === "-c" && args[commandIndex + 1]) {
+  commandIndex += 2;
+}
+if (args[commandIndex] === "clone") {
   const remote = args.at(-2);
   const destination = args.at(-1);
   fs.cpSync(process.env.BOOTPROOF_FAKE_REMOTE, destination, { recursive: true });
@@ -159,7 +163,7 @@ try {
 
   const help = run(binary, ["--help"], { cwd: installDir });
   assert.match(help.stdout, /Human diagnosis\. Machine proof\. One engine\./);
-  assert.match(help.stdout, /bootproof fix <path\|github-url>/);
+  assert.match(help.stdout, /bootproof fix <path\|git-url>/);
   assert.match(help.stdout, /bootproof apply-repair <path>/);
 
   const refusalTarget = copyFixture("early-refusal-attestation");

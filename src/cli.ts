@@ -9,7 +9,7 @@ import { pollHealth } from "./exec.js";
 import { buildRegistryEntry, verifyRegistryEntry, writeRegistryEntry, registryEntryPath } from "./registry.js";
 import { normalizeDockerBindPath, detectHostPlatform } from "./platform.js";
 import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
-import { cloneGithubRemote, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
+import { cloneRemoteTarget, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
 import {
   applyVerifiedRepair,
   repairRepo,
@@ -51,11 +51,11 @@ function help() {
   console.log(`${BOLD}bootproof${RESET} — Human diagnosis. Machine proof. One engine.
 
 Usage:
-  bootproof analyze <path|github-url> [--workspace dir] [--json]
+  bootproof analyze <path|git-url> [--workspace dir] [--json]
                                                             inspect a repo, show evidence-based inference
-  bootproof plan <path|github-url> [--workspace dir]        show the run plan and files that WOULD be generated
-  bootproof up <path|github-url> [options]                  execute the plan, verify localhost, write signed proof
-  bootproof fix <path|github-url> [options]                 test a deterministic repair in a sandbox
+  bootproof plan <path|git-url> [--workspace dir]           show the run plan and files that WOULD be generated
+  bootproof up <path|git-url> [options]                     execute the plan, verify localhost, write signed proof
+  bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
   bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
   bootproof explain <proof.json>                            explain an attestation or repair receipt
@@ -223,7 +223,7 @@ async function main() {
       return;
     }
     try {
-      remote = cloneGithubRemote(targetInput, process.cwd());
+      remote = cloneRemoteTarget(targetInput, process.cwd());
       target = remote.repoPath;
       remoteSource = remote.canonicalUrl;
       if (!flags.json) {

@@ -242,11 +242,12 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const makefile = readText(repo, "Makefile");
   const pyproject = readText(repo, "pyproject.toml");
   const setupPy = readText(repo, "setup.py");
+  const requirements = readText(repo, "requirements.txt");
   const compose = repoComposeFile ? readText(repo, repoComposeFile) : "";
   const rootDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const nestedDeps = { ...(nestedFrontend?.pkg?.dependencies ?? {}), ...(nestedFrontend?.pkg?.devDependencies ?? {}) };
 
-  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "go.mod", "go.work", "Gemfile", "config/database.yml", "Makefile", "superset/app.py", "superset/config.py"]);
+  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "requirements.txt", "manage.py", "go.mod", "go.work", "Gemfile", "config/database.yml", "Makefile", "superset/app.py", "superset/config.py"]);
   if (isDirectory(repo, "pkg")) backendMarkers.push("pkg/");
 
   const frontendMarkers = present(repo, ["package.json", "yarn.lock", "pnpm-lock.yaml", "nx.json"]);
@@ -255,10 +256,12 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (nestedFrontend) frontendMarkers.push(`${nestedFrontend.dir}/package.json`);
 
   const serviceMarkers = present(repo, [...REPO_COMPOSE_FILES, "docker-compose-light.yml"]);
-  const hasPythonBackend =
+  const hasFlaskBackend =
     (exists(repo, "pyproject.toml") || exists(repo, "setup.py")) &&
     (exists(repo, "superset/app.py") || exists(repo, "superset/config.py") || /\bflask\b/i.test(pyproject + setupPy + makefile));
-  const hasFlask = hasPythonBackend && (/\bflask\b/i.test(pyproject + setupPy + makefile) || exists(repo, "superset/app.py"));
+  const hasFlask = hasFlaskBackend && (/\bflask\b/i.test(pyproject + setupPy + makefile) || exists(repo, "superset/app.py"));
+  const hasDjango = exists(repo, "manage.py") && /\bdjango\b/i.test(pyproject + requirements);
+  const hasPythonBackend = hasFlaskBackend || hasDjango;
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
   const hasRubyBackend = exists(repo, "Gemfile");
   const makeCommand = detectMakeCommand(repo, makefile);
@@ -274,6 +277,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const stack: string[] = [];
   if (hasPythonBackend) stack.push("python-backend");
   if (hasFlask) stack.push("flask");
+  if (hasDjango) stack.push("django");
   if (hasGoBackend) stack.push("go-backend");
   if (hasRubyBackend) stack.push("ruby-backend");
   if (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend) stack.push("make-driven");
@@ -310,6 +314,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     rubyCommand,
     hasPythonBackend,
     hasFlask,
+    hasDjango,
     hasGoBackend,
     hasRubyBackend,
     hasMakeDrivenBackend,
@@ -487,16 +492,20 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
       ].filter(Boolean).join(" ")
     : null;
   const rubyCommand = architecture.rubyCommand ? `${architecture.rubyCommand.commandBase} -p ${port}` : null;
+  const djangoCommand = architecture.hasDjango ? `python manage.py runserver 127.0.0.1:${port}` : null;
   const repositoryBackendCommand = architecture.makeCommand?.command ?? goCommand ?? rubyCommand;
-  const backendCommand = architecture.flaskCommand ?? repositoryBackendCommand;
+  const backendCommand = architecture.flaskCommand ?? djangoCommand ?? repositoryBackendCommand;
   const nestedFrontendCommand = architecture.frontendMakeCommand;
   const frontendCommand = nestedFrontendCommand ?? rootApp.command;
   const appCommand = architecture.flaskCommand
+    ?? djangoCommand
     ?? (architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command ? rootApp.command : null)
     ?? repositoryBackendCommand
     ?? rootApp.command;
   const appCommandSource = architecture.flaskCommand
     ? `Makefile Flask command: ${architecture.flaskCommand}`
+    : djangoCommand && appCommand === djangoCommand
+      ? "Django entrypoint: manage.py"
     : architecture.makeCommand && appCommand === architecture.makeCommand.command
       ? architecture.makeCommand.source
       : goCommand && appCommand === goCommand
@@ -537,8 +546,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ? "multi-workspace development pipeline; no single application health target selected"
     : incompleteAppCommand
     ? "frontend/dev pipeline only; Go backend markers also detected"
-    : architecture.hasPythonBackend && nestedFrontend
+    : architecture.hasFlask && nestedFrontend
       ? "Python/Flask backend command; React frontend and worker require separate orchestration"
+    : djangoCommand && appCommand === djangoCommand
+      ? "Django application command"
     : goCommand && appCommand === goCommand && nestedFrontend
         ? "Go application command serving repository-embedded frontend assets"
         : rubyCommand && appCommand === rubyCommand

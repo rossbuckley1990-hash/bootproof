@@ -44,7 +44,7 @@ async function getFreePort() {
   });
 }
 
-function fakeGithubRemote(fixture, setup) {
+function fakeRemote(fixture, canonicalUrl, setup) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
   const source = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-source-"));
   fs.cpSync(path.join(FIX, fixture), source, { recursive: true });
@@ -57,7 +57,6 @@ function fakeGithubRemote(fixture, setup) {
   git("add", ".");
   git("commit", "-q", "-m", "fixture");
 
-  const canonicalUrl = "https://github.com/example/hello-app.git";
   return {
     cwd,
     source,
@@ -69,6 +68,10 @@ function fakeGithubRemote(fixture, setup) {
       GIT_CONFIG_VALUE_0: canonicalUrl,
     },
   };
+}
+
+function fakeGithubRemote(fixture, setup) {
+  return fakeRemote(fixture, "https://github.com/example/hello-app.git", setup);
 }
 
 function writeNodeTool(bin, name, source) {
@@ -133,6 +136,35 @@ const args = process.argv.slice(2);
 if (args.join(" ") !== "prisma migrate deploy") process.exit(2);
 fs.mkdirSync(path.join(process.cwd(), ".bootproof"), { recursive: true });
 fs.writeFileSync(path.join(process.cwd(), ".bootproof", "prisma-ready"), "migrated\\n");
+`);
+}
+
+function writeDjangoRepairTools(bin) {
+  fs.mkdirSync(bin, { recursive: true });
+  writeNodeTool(bin, "python", `
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const marker = path.join(process.cwd(), ".bootproof", "django-ready");
+if (args.join(" ") === "manage.py migrate --noinput") {
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, "migrated\\n");
+  process.exit(0);
+}
+if (args[0] === "manage.py" && args[1] === "runserver") {
+  if (!fs.existsSync(marker)) {
+    console.error("django.db.utils.OperationalError: no such table: app_widget");
+    process.exit(1);
+  }
+  const port = args[2].split(":").at(-1);
+  const child = spawnSync(process.execPath, ["server.js"], {
+    stdio: "inherit",
+    env: { ...process.env, PORT: port },
+  });
+  process.exit(child.status ?? 1);
+}
+process.exit(2);
 `);
 }
 
@@ -551,6 +583,26 @@ test("an unavailable repository runtime is classified without guessing", () => {
   assert.equal(att.result.healthVerified, false);
 });
 
+test("honesty: docker provider never silently executes a host application command", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-docker-host-refusal-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "docker-host-refusal",
+    private: true,
+    scripts: {
+      start: "node -e \"require('node:fs').writeFileSync('host-command-ran', 'yes')\"",
+    },
+  }));
+
+  const { out, code } = run(["up", repo, "--provider", "docker", "--ci"], true);
+  assert.equal(code, 1);
+  assert.match(out, /NOT VERIFIED — orchestration_not_supported/);
+  assert.match(out, /will not silently run them on the host/);
+  assert.equal(fs.existsSync(path.join(repo, "host-command-ran")), false);
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "orchestration_not_supported");
+  assert.deepEqual(att.observed, []);
+});
+
 test("source-built repository Compose verifies only after observed HTTP health", async () => {
   const repo = freshCopy("source-compose-runnable-like");
   const port = await getFreePort();
@@ -829,6 +881,33 @@ test("repair: Prisma migration preparation is verified end to end", async () => 
   assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
 });
 
+test("repair: Django migration preparation is selected from markers and verified end to end", async () => {
+  const repo = freshCopy("repair-django-migrations");
+  const bin = path.join(repo, "bin-tools");
+  writeDjangoRepairTools(bin);
+  const port = await getFreePort();
+  const beforeHash = hashWorkingTree(repo);
+
+  const { out, code } = run(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--json"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 0, out);
+  const result = JSON.parse(out);
+  assert.equal(result.repaired, true);
+  assert.equal(result.failureClass, "migrations_missing");
+  assert.equal(result.repairId, "apply-django-migrations");
+  assert.equal(result.patchPath, null);
+  assert.equal(hashWorkingTree(repo), beforeHash);
+
+  const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
+  assert.equal(receipt.repair.kind, "plan-step");
+  assert.match(receipt.repair.planDelta, /python manage\.py migrate --noinput/);
+  assert.equal(receipt.verification.after.booted, true);
+  assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
+});
+
 test("repair: public GitHub URL runs only through the retained managed clone and current local safety gate", async () => {
   const remote = fakeGithubRemote("pnpm-version-mismatch", source => {
     writePackageRepairTools(path.join(source, "bin-tools"));
@@ -861,6 +940,39 @@ test("repair: public GitHub URL runs only through the retained managed clone and
   assert.equal(fs.existsSync(path.join(remote.source, ".bootproof")), false);
   assert.equal(hashWorkingTree(remote.source), sourceHash);
   assert.match(run(["verify", path.join(remote.cwd, result.receiptPath)]).out, /repair receipt signature valid/);
+});
+
+test("repair: public GitLab URL uses the same retained-clone and execution safety gates", async () => {
+  const remote = fakeRemote(
+    "pnpm-version-mismatch",
+    "https://gitlab.com/example/platform/hello-app.git",
+    source => {
+      writePackageRepairTools(path.join(source, "bin-tools"));
+      fs.writeFileSync(path.join(source, ".gitignore"), ".bootproof/\n");
+    },
+  );
+  const port = await getFreePort();
+  const bin = path.join(remote.source, "bin-tools");
+
+  const refused = run(
+    ["fix", remote.url, "--provider", "local", "--port", String(port), "--json"],
+    true,
+    { ...remote.env, PATH: pathWith(bin) },
+    remote.cwd,
+  );
+  assert.equal(refused.code, 1);
+  assert.match(JSON.parse(refused.out).explanation, /--unsafe-local/);
+
+  const repaired = run(
+    ["fix", remote.url, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "10000", "--json"],
+    true,
+    { ...remote.env, PATH: pathWith(bin) },
+    remote.cwd,
+  );
+  assert.equal(repaired.code, 0, repaired.out);
+  const result = JSON.parse(repaired.out);
+  assert.match(result.receiptPath, /^\.bootproof\/remotes\/gitlab\.com\/example\/platform\/hello-app-[^/]+\/repo\/\.bootproof\/repair-receipt\.json$/);
+  assert.equal(fs.existsSync(path.join(remote.cwd, result.receiptPath)), true);
 });
 
 test("repair: dry run executes nothing, writes nothing, and proves nothing", () => {
