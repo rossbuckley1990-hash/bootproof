@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -108,6 +107,8 @@ export function cloneRemoteTarget(value: string, cwd: string): RemoteClone {
   fs.mkdirSync(namespaceRoot, { recursive: true });
   const runRoot = fs.mkdtempSync(path.join(namespaceRoot, `${remote.repo}-`));
   const repoPath = path.join(runRoot, "repo");
+  const isolatedGitConfig = path.join(runRoot, "gitconfig");
+  fs.writeFileSync(isolatedGitConfig, "");
 
   try {
     execFileSync(
@@ -119,12 +120,13 @@ export function cloneRemoteTarget(value: string, cwd: string): RemoteClone {
         env: {
           ...process.env,
           GIT_ASKPASS: "",
-          GIT_CONFIG_GLOBAL: os.devNull,
+          GIT_CONFIG_GLOBAL: isolatedGitConfig,
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_TERMINAL_PROMPT: "0",
         },
       },
     );
+    fs.rmSync(isolatedGitConfig, { force: true });
     const marker: RemoteSourceMarker = {
       schema: "bootproof/remote-source/v1",
       canonicalUrl: remote.canonicalUrl,
