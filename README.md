@@ -197,6 +197,25 @@ Application checks the receipt signature, allowed file scope, signed content has
 
 See [docs/REPAIR_RECEIPT.md](docs/REPAIR_RECEIPT.md).
 
+## Static Infrastructure Diff
+
+```bash
+bootproof diff --base main --head feature-branch
+bootproof diff --base main --head HEAD --json
+```
+
+`diff` reads committed Git objects and performs static analysis only. It does
+not check out either ref, execute repository code, install dependencies, read
+protected `.env` contents, or upload data. It reports supported drift in
+dependency manifests and lockfiles, Compose services and ports, environment
+variable names, start commands, package managers, runtime markers, and
+detectable health routes.
+
+When refs are omitted, BootProof safely compares `HEAD^` to `HEAD`. The result
+uses the strict `bootproof/diff-result/v1` schema. A diff can require fresh
+proof, but it never claims the head revision boots; run `bootproof up` against
+the intended revision to establish that with observed health evidence.
+
 ## What It Tells Humans
 
 A failed run is still useful:

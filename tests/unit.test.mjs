@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import http from "node:http";
@@ -66,8 +67,87 @@ import {
   resolveAiProvider,
   validateAiRepairSuggestion,
 } from "../dist/ai-repair.js";
+import { diffRefs, validateDiffResult } from "../dist/diff.js";
 
 const FIX = path.resolve("fixtures");
+
+function createInfrastructureDiffRepo() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-diff-unit-"));
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.name", "BootProof Test");
+  git("config", "user.email", "bootproof@example.invalid");
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "diff-fixture",
+    packageManager: "npm@10.0.0",
+    scripts: {
+      start: "API_SECRET=base-secret node -e \"require('node:fs').writeFileSync('.diff-executed','base')\"",
+    },
+    dependencies: { express: "4.18.0" },
+    engines: { node: ">=20" },
+  }, null, 2));
+  fs.writeFileSync(path.join(repo, "package-lock.json"), "{}\n");
+  fs.writeFileSync(path.join(repo, ".env.example"), "OLD_REQUIRED=\nAPI_SECRET=base-secret\n");
+  fs.writeFileSync(path.join(repo, ".env"), "REAL_SECRET=never-read\n");
+  fs.writeFileSync(path.join(repo, ".gitattributes"), "package.json diff=bootproof-test-driver\n");
+  fs.writeFileSync(path.join(repo, ".nvmrc"), "20\n");
+  fs.writeFileSync(path.join(repo, "server.js"), "app.get('/health', handler);\n");
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  web:",
+    "    image: example/web",
+    "    ports:",
+    '      - "3000:3000"',
+    "    environment:",
+    "      API_SECRET: base-secret",
+    "  legacy:",
+    "    image: example/legacy",
+    "    ports:",
+    '      - "9000:9000"',
+    "",
+  ].join("\n"));
+  git("add", ".");
+  git("commit", "-q", "-m", "base infrastructure");
+
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "diff-fixture",
+    packageManager: "pnpm@9.0.0",
+    scripts: {
+      start: "API_SECRET=head-secret node -e \"require('node:fs').writeFileSync('.diff-executed','head')\"",
+    },
+    dependencies: { express: "5.0.0" },
+    engines: { node: ">=22" },
+  }, null, 2));
+  fs.rmSync(path.join(repo, "package-lock.json"));
+  fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  fs.writeFileSync(path.join(repo, ".env.example"), "NEW_REQUIRED=\nAPI_SECRET=head-secret\n");
+  fs.writeFileSync(path.join(repo, ".env"), "REAL_SECRET=still-never-read\n");
+  fs.writeFileSync(path.join(repo, ".nvmrc"), "22\n");
+  fs.writeFileSync(path.join(repo, "server.js"), "app.get('/healthz', handler);\n");
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  web:",
+    "    image: example/web",
+    "    ports:",
+    '      - "4000:3000"',
+    "    environment:",
+    "      API_SECRET: head-secret",
+    "  worker:",
+    "    image: example/worker",
+    "    ports:",
+    '      - "5000:5000"',
+    "",
+  ].join("\n"));
+  git("add", "-A");
+  git("commit", "-q", "-m", "head infrastructure");
+  const externalDiff = path.join(repo, "external-diff.cjs");
+  fs.writeFileSync(
+    externalDiff,
+    'require("node:fs").writeFileSync(".external-diff-executed", "bad");\n',
+  );
+  git("config", "diff.bootproof-test-driver.command", `${process.execPath} ${externalDiff}`);
+  return repo;
+}
 
 async function getFreePort() {
   return await new Promise((resolve, reject) => {
@@ -2197,6 +2277,50 @@ test("registry JSON schemas are strict v1 machine interfaces", () => {
   assert.equal(federatedSchema.additionalProperties, false);
   assert.equal(federatedSchema.properties.schema.const, "bootproof/federated-receipt/v1");
   assert.ok(federatedSchema.required.includes("noSecretsIncluded"));
+});
+
+test("static diff detects infrastructure drift without executing repository code", () => {
+  const repo = createInfrastructureDiffRepo();
+  const result = diffRefs(repo);
+  assert.equal(result.schema, "bootproof/diff-result/v1");
+  assert.equal(result.base, "HEAD^");
+  assert.equal(result.head, "HEAD");
+  assert.ok(result.changedFiles.includes("package.json"));
+  assert.ok(result.changedFiles.includes("package-lock.json"));
+  assert.ok(result.changedFiles.includes("pnpm-lock.yaml"));
+  assert.deepEqual(result.addedServices, ["docker-compose.yml:worker"]);
+  assert.deepEqual(result.removedServices, ["docker-compose.yml:legacy"]);
+  assert.ok(result.addedPorts.includes("docker-compose.yml:web:4000->3000/tcp"));
+  assert.ok(result.removedPorts.includes("docker-compose.yml:web:3000->3000/tcp"));
+  assert.deepEqual(result.addedEnvVars, ["NEW_REQUIRED"]);
+  assert.deepEqual(result.removedEnvVars, ["OLD_REQUIRED"]);
+  assert.equal(result.changedCommands.length, 1);
+  assert.equal(result.changedCommands[0].source, "package.json:scripts.start");
+  assert.match(result.changedCommands[0].before, /API_SECRET=\[redacted\]/);
+  assert.match(result.changedCommands[0].after, /API_SECRET=\[redacted\]/);
+  assert.equal(result.changedPackageManagers.length, 3);
+  assert.equal(result.riskLevel, "high");
+  assert.equal(result.proofRequired, true);
+  assert.ok(result.suggestedReviewNotes.some(note => /Dependency manifests changed: package\.json/.test(note)));
+  assert.ok(result.suggestedReviewNotes.some(note => /Runtime marker changed/.test(note)));
+  assert.ok(result.suggestedReviewNotes.some(note => /Health route changed/.test(note)));
+  assert.ok(result.redactionsApplied.includes("command environment values"));
+  assert.deepEqual(validateDiffResult(result), []);
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /base-secret|head-secret|never-read|still-never-read/);
+  assert.equal(fs.existsSync(path.join(repo, ".diff-executed")), false);
+  assert.equal(fs.existsSync(path.join(repo, ".external-diff-executed")), false);
+});
+
+test("diff result JSON schema is strict and matches the runtime validator", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "diff-result-v1.schema.json"), "utf8"));
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.schema.const, "bootproof/diff-result/v1");
+  assert.ok(schema.required.includes("proofRequired"));
+  assert.equal(schema.$defs.change.additionalProperties, false);
+  const repo = createInfrastructureDiffRepo();
+  const result = diffRefs(repo, { base: "HEAD^", head: "HEAD" });
+  assert.match(validateDiffResult({ ...result, extra: true }).join("\n"), /unsupported field: extra/);
 });
 
 test("ported: docker bind path normalization (windows + wsl2 literals)", async () => {

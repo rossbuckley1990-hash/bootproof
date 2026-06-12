@@ -93,6 +93,51 @@ function freshCopy(name) {
   return tmp;
 }
 
+function createCliDiffRepo() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-diff-e2e-"));
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("config", "user.name", "BootProof Test");
+  git("config", "user.email", "bootproof@example.invalid");
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "cli-diff",
+    scripts: {
+      start: "API_TOKEN=first-secret node -e \"require('node:fs').writeFileSync('.executed','bad')\"",
+    },
+  }, null, 2));
+  fs.writeFileSync(path.join(repo, ".env.example"), "OLD_ENV=first-secret\n");
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  old:",
+    "    image: example/old",
+    "    ports:",
+    '      - "3000:3000"',
+    "",
+  ].join("\n"));
+  git("add", ".");
+  git("commit", "-q", "-m", "base");
+
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: "cli-diff",
+    dependencies: { express: "5.0.0" },
+    scripts: {
+      start: "API_TOKEN=second-secret node -e \"require('node:fs').writeFileSync('.executed','worse')\"",
+    },
+  }, null, 2));
+  fs.writeFileSync(path.join(repo, ".env.example"), "NEW_ENV=second-secret\n");
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    "  new:",
+    "    image: example/new",
+    "    ports:",
+    '      - "4000:4000"',
+    "",
+  ].join("\n"));
+  git("add", "-A");
+  git("commit", "-q", "-m", "head");
+  return repo;
+}
+
 function writeFailedAttestation(repo, failureClass, failureEvidence, provider = "local") {
   const attestation = buildAttestation({
     repo,
@@ -2131,6 +2176,32 @@ test("unknown commands are rejected, not guessed", () => {
   const { out, code } = run(["lanch", "."], true);
   assert.equal(code, 1);
   assert.match(out, /unknown command: lanch/);
+});
+
+test("diff CLI emits static human and JSON drift results without executing code", () => {
+  const repo = createCliDiffRepo();
+  const human = run(["diff"], false, {}, repo);
+  assert.equal(human.code, 0);
+  assert.match(human.out, /Static infrastructure diff/);
+  assert.match(human.out, /Base: HEAD\^/);
+  assert.match(human.out, /Added services:/);
+  assert.match(human.out, /docker-compose\.yml:new/);
+  assert.match(human.out, /Removed services:/);
+  assert.match(human.out, /docker-compose\.yml:old/);
+  assert.match(human.out, /Static analysis only\. No repository code was executed/);
+  assert.doesNotMatch(human.out, /first-secret|second-secret/);
+  assert.equal(fs.existsSync(path.join(repo, ".executed")), false);
+
+  const machine = run(["diff", "--base", "HEAD^", "--head", "HEAD", "--json"], false, {}, repo);
+  const result = JSON.parse(machine.out);
+  assert.equal(result.schema, "bootproof/diff-result/v1");
+  assert.deepEqual(result.addedEnvVars, ["NEW_ENV"]);
+  assert.deepEqual(result.removedEnvVars, ["OLD_ENV"]);
+  assert.ok(result.changedFiles.includes("package.json"));
+  assert.equal(result.changedCommands.length, 1);
+  assert.equal(result.proofRequired, true);
+  assert.doesNotMatch(machine.out, /first-secret|second-secret/);
+  assert.equal(fs.existsSync(path.join(repo, ".executed")), false);
 });
 
 test("monorepo ambiguity is surfaced, not guessed", () => {
