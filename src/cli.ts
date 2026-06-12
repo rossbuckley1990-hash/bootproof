@@ -173,6 +173,7 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   if (inf.setupSteps.length) console.log(`  setup steps: ${inf.setupSteps.join("; ")}`);
   if (inf.backendCommand) console.log(`  backend command: ${inf.backendCommand}`);
   if (inf.frontendCommand) console.log(`  frontend command: ${inf.frontendCommand}`);
+  if (inf.asset_dev_server_command) console.log(`  asset dev server command: ${inf.asset_dev_server_command}`);
   if (inf.workerCommand) console.log(`  worker command: ${inf.workerCommand}`);
   if (inf.appCommand) console.log(`  selected command: ${inf.appCommand} ${DIM}(${inf.appCommandSource})${RESET}`);
   if (inf.preparationCommands.length) console.log(`  preparation: ${inf.preparationCommands.map(command => command.command).join("; ")}`);

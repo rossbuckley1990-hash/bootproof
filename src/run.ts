@@ -6,7 +6,9 @@ import { inferRepo } from "./infer.js";
 import { buildPlan, writePlanFiles } from "./plan.js";
 import {
   buildExecutionEnv,
+  detectHealthCandidatePortMismatch,
   execResultEvidence,
+  healthCandidatePortMismatchEvidence,
   processEvidenceText,
   runToCompletion,
   superviseApp,
@@ -415,13 +417,21 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     if (planned.kind === "start-app" && planned.command) {
       const t = new Date().toISOString();
       const app = superviseApp(planned.command, inference.repoPath, env);
+      const inferredHealthUrl = plan.healthUrl;
       const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs, app.output);
       plan.healthCandidates = health.candidates;
       if (health.url) plan.healthUrl = health.url;
+      const portMismatchEvidence = healthCandidatePortMismatchEvidence(
+        detectHealthCandidatePortMismatch(
+          inferredHealthUrl,
+          health.discoveredCandidates,
+          planned.command,
+        ),
+      );
       const exit = app.exited();
       if (exit && !health.responded) {
         const processEvidence = app.evidence();
-        const evidence = processEvidenceText(processEvidence);
+        const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
         observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, processEvidence));
         const c = classifyFailure(evidence);
         await app.stop();
@@ -440,7 +450,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
       }
       const processEvidence = app.evidence();
-      const evidence = processEvidenceText(processEvidence);
+      const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
       const healthFailureMessage = health.responded
         ? `only HTTP ${health.status} observed at ${health.url ?? plan.healthUrl}`
         : `no HTTP response at candidates ${health.candidates.join(", ")} within ${opts.timeoutMs}ms`;

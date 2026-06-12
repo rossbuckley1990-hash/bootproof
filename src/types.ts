@@ -22,6 +22,7 @@ export type FailureClass =
   | "package_manager_version_mismatch"
   | "dependency_install_skipped"
   | "python_flask_setup_required"
+  | "laravel_vite_ci_hmr_blocked"
   | "missing_env_var"
   | "missing_database_config"
   | "missing_required_config"
@@ -44,6 +45,7 @@ export type FailureClass =
   | "app_exited_early"
   | "health_check_timeout"
   | "health_http_error"
+  | "health_candidate_port_mismatch"
   | "workspace_ambiguous"
   | "unknown_failure";
 
@@ -102,6 +104,7 @@ export interface Inference {
   appCommandSource: string;
   backendCommand: string | null;
   frontendCommand: string | null;
+  asset_dev_server_command: string | null;
   workerCommand: string | null;
   commandScope: string;
   incompleteAppCommand: boolean;

@@ -107,6 +107,11 @@ export function diagnoseFailure(
         whyRefused: "BootProof cannot yet orchestrate that multi-step application safely enough to claim a verified boot.",
         safeNextStep: "Review the detected setup and service commands, complete the repository's documented initialization, then rerun when orchestration support is available.",
       };
+    case "laravel_vite_ci_hmr_blocked":
+      return preciseFailure(
+        "Laravel's Vite integration blocked the HMR asset server in CI. That asset server is not proof that the Laravel application booted.",
+        "For local verification: rerun with LARAVEL_BYPASS_ENV_CHECK=1 only if intentionally testing the Vite dev server. For CI verification: use production asset build instead of Vite HMR. For Laravel app verification: run the Laravel app server, not only the Vite asset server.",
+      );
     case "orchestration_not_supported":
       return {
         whatHappened: explanation,
@@ -156,6 +161,11 @@ export function diagnoseFailure(
         whyRefused: "A running process alone is not proof that the application became reachable and healthy.",
         safeNextStep: "Check the reported health candidates and application logs, then rerun with the correct port or a longer --timeout if justified.",
       };
+    case "health_candidate_port_mismatch":
+      return preciseFailure(
+        "The supervised process advertised a different port from the inferred application health URL.",
+        "Confirm the primary application command and intended health port. For Laravel verification, run the Laravel app server rather than only the Vite asset server.",
+      );
     case "postgres_auth_env_missing":
       return {
         whatHappened: "Postgres was reached, but authentication or database environment configuration did not match.",

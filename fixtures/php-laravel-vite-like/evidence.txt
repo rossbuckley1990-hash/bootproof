@@ -1,0 +1,2 @@
+laravel-vite-plugin: You should not run the Vite HMR server in CI environments.
+If this is intentional, rerun with LARAVEL_BYPASS_ENV_CHECK=1.

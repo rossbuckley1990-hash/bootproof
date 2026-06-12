@@ -20,12 +20,13 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |
 | `missing_ruby_version` | The exact Ruby version selected by rbenv is not installed. | Run `rbenv install <version>`. |
 | `missing_package_manager` | The declared package manager executable is absent. | Enable Corepack or install the required manager. |
-| `missing_runtime_tool` | An explicit Go, Ruby, Bundler, or Make run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
+| `missing_runtime_tool` | An explicit Go, Ruby, Bundler, Make, PHP, or Composer run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
 | `missing_build_tool` | A named native build tool required by a dependency is absent. | Install the reported tool, such as `brew install cmake`. |
 | `native_extension_compile_failed` | A gem native extension failed to compile. | Install the affected gem's native dependencies and rerun installation. |
 | `package_manager_version_mismatch` | The available package-manager version differs from the exact/simple declared version. | Activate the declared version, then rerun. |
 | `dependency_install_skipped` | A dependency-backed application was not started because install was not requested. | Review the install command and opt in with `--install`. |
 | `python_flask_setup_required` | Python/Flask setup requires migrations, initialization, workers, frontend, or service orchestration not yet supported safely. | Complete the documented setup manually; do not treat detection as full support. |
+| `laravel_vite_ci_hmr_blocked` | Laravel's Vite plugin refused to start the HMR asset server in CI. | Use a production asset build in CI, or run the Laravel application server for app verification. |
 | `missing_env_var` | Required environment configuration is missing. | Supply real values through the repository's documented path. BootProof will not edit `.env`. |
 | `missing_database_config` | `config/database.yml` could not be loaded or is absent. | Create it from the repository's documented example and review it. |
 | `missing_required_config` | Another explicitly named required configuration file is absent. | Restore the reported file from the repository's documented example. |
@@ -48,6 +49,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `app_exited_early` | The application exited before health was observed. | Inspect process evidence and fix startup. |
 | `health_check_timeout` | No HTTP response was observed before timeout. | Check logs, port inference, and health candidates. |
 | `health_http_error` | A health candidate returned HTTP 5xx. | Fix the server error; a responding process is not yet healthy. |
+| `health_candidate_port_mismatch` | Process output advertised a different port from the inferred application health URL. | Confirm the primary app command and intended health port; do not mistake an asset server for the Laravel app. |
 | `workspace_ambiguous` | Multiple applications or health targets are plausible. | Choose one with `--workspace <dir>`. |
 | `unknown_failure` | Available evidence does not match a trustworthy detector. | Inspect the signed raw evidence and report a reproducible detector case. |
 

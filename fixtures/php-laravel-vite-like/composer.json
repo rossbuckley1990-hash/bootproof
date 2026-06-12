@@ -1,0 +1,7 @@
+{
+  "name": "bootproof/laravel-vite-fixture",
+  "require": {
+    "php": "^8.2",
+    "laravel/framework": "^11.0"
+  }
+}

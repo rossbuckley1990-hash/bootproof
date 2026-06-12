@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
+import https from "node:https";
 import { redactText } from "./redact.js";
 import type { HealthEvidence } from "./types.js";
 
@@ -268,6 +269,60 @@ export function extractHealthCandidates(output: string): string[] {
   return [...candidates];
 }
 
+export interface HealthCandidatePortMismatch {
+  inferredHealthUrl: string;
+  advertisedHealthUrl: string;
+  advertisedPort: string;
+  selectedCommand: string;
+}
+
+function effectivePort(url: URL): string {
+  if (url.port) return url.port;
+  return url.protocol === "https:" ? "443" : url.protocol === "http:" ? "80" : "";
+}
+
+export function detectHealthCandidatePortMismatch(
+  inferredHealthUrl: string,
+  advertisedHealthUrls: string[],
+  selectedCommand: string,
+): HealthCandidatePortMismatch | null {
+  if (!inferredHealthUrl) return null;
+  try {
+    const inferred = new URL(inferredHealthUrl);
+    for (const advertisedHealthUrl of advertisedHealthUrls) {
+      const advertised = new URL(advertisedHealthUrl);
+      const advertisedPort = effectivePort(advertised);
+      if (
+        advertisedPort &&
+        effectivePort(inferred) !== advertisedPort
+      ) {
+        return {
+          inferredHealthUrl,
+          advertisedHealthUrl,
+          advertisedPort,
+          selectedCommand: redactText(selectedCommand).text,
+        };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function healthCandidatePortMismatchEvidence(
+  mismatch: HealthCandidatePortMismatch | null,
+): string {
+  if (!mismatch) return "";
+  return [
+    "Health candidate port mismatch",
+    `inferredHealthUrl: ${mismatch.inferredHealthUrl}`,
+    `advertisedHealthUrl: ${mismatch.advertisedHealthUrl}`,
+    `advertisedPort: ${mismatch.advertisedPort}`,
+    `selectedCommand: ${mismatch.selectedCommand}`,
+  ].join("\n");
+}
+
 export async function pollHealthCandidates(
   initialUrls: string[],
   timeoutMs: number,
@@ -345,7 +400,14 @@ function probe(url: string): Promise<HealthEvidence> {
       acceptedAsHealthy: false,
       connectionError: redactText(message).text,
     });
-    const req = http.get(url, { timeout: 3000 }, res => {
+    let transport: typeof http | typeof https;
+    try {
+      transport = new URL(url).protocol === "https:" ? https : http;
+    } catch (error) {
+      finish(connectionFailure(connectionErrorMessage(error as Error)));
+      return;
+    }
+    const req = transport.get(url, { timeout: 3000 }, res => {
       let bodyExcerpt = "";
       res.setEncoding("utf8");
       res.on("data", chunk => {

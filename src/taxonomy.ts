@@ -70,6 +70,35 @@ function commaSeparated(value: string | undefined): string[] | undefined {
 }
 
 function classifyRealWorldFailure(evidence: string): FailureClassification | null {
+  const laravelViteHmrBlocked =
+    /You should not run the Vite HMR server in CI environments/i.test(evidence) &&
+    (/LARAVEL_BYPASS_ENV_CHECK=1/i.test(evidence) || /laravel-vite-plugin/i.test(evidence));
+  if (laravelViteHmrBlocked) {
+    return {
+      class: "laravel_vite_ci_hmr_blocked",
+      explanation: "Laravel's Vite integration refused to start the HMR asset server in a CI environment.",
+      metadata: { tool: "laravel-vite-plugin", mode: "ci-hmr" },
+      safeNextStep: "For local verification: rerun with LARAVEL_BYPASS_ENV_CHECK=1 only if intentionally testing the Vite dev server. For CI verification: use production asset build instead of Vite HMR. For Laravel app verification: run the Laravel app server, not only the Vite asset server.",
+    };
+  }
+
+  const healthCandidateMismatch = evidence.match(
+    /Health candidate port mismatch\s+inferredHealthUrl:\s*(\S+)\s+advertisedHealthUrl:\s*(\S+)\s+advertisedPort:\s*(\d+)\s+selectedCommand:\s*([^\n]+)/i,
+  );
+  if (healthCandidateMismatch) {
+    return {
+      class: "health_candidate_port_mismatch",
+      explanation: `The supervised process advertised ${healthCandidateMismatch[2]}, but BootProof inferred ${healthCandidateMismatch[1]} as the application health URL.`,
+      metadata: {
+        inferredHealthUrl: healthCandidateMismatch[1],
+        advertisedHealthUrl: healthCandidateMismatch[2],
+        advertisedPort: healthCandidateMismatch[3],
+        selectedCommand: healthCandidateMismatch[4].trim(),
+      },
+      safeNextStep: "Confirm the primary application command and intended health port. For Laravel verification, run the Laravel app server rather than only the Vite asset server.",
+    };
+  }
+
   const rubyVersion = evidence.match(/rbenv:\s+version\s+['"]([^'"]+)['"]\s+is not installed/i);
   if (rubyVersion) {
     return {
@@ -212,7 +241,7 @@ const RULES: Rule[] = [
     explain: () => "The host Node version does not satisfy the project's engines requirement. Switch Node versions (nvm/fnm/corepack) and retry." },
   { class: "missing_package_manager", pattern: /\b(yarn|pnpm|bun): (command )?not found/i,
     explain: m => `The project needs ${m[1]} and it is not installed. Enable Corepack (corepack enable) or install ${m[1]} directly.` },
-  { class: "missing_runtime_tool", pattern: /(?:(?:^|\s)(go|ruby|bundle|make|python): (?:command )?not found\b|'(go|ruby|bundle|make|python)' is not recognized as an internal or external command|spawn (go|ruby|bundle|make|python) ENOENT)/im,
+  { class: "missing_runtime_tool", pattern: /(?:(?:^|\s)(go|ruby|bundle|make|python|php|composer): (?:command )?not found\b|'(go|ruby|bundle|make|python|php|composer)' is not recognized as an internal or external command|spawn (go|ruby|bundle|make|python|php|composer) ENOENT)/im,
     explain: m => `The repository's explicit run path requires ${m[1] ?? m[2] ?? m[3]}, but that executable is not available in this environment.` },
   { class: "private_registry_or_auth", pattern: /(401 Unauthorized|E401|ENEEDAUTH|authentication token not provided|Permission.*registry)/i,
     explain: () => "Dependency install needs credentials for a private registry. Bootproof will not invent credentials; provide real ones and retry." },
@@ -261,9 +290,9 @@ export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",
-  "dependency_install_skipped", "python_flask_setup_required", "missing_env_var", "missing_database_config", "missing_required_config",
+  "dependency_install_skipped", "python_flask_setup_required", "laravel_vite_ci_hmr_blocked", "missing_env_var", "missing_database_config", "missing_required_config",
   "database_unreachable", "postgres_unavailable", "postgres_role_missing", "database_schema_missing", "unsupported_database_version",
   "unsupported_database_config", "redis_unavailable", "postgres_auth_env_missing", "migrations_missing", "port_in_use", "native_build_dependency",
   "private_registry_or_auth", "tls_or_proxy_interception", "service_port_allocated", "docker_unavailable", "install_failed", "app_exited_early",
-  "health_check_timeout", "health_http_error", "workspace_ambiguous", "unknown_failure",
+  "health_check_timeout", "health_http_error", "health_candidate_port_mismatch", "workspace_ambiguous", "unknown_failure",
 ];
