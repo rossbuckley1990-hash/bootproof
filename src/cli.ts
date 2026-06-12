@@ -53,6 +53,7 @@ import {
   resolveAiProvider,
   type RequestedAiRepair,
 } from "./ai-repair.js";
+import { diffRefs, type DiffResult } from "./diff.js";
 import type { Attestation } from "./types.js";
 
 let GREEN = "\x1b[32m", YELLOW = "\x1b[33m", RED = "\x1b[31m", DIM = "\x1b[2m", BOLD = "\x1b[1m", RESET = "\x1b[0m";
@@ -63,8 +64,9 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "verify-url", "plan-agent", "explain-run", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "verify-url", "plan-agent", "explain-run", "fix", "apply-repair", "diff", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
 const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
+  diff: new Set(["base", "head", "json", "ci"]),
   analyze: new Set(["workspace", "json", "ci"]),
   plan: new Set(["workspace", "provider", "ci"]),
   "plan-agent": new Set(["json", "ci"]),
@@ -110,6 +112,7 @@ Usage:
   bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
   bootproof fix <path|git-url> --ai                         optionally request a BYOK AI suggestion after deterministic refusal
   bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
+  bootproof diff [--base ref] [--head ref] [--json]         statically detect infrastructure drift between Git refs
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
   bootproof explain <proof.json>                            explain an attestation or repair receipt
   bootproof registry export <path>                          explicitly write a redacted local registry export
@@ -144,6 +147,11 @@ Command repairs show the exact command and require the literal response Y before
 JSON and CI modes never prompt and never approve a command.
 AI uses OPENAI_API_KEY or ANTHROPIC_API_KEY directly with native fetch. It sends only
 redacted structured failure evidence after explicit consent and never runs inside bootproof up.
+
+Options for diff:
+  --base <ref>             base Git commit (default HEAD^)
+  --head <ref>             head Git commit (default HEAD)
+  --json                   one bootproof/diff-result/v1 JSON object on stdout
 
 Honesty contract: no green check without an observed event; dry runs say "would";
 .env/.env.local are never written; secrets are never invented.
@@ -418,6 +426,39 @@ function printRepairApplyResult(result: RepairApplyResult): void {
   console.log(result.explanation);
 }
 
+function printDiffResult(result: DiffResult): void {
+  console.log(`${BOLD}Static infrastructure diff${RESET}`);
+  console.log(`Base: ${result.base}`);
+  console.log(`Head: ${result.head}`);
+  console.log(`Risk: ${result.riskLevel}`);
+  console.log(`Fresh boot proof required: ${result.proofRequired ? "yes" : "no detected infrastructure drift"}`);
+  const sections: Array<[string, string[]]> = [
+    ["Changed files", result.changedFiles],
+    ["Added services", result.addedServices],
+    ["Removed services", result.removedServices],
+    ["Added ports", result.addedPorts],
+    ["Removed ports", result.removedPorts],
+    ["Added env vars", result.addedEnvVars],
+    ["Removed env vars", result.removedEnvVars],
+    [
+      "Changed commands",
+      result.changedCommands.map(change => `${change.source}: ${change.before ?? "(absent)"} -> ${change.after ?? "(absent)"}`),
+    ],
+    [
+      "Changed package managers",
+      result.changedPackageManagers.map(change => `${change.source}: ${change.before ?? "(absent)"} -> ${change.after ?? "(absent)"}`),
+    ],
+  ];
+  for (const [label, values] of sections) {
+    if (!values.length) continue;
+    console.log(`${label}:`);
+    for (const value of values) console.log(`  - ${value}`);
+  }
+  console.log("Review notes:");
+  for (const note of result.suggestedReviewNotes) console.log(`  - ${note}`);
+  console.log("Static analysis only. No repository code was executed and no data was uploaded.");
+}
+
 function rebaseRemoteRepairPaths(result: RepairResult, repo: string): RepairResult {
   const rebase = (value: string | null) => value
     ? portableRelative(process.cwd(), path.join(repo, value))
@@ -451,6 +492,29 @@ async function main() {
     return;
   }
   const targetInput = String(positional[0] ?? ".");
+
+  if (cmd === "diff") {
+    const optionError =
+      positional.length
+        ? "diff does not accept a path; run it from the Git repository to compare"
+        : flags.base !== undefined && typeof flags.base !== "string"
+          ? "--base requires a Git ref"
+          : flags.head !== undefined && typeof flags.head !== "string"
+            ? "--head requires a Git ref"
+            : null;
+    if (optionError) {
+      bad(optionError);
+      process.exitCode = 1;
+      return;
+    }
+    const result = diffRefs(process.cwd(), {
+      base: flags.base as string | undefined,
+      head: flags.head as string | undefined,
+    });
+    if (flags.json) console.log(JSON.stringify(result));
+    else printDiffResult(result);
+    return;
+  }
 
   if (cmd === "explain-run") {
     if (!positional[0] || positional.length > 1) {

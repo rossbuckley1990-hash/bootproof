@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/diff-result-v1.schema.json",
+  "title": "BootProof Infrastructure Diff Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "base",
+    "head",
+    "changedFiles",
+    "addedServices",
+    "removedServices",
+    "addedPorts",
+    "removedPorts",
+    "addedEnvVars",
+    "removedEnvVars",
+    "changedCommands",
+    "changedPackageManagers",
+    "riskLevel",
+    "proofRequired",
+    "suggestedReviewNotes",
+    "redactionsApplied"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/diff-result/v1" },
+    "base": { "type": "string", "minLength": 1 },
+    "head": { "type": "string", "minLength": 1 },
+    "changedFiles": { "$ref": "#/$defs/stringArray" },
+    "addedServices": { "$ref": "#/$defs/stringArray" },
+    "removedServices": { "$ref": "#/$defs/stringArray" },
+    "addedPorts": { "$ref": "#/$defs/stringArray" },
+    "removedPorts": { "$ref": "#/$defs/stringArray" },
+    "addedEnvVars": { "$ref": "#/$defs/stringArray" },
+    "removedEnvVars": { "$ref": "#/$defs/stringArray" },
+    "changedCommands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "changedPackageManagers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "riskLevel": { "enum": ["low", "medium", "high"] },
+    "proofRequired": { "type": "boolean" },
+    "suggestedReviewNotes": { "$ref": "#/$defs/stringArray" },
+    "redactionsApplied": { "$ref": "#/$defs/stringArray" }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "before", "after"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "before": { "type": ["string", "null"] },
+        "after": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
