@@ -3,7 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import type { Attestation, ObservedStep, RunPlan, FailureClass, HealthEvidence } from "./types.js";
+import type {
+  Attestation,
+  ObservedStep,
+  RunPlan,
+  FailureClass,
+  HealthEvidence,
+  VerificationMode,
+  ExternalVerificationClassification,
+} from "./types.js";
 import { buildExecutionEnv } from "./exec.js";
 
 export const TOOL_ID = "bootproof@0.3.0";
@@ -51,10 +59,30 @@ export function buildAttestation(input: {
   healthEvidence?: HealthEvidence | null;
   observedHealthCandidates?: string[];
   failureClass: FailureClass | null; failureEvidence: string | null; explanation: string;
+  verificationMode?: VerificationMode;
+  bootproofOrchestrated?: boolean;
+  externalHealthUrl?: string | null;
+  observedStatus?: number | null;
+  observedFinalUrl?: string | null;
+  observedAt?: string | null;
+  responseSnippet?: string;
+  classification?: ExternalVerificationClassification | null;
 }): Attestation {
+  const verificationMode = input.verificationMode ?? "bootproof-orchestrated";
+  const bootproofOrchestrated = verificationMode === "external-health"
+    ? false
+    : input.bootproofOrchestrated ?? true;
   const att: Attestation = {
     schema: "bootproof/attestation/v1",
     tool: TOOL_ID,
+    verificationMode,
+    bootproofOrchestrated,
+    externalHealthUrl: input.externalHealthUrl ?? null,
+    observedStatus: input.observedStatus ?? null,
+    observedFinalUrl: input.observedFinalUrl ?? null,
+    observedAt: input.observedAt ?? null,
+    responseSnippet: input.responseSnippet ?? "",
+    classification: input.classification ?? null,
     repo: gitInfo(input.repo),
     environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
     trust: { level: "local_developer_signed", signer: "local_ed25519", oidc: null },

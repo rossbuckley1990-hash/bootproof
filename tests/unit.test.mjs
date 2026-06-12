@@ -17,6 +17,7 @@ import {
   pollHealth,
   superviseApp,
 } from "../dist/exec.js";
+import { buildExternalHealthAttestation, observeExternalHealth } from "../dist/external-health.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
@@ -1256,6 +1257,90 @@ test("health verification replaces a transient 500 with a later healthy 302", as
     assert.equal(health.evidence.bodyExcerpt, "ready");
     assert.equal(health.evidence.acceptedAsHealthy, true);
     assert.doesNotMatch(JSON.stringify(health.evidence), /500|warming up/);
+  });
+});
+
+test("external health verifies HTTP 200 with safe capped evidence", async () => {
+  await withHttpServer((_request, response) => {
+    response.setHeader("x-bootproof-test", "external-ready");
+    response.setHeader("set-cookie", "session=secret");
+    response.setHeader("x-api-key", "short-secret");
+    response.statusCode = 200;
+    response.end(`{"available":true,"token":"short-secret"}${"x".repeat(1200)}`);
+  }, async url => {
+    const observation = await observeExternalHealth(url, 1000);
+    assert.equal(observation.verified, true);
+    assert.equal(observation.classification, "external_service_verified");
+    assert.equal(observation.statusCode, 200);
+    assert.equal(observation.finalUrl, url);
+    assert.equal(observation.headers["x-bootproof-test"], "external-ready");
+    assert.equal(observation.headers["set-cookie"], "[redacted]");
+    assert.equal(observation.headers["x-api-key"], "[redacted]");
+    assert.ok(observation.responseSnippet.length > 0);
+    assert.ok(observation.responseSnippet.length <= 1000);
+    assert.doesNotMatch(observation.responseSnippet, /short-secret/);
+    assert.ok(!Number.isNaN(Date.parse(observation.observedAt)));
+  });
+});
+
+test("external health accepts HTTP 302 without following the redirect", async () => {
+  let requests = 0;
+  await withHttpServer((_request, response) => {
+    requests++;
+    response.writeHead(302, { location: "/login" });
+    response.end("redirecting");
+  }, async url => {
+    const observation = await observeExternalHealth(url, 1000);
+    assert.equal(requests, 1);
+    assert.equal(observation.verified, true);
+    assert.equal(observation.classification, "external_service_verified");
+    assert.equal(observation.statusCode, 302);
+    assert.equal(observation.redirectLocation, "/login");
+    assert.equal(observation.finalUrl, url);
+  });
+});
+
+test("external health classifies HTTP 401 as auth_required", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 401;
+    response.end("authentication required");
+  }, async url => {
+    const observation = await observeExternalHealth(url, 1000);
+    assert.equal(observation.verified, false);
+    assert.equal(observation.classification, "auth_required");
+    assert.equal(observation.statusCode, 401);
+    assert.equal(observation.responseSnippet, "authentication required");
+  });
+});
+
+test("external health preserves connection refusal evidence", async () => {
+  const port = await getFreePort();
+  const observation = await observeExternalHealth(`http://127.0.0.1:${port}/`, 100);
+  assert.equal(observation.verified, false);
+  assert.equal(observation.classification, "external_health_unreachable");
+  assert.equal(observation.statusCode, null);
+  assert.match(observation.connectionError, /ECONNREFUSED|connect/i);
+});
+
+test("external health attestation records external ownership without a boot claim", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 200;
+    response.end('{"available":true}');
+  }, async url => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-external-attestation-"));
+    const attestation = await buildExternalHealthAttestation(repo, url, 1000);
+    assert.equal(attestation.verificationMode, "external-health");
+    assert.equal(attestation.bootproofOrchestrated, false);
+    assert.equal(attestation.externalHealthUrl, url);
+    assert.equal(attestation.observedStatus, 200);
+    assert.equal(attestation.observedFinalUrl, url);
+    assert.equal(attestation.responseSnippet, '{"available":true}');
+    assert.equal(attestation.classification, "external_service_verified");
+    assert.equal(attestation.result.booted, false);
+    assert.equal(attestation.result.healthVerified, true);
+    assert.equal(attestation.result.failureClass, null);
+    assert.match(attestation.result.explanation, /did not start or orchestrate/);
+    assert.equal(verifySignature(attestation), true);
   });
 });
 
