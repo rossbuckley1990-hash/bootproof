@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/ai-repair-suggestion-v1.schema.json",
+  "title": "BootProof AI Repair Suggestion v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "confidence",
+    "failure_class",
+    "suggested_action_type",
+    "suggested_command",
+    "suggested_patch",
+    "explanation_for_user",
+    "risk_level",
+    "requires_human_approval",
+    "why_this_is_safe",
+    "what_to_check_after"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/ai-repair-suggestion/v1" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "failure_class": { "type": "string", "minLength": 1 },
+    "suggested_action_type": { "enum": ["command", "patch", "instruction"] },
+    "suggested_command": {
+      "anyOf": [
+        { "$ref": "#/$defs/command" },
+        { "type": "null" }
+      ]
+    },
+    "suggested_patch": {
+      "anyOf": [
+        { "$ref": "#/$defs/patch" },
+        { "type": "null" }
+      ]
+    },
+    "explanation_for_user": { "type": "string", "minLength": 1 },
+    "risk_level": { "enum": ["none", "low", "medium", "high", "blocked"] },
+    "requires_human_approval": { "const": true },
+    "why_this_is_safe": { "type": "string", "minLength": 1 },
+    "what_to_check_after": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "args", "display"],
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "display": { "type": "string", "minLength": 1 }
+      }
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "content", "files"],
+      "properties": {
+        "format": { "const": "unified-diff" },
+        "content": { "type": "string", "minLength": 1 },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

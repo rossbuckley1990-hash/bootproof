@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bootproof.dev/schemas/repair-action-v1.schema.json",
-  "title": "BootProof Deterministic Repair Action v1",
+  "title": "BootProof Repair Action v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -49,8 +49,8 @@
       "items": { "type": "string" },
       "uniqueItems": true
     },
-    "deterministic": { "const": true },
-    "source": { "const": "deterministic_playbook" }
+    "deterministic": { "type": "boolean" },
+    "source": { "enum": ["deterministic_playbook", "ai_suggested"] }
   },
   "allOf": [
     {
@@ -93,6 +93,14 @@
           "requiresApproval": { "const": true }
         }
       }
+    },
+    {
+      "if": { "properties": { "source": { "const": "deterministic_playbook" } } },
+      "then": { "properties": { "deterministic": { "const": true } } }
+    },
+    {
+      "if": { "properties": { "source": { "const": "ai_suggested" } } },
+      "then": { "properties": { "deterministic": { "const": false } } }
     }
   ],
   "$defs": {

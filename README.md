@@ -155,6 +155,24 @@ PostgreSQL service/role/schema/version, and supported database-section failures.
 repairs expose one separately approved action per run; patches are previewed and tested only in
 the repair sandbox. Signed receipts distinguish declined, failed, progressed, and verified outcomes.
 
+Optional BYOK AI is available only after no deterministic repair is known:
+
+```bash
+OPENAI_API_KEY=... bootproof fix . --ai
+# or ANTHROPIC_API_KEY=...
+```
+
+BootProof asks before contacting the selected provider, sends only redacted
+structured failure evidence with native `fetch`, validates the strict
+`bootproof/ai-repair-suggestion/v1` response through the shared safety model,
+and asks again before any command or patch is tested. AI suggestions are
+recorded as `ai_suggested`; they never enter the deterministic playbook
+registry automatically. `bootproof up` remains zero-AI. AI can suggest.
+BootProof proves.
+
+When both keys are set, OpenAI is selected by default; set
+`BOOTPROOF_AI_PROVIDER=anthropic` to choose Anthropic explicitly.
+
 Machine mode is:
 
 ```bash
