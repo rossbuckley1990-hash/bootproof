@@ -18,6 +18,12 @@ import {
   superviseApp,
 } from "../dist/exec.js";
 import { buildExternalHealthAttestation, observeExternalHealth } from "../dist/external-health.js";
+import {
+  agentPlanPath,
+  buildAgentPlan,
+  validateAgentPlan,
+  writeAgentPlan,
+} from "../dist/agent-plan.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
@@ -507,6 +513,112 @@ test("taxonomy documentation and tool version stay synchronized", () => {
   }
   const pkg = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
   assert.equal(TOOL_ID, `bootproof@${pkg.version}`);
+});
+
+test("planning-only agent loop reads prior attestations and emits strict risk-classified actions", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-agent-plan-"));
+  fs.cpSync(path.join(FIX, "agent-plan-orchestrated-like"), repo, { recursive: true });
+  const prior = buildAttestation({
+    repo,
+    plan: {
+      provider: "local",
+      steps: [],
+      healthUrl: "http://localhost:8001/api/v1/health",
+      healthCandidates: ["http://localhost:8001/api/v1/health"],
+      generatedFiles: [],
+    },
+    observed: [],
+    startedAt: new Date().toISOString(),
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    failureClass: "orchestration_not_supported",
+    failureEvidence: "manual runbook required",
+    explanation: "manual runbook required",
+  });
+  fs.mkdirSync(path.join(repo, ".bootproof"), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".bootproof", "attestation.json"), JSON.stringify(prior, null, 2));
+
+  const plan = buildAgentPlan(repo, { availableTools: new Set() });
+  assert.equal(plan.schema, "bootproof/agent-plan/v1");
+  assert.equal(plan.mode, "agent-plan");
+  assert.equal(plan.currentFailureClass, "orchestration_not_supported");
+  assert.equal(plan.canBootProofOrchestrateDirectly, false);
+  assert.equal(plan.canBootProofVerifyExternally, true);
+  assert.ok(plan.observedEvidence.some(evidence => /signature-valid prior attestation/.test(evidence)));
+  assert.ok(plan.suspectedStack.includes("gradle"));
+  assert.ok(plan.suspectedStack.includes("kubernetes"));
+  assert.ok(plan.missingTools.includes("java"));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.classification === "heavy_orchestration_required" &&
+    candidate.command === "abctl local install --port 8001" &&
+    candidate.riskLevel === "high" &&
+    candidate.mutationScope === "service"
+  ));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.classification === "external_health_verification_required" &&
+    candidate.command === "bootproof verify-url http://localhost:8001/api/v1/health"
+  ));
+  for (const candidate of plan.candidateNextActions) {
+    assert.ok(["command", "instruction"].includes(candidate.actionType));
+    assert.equal(typeof candidate.command, "string");
+    assert.equal(typeof candidate.reason, "string");
+    assert.ok(Array.isArray(candidate.evidence));
+    assert.ok(["low", "medium", "high", "blocked"].includes(candidate.riskLevel));
+    assert.ok(["repo", "host", "service", "database", "none"].includes(candidate.mutationScope));
+    assert.equal(candidate.requiresApproval, true);
+    assert.equal(typeof candidate.verificationStep, "string");
+    assert.equal(typeof candidate.stopCondition, "string");
+  }
+  assert.deepEqual(validateAgentPlan(plan), { valid: true, errors: [] });
+  const serialized = JSON.parse(JSON.stringify(plan));
+  assert.deepEqual(serialized, plan);
+  assert.doesNotMatch(JSON.stringify(plan), /"booted":true|"verified":true|"success":true/i);
+
+  const output = writeAgentPlan(repo, plan);
+  assert.equal(output, agentPlanPath(repo));
+  assert.deepEqual(JSON.parse(fs.readFileSync(output, "utf8")), plan);
+});
+
+test("planning-only agent loop handles a missing attestation and rejects schema drift", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-agent-plan-no-attestation-"));
+  fs.cpSync(path.join(FIX, "agent-plan-orchestrated-like"), repo, { recursive: true });
+  const plan = buildAgentPlan(repo, { availableTools: new Set(["java", "abctl", "helm"]) });
+  assert.ok(plan.observedEvidence.includes("No existing .bootproof/attestation.json was found."));
+  assert.equal(validateAgentPlan(plan).valid, true);
+  assert.equal(validateAgentPlan({ ...plan, unexpected: true }).valid, false);
+  const unsafe = structuredClone(plan);
+  unsafe.candidateNextActions[0] = {
+    ...unsafe.candidateNextActions[0],
+    actionType: "command",
+    command: "sudo rm -rf /",
+  };
+  assert.equal(validateAgentPlan(unsafe).valid, false);
+});
+
+test("planning-only agent loop distinguishes direct BootProof orchestration", () => {
+  const plan = buildAgentPlan(path.join(FIX, "hello-app"), {
+    availableTools: new Set(["node", "npm"]),
+  });
+  assert.equal(plan.canBootProofOrchestrateDirectly, true);
+  assert.equal(plan.canBootProofVerifyExternally, false);
+  assert.ok(plan.verificationSteps.some(step => /bootproof up/.test(step)));
+  assert.doesNotMatch(JSON.stringify(plan), /"booted":true|"verified":true|"success":true/i);
+});
+
+test("agent plan JSON schema is strict and contains generic safety classifications", () => {
+  const schema = fs.readFileSync(path.resolve("docs/schemas/agent-plan-v1.schema.json"), "utf8");
+  assert.match(schema, /"additionalProperties": false/);
+  assert.match(schema, /bootproof\/agent-plan\/v1/);
+  for (const classification of [
+    "host_tool_install_required",
+    "kubernetes_cluster_creation_required",
+    "heavy_orchestration_required",
+    "credential_required",
+    "external_health_verification_required",
+  ]) {
+    assert.match(schema, new RegExp(classification));
+  }
 });
 
 test("repair scope whitelist permits boot plumbing and rejects application edits", () => {

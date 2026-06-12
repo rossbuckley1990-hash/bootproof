@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/agent-plan-v1.schema.json",
+  "title": "BootProof Agent Plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "mode",
+    "currentFailureClass",
+    "observedEvidence",
+    "suspectedStack",
+    "missingTools",
+    "candidateNextActions",
+    "verificationSteps",
+    "stopConditions",
+    "canBootProofOrchestrateDirectly",
+    "canBootProofVerifyExternally"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/agent-plan/v1" },
+    "mode": { "const": "agent-plan" },
+    "currentFailureClass": { "type": "string" },
+    "observedEvidence": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "suspectedStack": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "missingTools": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "candidateNextActions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    },
+    "verificationSteps": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "stopConditions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "canBootProofOrchestrateDirectly": { "type": "boolean" },
+    "canBootProofVerifyExternally": { "type": "boolean" }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "actionType",
+        "command",
+        "reason",
+        "evidence",
+        "riskLevel",
+        "mutationScope",
+        "requiresApproval",
+        "verificationStep",
+        "stopCondition"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "host_tool_install_required",
+            "kubernetes_cluster_creation_required",
+            "heavy_orchestration_required",
+            "credential_required",
+            "external_health_verification_required"
+          ]
+        },
+        "actionType": { "enum": ["command", "instruction"] },
+        "command": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "riskLevel": { "enum": ["low", "medium", "high", "blocked"] },
+        "mutationScope": { "enum": ["repo", "host", "service", "database", "none"] },
+        "requiresApproval": { "const": true },
+        "verificationStep": { "type": "string", "minLength": 1 },
+        "stopCondition": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "actionType": { "const": "command" } } },
+          "then": { "properties": { "command": { "type": "string", "minLength": 1 } } }
+        },
+        {
+          "if": { "properties": { "actionType": { "const": "instruction" } } },
+          "then": { "properties": { "command": { "const": "" } } }
+        }
+      ]
+    }
+  }
+}

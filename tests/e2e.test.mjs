@@ -631,6 +631,36 @@ test("up --external-health rejects execution flags instead of ignoring them", as
   assert.equal(fs.existsSync(path.join(repo, ".bootproof")), false);
 });
 
+test("plan-agent writes a local plan and executes no repository command", () => {
+  const repo = freshCopy("agent-plan-orchestrated-like");
+  const { out, code } = run(["plan-agent", repo]);
+  assert.equal(code, 0);
+  assert.match(out, /Agent plan \(planning only\)/);
+  assert.match(out, /No candidate action was executed\. Verification remains pending\./);
+  assert.doesNotMatch(out, /\bBOOTED\b|EXTERNAL SERVICE VERIFIED/);
+  assert.equal(fs.existsSync(path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE")), false);
+  const planPath = path.join(repo, ".bootproof", "agent-plan.json");
+  assert.equal(fs.existsSync(planPath), true);
+  const plan = JSON.parse(fs.readFileSync(planPath, "utf8"));
+  assert.equal(plan.schema, "bootproof/agent-plan/v1");
+  assert.equal(plan.mode, "agent-plan");
+  assert.equal(plan.canBootProofOrchestrateDirectly, false);
+  assert.equal(plan.canBootProofVerifyExternally, true);
+  assert.ok(plan.candidateNextActions.every(candidate => candidate.requiresApproval === true));
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "attestation.json")), false);
+});
+
+test("plan-agent --json emits the same valid plan written to disk", () => {
+  const repo = freshCopy("agent-plan-orchestrated-like");
+  const { out, code } = run(["plan-agent", repo, "--json"]);
+  assert.equal(code, 0);
+  assert.equal(out.trim().split("\n").length, 1);
+  const stdoutPlan = JSON.parse(out);
+  const filePlan = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "agent-plan.json"), "utf8"));
+  assert.deepEqual(stdoutPlan, filePlan);
+  assert.doesNotMatch(out, /"booted":true|"verified":true|"success":true/i);
+});
+
 test("machine interface: --ci human output has no ANSI and refuses unsafe local execution", () => {
   const repo = freshCopy("hello-app");
   const { out, code } = run(["up", repo, "--provider", "local", "--ci"], true);

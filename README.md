@@ -58,6 +58,19 @@ They get a signed verdict and a deterministic exit code.
 
 The same engine powers both.
 
+## Planning-Only Agent Loop
+
+Inspect repository evidence and write a deterministic, risk-classified plan:
+
+```bash
+bootproof plan-agent .
+```
+
+The command writes `.bootproof/agent-plan.json`. It may describe exact
+candidate commands, mutation scope, risk, required approval, verification
+steps, and stop conditions, but it never executes a candidate action and never
+claims the application booted.
+
 ## Verified Repairs
 
 For the small deterministic repair registry:
