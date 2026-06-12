@@ -53,6 +53,37 @@ AI judgment, optimistic inference, or fabricated state.
 - Registry and cloud uploads must be explicit and opt-in.
 - Offline operation must remain complete and useful without BootProof Cloud.
 
+## Agent-Loop Architecture
+
+The BootProof agent loop is:
+
+**Diagnose → Classify → Plan → Risk-Classify → Approve → Execute One Step →
+Verify → Receipt → Repeat**
+
+This sequence is a safety contract, not merely a suggested workflow.
+
+- BootProof may plan actions.
+- BootProof may risk-classify actions.
+- BootProof may execute only approved local actions.
+- BootProof must execute one step at a time. Approval for one action does not
+  authorize later actions, hidden command chaining, or broader mutation.
+- BootProof must verify after every action before deciding whether to stop or
+  repeat the loop.
+- BootProof must save accurate, redacted local receipts for proposed,
+  approved, executed, progressed, and verified outcomes.
+- Unknown, unsupported, ambiguous, or unsafe steps must stop honestly.
+- Agent planning, classification, command completion, or receipt creation must
+  never claim success. Only observed verification may establish success.
+- External health verification may prove that an application is healthy, but
+  it must never claim that BootProof started the application unless BootProof
+  actually started and supervised that process.
+- `bootproof up` remains sacred: deterministic, zero-AI, and evidence-based.
+- Any AI-assisted behavior in OSS must remain optional and BYOK/local, and its
+  suggestions must pass through the same deterministic safety, risk,
+  approval, one-step execution, verification, and receipt model.
+- No telemetry, upload, registry submission, or receipt upload happens by
+  default.
+
 ## Open-Source Boundary
 
 This public repository contains the local proof engine.
@@ -64,6 +95,10 @@ It may contain:
 - Optional bring-your-own-key AI repair suggestions.
 - Standard local evidence formats, including attestations, repair receipts,
   diff results, and registry export entries.
+
+The OSS repository provides the local brakes and trust layer: deterministic
+proof, safety and risk classification, explicit approval, one-step local
+execution, verification, redaction, and local receipts.
 
 It must not contain BootProof Cloud or cloud-product capabilities, including:
 
@@ -84,6 +119,10 @@ BootProof Cloud lives in a separate private repository. Cloud owns:
 
 - Hosted evidence.
 - Managed AI.
+- Managed autopilot.
+- Shared memory.
+- Governance and managed approvals.
+- Fleet control.
 - Team policy and approval workflows.
 - GitHub and GitLab integration history.
 - Registry intelligence.
@@ -93,6 +132,9 @@ BootProof Cloud lives in a separate private repository. Cloud owns:
 
 Public interfaces may support explicit interoperability with Cloud, but this
 repository must not implement Cloud-owned behavior or require Cloud to operate.
+
+Open-source the brakes.
+Charge for the autopilot, memory, governance, and fleet control.
 
 ## Data Moat Principle
 
