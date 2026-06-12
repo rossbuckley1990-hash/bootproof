@@ -2151,6 +2151,8 @@ setInterval(() => {}, 1000);
       "--provider",
       "local",
       "--unsafe-local",
+      "--command",
+      "node server.js",
       "--port",
       String(inferredPort),
       "--timeout",
@@ -2167,7 +2169,7 @@ setInterval(() => {}, 1000);
   assert.ok(att.result.observedHealthCandidates.includes(`https://localhost:${advertisedPort}/`));
   assert.match(att.result.failureEvidence, new RegExp(`inferredHealthUrl: http://localhost:${inferredPort}/`));
   assert.match(att.result.failureEvidence, new RegExp(`advertisedHealthUrl: https://localhost:${advertisedPort}/`));
-  assert.match(att.result.failureEvidence, /selectedCommand: npm run start/);
+  assert.match(att.result.failureEvidence, /selectedCommand: node server\.js/);
 });
 
 test("honesty: failed boot writes failed attestation with classified evidence", () => {
