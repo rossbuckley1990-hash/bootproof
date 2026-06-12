@@ -58,6 +58,42 @@ They get a signed verdict and a deterministic exit code.
 
 The same engine powers both.
 
+## Verified Repairs
+
+For the small deterministic repair registry:
+
+```bash
+bootproof fix .
+```
+
+BootProof reuses a signature-valid failure only at the exact clean Git commit; otherwise it reproduces the failure in a temporary copy. It applies one known remediation there and reruns full verification. It emits a signed `bootproof/repair-receipt/v1` only when the before run failed and the after run observed successful HTTP health.
+
+The original working tree is not edited. File changes are written as a reviewable patch under `.bootproof/`; the human decides whether to apply it.
+
+Machine mode is:
+
+```bash
+bootproof fix . --json
+```
+
+It emits one `bootproof/repair-result/v1` object and exits `0` only when a verified receipt exists.
+
+Public GitHub, GitLab, Bitbucket, and Codeberg repositories use the same retained managed workspace and execution gate as `up`:
+
+```bash
+bootproof fix https://github.com/user/repo --provider local --unsafe-local
+```
+
+`fix` never applies its patch. To explicitly apply a signature-valid file repair to a local working tree:
+
+```bash
+bootproof apply-repair .
+```
+
+Application checks the receipt signature, allowed file scope, signed content hashes, and exact current preimages before writing. Environment-only and plan-only receipts have no file change to apply.
+
+See [docs/REPAIR_RECEIPT.md](docs/REPAIR_RECEIPT.md).
+
 ## What It Tells Humans
 
 A failed run is still useful:
@@ -70,7 +106,7 @@ Safe next step: Run corepack enable && corepack prepare pnpm@10.24.0 --activate,
 Evidence: .bootproof/attestation.json
 ```
 
-BootProof distinguishes diagnosis from proof. Detecting Python, Flask, React, Celery, Go, or a monorepo does not mean BootProof claims full orchestration support for that stack.
+BootProof distinguishes diagnosis from proof. It can execute a narrow explicit Go main package, Rails `bin/rails` entrypoint, or Make run target, but detection alone never implies general support for every Go, Ruby, Make, Python, or monorepo architecture.
 
 ## What It Gives Machines
 
@@ -122,13 +158,13 @@ npx bootproof explain .bootproof/attestation.json
 npx bootproof verify .bootproof/attestation.json
 ```
 
-Run against a public GitHub repository:
+Run against a public HTTPS Git repository on GitHub, GitLab, Bitbucket, or Codeberg:
 
 ```bash
 npx bootproof up https://github.com/user/repo
 ```
 
-BootProof clones credential-free HTTPS GitHub URLs into `.bootproof/remotes/` and retains the clone so its evidence and any generated files continue to exist. It inspects the clone but refuses to execute remote code until host execution is explicitly acknowledged:
+BootProof clones credential-free HTTPS URLs from those named providers into `.bootproof/remotes/` and retains the clone so its evidence and any generated files continue to exist. It inspects the clone but refuses to execute remote code until host execution is explicitly acknowledged:
 
 ```bash
 npx bootproof up https://github.com/user/repo --provider local --unsafe-local
@@ -143,6 +179,7 @@ Contributors working from this source repository can use `npm ci`, `npm run buil
 BootProof is constrained on purpose:
 
 - no verified boot without an observed health signal
+- no Docker-to-host execution fallback; host commands require `--provider local --unsafe-local`
 - no success rendering for skipped steps
 - no invented secrets
 - no writes to `.env`, `.env.local`, `.env.development`, or `.env.production`
@@ -160,20 +197,35 @@ See [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md).
 BootProof currently provides:
 
 - Node package-manager and start-command inference
+- conservative Go main-package, Rails `bin/rails`, and explicit Make run-target execution
 - Python/Flask and Go/Node hybrid detection
 - monorepo candidate ranking
 - Docker service dependency detection and scaffolding
+- repository Compose execution when a web service builds the checked-out source and publishes an HTTP port
 - localhost health-candidate discovery from repository evidence and app logs
 - classified failures
 - signed Ed25519 attestations
 - strict JSON and fail-closed CI output
 - redacted registry-entry export
+- deterministic sandboxed repairs with signed before/after receipts for the registered v0.3 classes
+- explicit repair application with signature, scope, and stale-preimage checks
+- marker-and-evidence-backed migration repair for Prisma, Django, Rails, Knex, and Drizzle
 
 Detection is broader than orchestration. For example:
 
 - Superset-like Python/Flask/React/Celery repos are detected, then honestly refused with `python_flask_setup_required`.
 - Grafana-like Go/Node hybrids are detected without pretending a frontend watcher is the whole application.
 - Parallel monorepo root commands are refused until a specific workspace is selected.
+- Image-only or infrastructure-only Compose services are not accepted as proof of the checked-out source.
+
+The supported repository entrypoints are deliberately narrow:
+
+- Go: exactly one `main.go` or `cmd/*/main.go`
+- Ruby: `Gemfile` plus `bin/rails`
+- Make: an explicit `run`, `serve`, `server`, `start`, or `dev` target
+- Compose: a service with a repository-local build context and a published HTTP port
+
+Each path still requires an observed HTTP response. A successful Compose `up -d`, process spawn, or command exit is not a green result by itself.
 
 ## Files Written
 
@@ -182,11 +234,15 @@ Depending on the observed plan, BootProof may write:
 ```text
 .bootproof/attestation.json
 .bootproof/registry-entry.json
+.bootproof/registry/<timestamp>-<hash>.json
+.bootproof/runtime/
 docker-compose.bootproof.yml
 .env.bootproof.example
 ```
 
-`registry-entry.json` is written only by `bootproof attest export`.
+Registry artifacts are written only by explicit `bootproof registry export` or
+`bootproof attest export` commands. Federated public-candidate receipts require
+`bootproof registry export . --federated`.
 
 Docker and env guidance files are listed in proof only when BootProof actually generated them.
 
@@ -237,9 +293,11 @@ See [docs/REAL_REPO_EVIDENCE.md](docs/REAL_REPO_EVIDENCE.md).
 
 ## CI And Registry
 
-BootProof does not upload attestations. A project can deliberately commit `.bootproof/` or export a redacted registry entry.
+BootProof does not upload attestations. A project can deliberately export a redacted local
+registry entry or a federated public-candidate receipt and review it before committing it.
 
-The Git-native registry and OIDC-backed trust model are designs in progress, not deployed services.
+The public crawler, private Cloud upload, and OIDC-backed trust model are future integrations,
+not deployed services in this repository.
 
 - [docs/CI_ACTION.md](docs/CI_ACTION.md)
 - [docs/REGISTRY.md](docs/REGISTRY.md)
@@ -274,9 +332,10 @@ BootProof is early alpha.
 
 Near-term work includes:
 
-- additional remote source providers beyond public HTTPS GitHub repositories
+- additional remote source providers beyond GitHub, GitLab, Bitbucket, and Codeberg
+- broader deterministic remediation coverage
 - stronger multi-service orchestration
-- broader Python and Go execution support
+- broader Python, Go, Ruby, and Make execution support
 - CI/OIDC-backed signing
 - proof-linked badges and a verified public index
 

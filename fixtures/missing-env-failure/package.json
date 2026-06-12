@@ -1,0 +1,7 @@
+{
+  "name": "missing-env-failure",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  }
+}

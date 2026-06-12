@@ -69,7 +69,11 @@ const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 const realGit = process.env.BOOTPROOF_REAL_GIT;
-if (args[0] === "clone") {
+let commandIndex = 0;
+while (args[commandIndex] === "-c" && args[commandIndex + 1]) {
+  commandIndex += 2;
+}
+if (args[commandIndex] === "clone") {
   const remote = args.at(-2);
   const destination = args.at(-1);
   fs.cpSync(process.env.BOOTPROOF_FAKE_REMOTE, destination, { recursive: true });
@@ -159,6 +163,8 @@ try {
 
   const help = run(binary, ["--help"], { cwd: installDir });
   assert.match(help.stdout, /Human diagnosis\. Machine proof\. One engine\./);
+  assert.match(help.stdout, /bootproof fix <path\|git-url>/);
+  assert.match(help.stdout, /bootproof apply-repair <path>/);
 
   const refusalTarget = copyFixture("early-refusal-attestation");
   const refusal = run(binary, ["up", refusalTarget, "--ci", "--json"], {
@@ -174,6 +180,17 @@ try {
   assert.match(run(binary, ["verify", refusalAttestation], { cwd: installDir }).stdout, /signature valid/);
   assert.match(run(binary, ["explain", refusalAttestation], { cwd: installDir }).stdout, /Failure class: not_an_application/);
   assertProtectedEnvFilesUntouched(refusalTarget);
+
+  const repairTarget = copyFixture("library-only", "repair-library");
+  const repair = run(binary, ["fix", repairTarget, "--json"], {
+    cwd: installDir,
+    expectedStatus: 1,
+  });
+  const repairResult = JSON.parse(repair.stdout);
+  assert.equal(repairResult.schema, "bootproof/repair-result/v1");
+  assert.equal(repairResult.repaired, false);
+  assert.equal(repairResult.failureClass, "not_an_application");
+  assert.equal(repairResult.receiptPath, null);
 
   const helloTarget = copyFixture("hello-app");
   const port = await unusedPort();
@@ -215,6 +232,7 @@ try {
   console.log(`packed: ${packInfo.filename} (${packInfo.size} bytes, ${fileNames.length} files)`);
   console.log("help: ok");
   console.log("early refusal: exit 1, signed not_an_application attestation verified and explained");
+  console.log("repair refusal: exit 1, no unverified repair receipt emitted");
   console.log(`healthy fixture: exit 0, HTTP health verified on port ${port}`);
   console.log("remote URL: cloned, exit 1 before execution, signed safety refusal verified");
   console.log("protected env files: untouched");

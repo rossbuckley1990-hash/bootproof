@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/repair-receipt-v1.schema.json",
+  "title": "BootProof Repair Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repairId",
+    "createdAt",
+    "bootproofVersion",
+    "beforeFailureClass",
+    "beforeEvidenceHash",
+    "proposedAction",
+    "actionType",
+    "mutationScope",
+    "riskLevel",
+    "userApprovalRequired",
+    "applyResult",
+    "progressed",
+    "verified",
+    "explanation",
+    "redactionsApplied"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/repair-receipt/v1" },
+    "repairId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "bootproofVersion": { "type": "string", "minLength": 1 },
+    "beforeFailureClass": { "type": "string", "minLength": 1 },
+    "beforeEvidenceHash": { "$ref": "#/$defs/hash" },
+    "proposedAction": { "$ref": "repair-action-v1.schema.json" },
+    "actionType": { "enum": ["command", "patch", "instruction"] },
+    "mutationScope": { "enum": ["repo", "host", "service", "database", "none"] },
+    "riskLevel": { "enum": ["low", "medium", "high", "blocked"] },
+    "userApprovalRequired": { "type": "boolean" },
+    "approvedAt": { "type": "string", "format": "date-time" },
+    "appliedAt": { "type": "string", "format": "date-time" },
+    "applyResult": { "$ref": "#/$defs/applyResult" },
+    "afterFailureClass": { "type": "string", "minLength": 1 },
+    "progressed": { "type": "boolean" },
+    "verified": { "type": "boolean" },
+    "explanation": { "type": "string", "minLength": 1 },
+    "redactionsApplied": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "tool": { "type": "string" },
+    "repo": { "$ref": "#/$defs/repo" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "failure": { "$ref": "#/$defs/failure" },
+    "repair": { "$ref": "#/$defs/legacyRepair" },
+    "verification": { "$ref": "#/$defs/verification" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "signer": {
+      "anyOf": [
+        { "$ref": "#/$defs/signer" },
+        { "type": "null" }
+      ]
+    },
+    "signature": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "applyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "exitCode", "filesChanged", "evidence"],
+      "properties": {
+        "status": { "enum": ["not_applied", "applied", "failed"] },
+        "exitCode": { "type": ["integer", "null"] },
+        "filesChanged": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "evidence": { "type": ["string", "null"] }
+      }
+    },
+    "repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote", "commit", "dirty"],
+      "properties": {
+        "remote": { "type": ["string", "null"] },
+        "commit": { "type": ["string", "null"] },
+        "dirty": { "type": ["boolean", "null"] }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch", "node"],
+      "properties": {
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "node": { "type": "string" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "beforeAttestationSha256"],
+      "properties": {
+        "class": { "type": "string" },
+        "beforeAttestationSha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "legacyRepair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "description",
+        "diff",
+        "filesChanged",
+        "fileChanges",
+        "preconditions",
+        "planDelta",
+        "envDelta"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["repo-diff", "plan-step", "environment"] },
+        "description": { "type": "string" },
+        "diff": { "type": ["string", "null"] },
+        "filesChanged": { "type": "array", "items": { "type": "string" } },
+        "fileChanges": { "type": "array", "items": { "$ref": "#/$defs/fileChange" } },
+        "preconditions": { "type": "array", "items": { "$ref": "#/$defs/precondition" } },
+        "planDelta": { "type": ["string", "null"] },
+        "envDelta": { "type": ["string", "null"] }
+      }
+    },
+    "fileChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "beforeSha256", "afterSha256", "beforeContent", "afterContent"],
+      "properties": {
+        "path": { "type": "string" },
+        "beforeSha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/hash" },
+            { "type": "null" }
+          ]
+        },
+        "afterSha256": { "$ref": "#/$defs/hash" },
+        "beforeContent": { "type": ["string", "null"] },
+        "afterContent": { "type": "string" }
+      }
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after"],
+      "properties": {
+        "before": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["booted", "failureClass", "attestationSha256"],
+          "properties": {
+            "booted": { "const": false },
+            "failureClass": { "type": "string" },
+            "attestationSha256": { "$ref": "#/$defs/hash" }
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["booted", "healthObservation", "attestationSha256"],
+          "properties": {
+            "booted": { "const": true },
+            "healthObservation": { "type": "string" },
+            "attestationSha256": { "$ref": "#/$defs/hash" }
+          }
+        }
+      }
+    },
+    "signer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publicKey", "algorithm"],
+      "properties": {
+        "publicKey": { "type": "string" },
+        "algorithm": { "const": "ed25519" }
+      }
+    }
+  }
+}

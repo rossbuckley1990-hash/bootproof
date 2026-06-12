@@ -1,0 +1,8 @@
+services:
+  web:
+    build:
+      context: .
+    ports:
+      - "31998:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/ready"]

@@ -71,4 +71,12 @@ BootProof publishes compiled JavaScript, not TypeScript source. `dist/` is requi
    npx bootproof up https://github.com/user/repository
    ```
 
-Remote URL mode accepts credential-free public HTTPS GitHub repositories. It retains clones under `.bootproof/remotes/` and requires `--provider local --unsafe-local` before executing remote repository code.
+Remote URL mode accepts credential-free public HTTPS repositories from GitHub, GitLab, Bitbucket, and Codeberg. It retains clones under `.bootproof/remotes/` and requires `--provider local --unsafe-local` before executing remote repository code.
+
+Remote repair follows the same rule:
+
+```bash
+npx bootproof fix https://github.com/user/repository --provider local --unsafe-local
+```
+
+`fix` never mutates the source tree. `apply-repair` is the separate explicit application step and refuses invalid signatures, disallowed paths, and stale preimages.

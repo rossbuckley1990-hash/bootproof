@@ -1,6 +1,6 @@
 {
   "name": "bootproof",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "The honest run button for repos. Boots unfamiliar code when it safely can, tells the truth when it cannot, and signs proof of what happened.",
   "license": "Apache-2.0",
   "type": "module",
@@ -48,5 +48,8 @@
   "bugs": {
     "url": "https://github.com/rossbuckley1990-hash/bootproof/issues"
   },
-  "homepage": "https://github.com/rossbuckley1990-hash/bootproof#readme"
+  "homepage": "https://github.com/rossbuckley1990-hash/bootproof#readme",
+  "dependencies": {
+    "yaml": "^2.9.0"
+  }
 }
