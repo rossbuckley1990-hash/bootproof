@@ -43,6 +43,26 @@ export function diagnoseFailure(
         "BootProof cannot execute the repository with a Ruby version that is not installed.",
         "Install the repository-required Ruby version with rbenv, then rerun BootProof.",
       );
+    case "missing_php_runtime":
+      return preciseFailure(
+        "BootProof cannot execute the repository without a supported PHP runtime.",
+        "Install a PHP version supported by the repository, then rerun BootProof.",
+      );
+    case "missing_composer":
+      return preciseFailure(
+        "BootProof cannot install the repository's PHP dependencies without Composer.",
+        "Install Composer using its documented installation method, then rerun BootProof.",
+      );
+    case "unsupported_php_version_for_composer_lock":
+      return preciseFailure(
+        "Composer refused the locked dependency set because the available PHP version is unsupported.",
+        "Use a PHP version compatible with composer.lock, then rerun composer install.",
+      );
+    case "missing_php_vendor_autoload":
+      return preciseFailure(
+        "The PHP dependency autoloader is absent, so the application cannot start reliably.",
+        "Resolve any PHP or Composer version issue first, then run composer install to generate vendor/autoload.php.",
+      );
     case "missing_build_tool":
       return preciseFailure(
         "The dependency installation cannot complete without the required native build tool.",
