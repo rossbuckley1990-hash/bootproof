@@ -678,10 +678,12 @@ test("expanded deterministic repair registry maps exact failures with safe scope
   assert.equal(idnInstall.action.command.display, "brew install libidn pkg-config");
   assert.equal(idnInstall.action.mutationScope, "host");
   assert.equal(idnInstall.action.riskLevel, "medium");
-  assert.equal(
-    idnInstall.followUpActions[0].command.display,
-    `bundle config build.idn-ruby --with-idn-dir=${path.join(homebrew, "opt/libidn")}`,
-  );
+  assert.equal(idnInstall.followUpActions[0].command.executable, "bundle");
+  assert.deepEqual(idnInstall.followUpActions[0].command.args, [
+    "config",
+    "build.idn-ruby",
+    `--with-idn-dir=${path.join(homebrew, "opt/libidn")}`,
+  ]);
   candidates.push(idnInstall);
 
   fs.mkdirSync(path.join(homebrew, "opt/libidn"));
