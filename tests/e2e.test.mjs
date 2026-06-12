@@ -672,6 +672,34 @@ test("plan-agent --json emits the same valid plan written to disk", () => {
   assert.doesNotMatch(out, /"booted":true|"verified":true|"success":true/i);
 });
 
+test("plan-agent emits an Airbyte runbook plan and executes no Airbyte command", () => {
+  const repo = freshCopy("airbyte");
+  const { out, code } = run(["plan-agent", repo]);
+  assert.equal(code, 0, out);
+  assert.match(out, /airbyte_abctl_managed/);
+  assert.match(out, /Command: abctl local install --port 8001/);
+  assert.match(out, /Risk: high/);
+  assert.match(out, /Mutation scope: kubernetes_cluster/);
+  assert.match(out, /Secret-sensitive: yes; command output must not be saved/);
+  assert.equal(fs.existsSync(path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE")), false);
+
+  const plan = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "agent-plan.json"), "utf8"));
+  assert.ok(plan.classifications.includes("airbyte_abctl_managed"));
+  assert.ok(plan.classifications.includes("external_orchestrator_required"));
+  assert.ok(plan.verificationSteps.includes("curl -i http://localhost:8001/api/v1/health"));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.command === "abctl local install --port 8001" &&
+    candidate.riskLevel === "high" &&
+    candidate.mutationScope === "kubernetes_cluster" &&
+    candidate.requiresApproval === true
+  ));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.command === "abctl local credentials" &&
+    candidate.secretSensitive === true &&
+    candidate.mutationScope === "credentials"
+  ));
+});
+
 test("machine interface: --ci human output has no ANSI and refuses unsafe local execution", () => {
   const repo = freshCopy("hello-app");
   const { out, code } = run(["up", repo, "--provider", "local", "--ci"], true);

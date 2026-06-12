@@ -20,8 +20,18 @@ export type AgentSafetyClassification =
   | "host_tool_install_required"
   | "kubernetes_cluster_creation_required"
   | "heavy_orchestration_required"
+  | "external_orchestrator_required"
   | "credential_required"
+  | "auth_required"
   | "external_health_verification_required";
+
+export type AgentRepositoryClassification =
+  | "airbyte_abctl_managed"
+  | "large_orchestration_repo"
+  | "external_orchestrator_required"
+  | "kind_kubernetes_backed"
+  | "helm_deployed"
+  | "auth_required";
 
 export interface AgentPlanAction {
   classification: AgentSafetyClassification;
@@ -36,11 +46,13 @@ export interface AgentPlanAction {
   blockedReason: string;
   verificationStep: string;
   stopCondition: string;
+  secretSensitive: boolean;
 }
 
 export interface AgentPlan {
   schema: "bootproof/agent-plan/v1";
   mode: "agent-plan";
+  classifications: AgentRepositoryClassification[];
   currentFailureClass: string;
   observedEvidence: string[];
   suspectedStack: string[];
@@ -65,6 +77,7 @@ export interface AgentPlanValidation {
 const PLAN_KEYS = new Set([
   "schema",
   "mode",
+  "classifications",
   "currentFailureClass",
   "observedEvidence",
   "suspectedStack",
@@ -88,13 +101,24 @@ const ACTION_KEYS = new Set([
   "blockedReason",
   "verificationStep",
   "stopCondition",
+  "secretSensitive",
 ]);
 const CLASSIFICATIONS = new Set<AgentSafetyClassification>([
   "host_tool_install_required",
   "kubernetes_cluster_creation_required",
   "heavy_orchestration_required",
+  "external_orchestrator_required",
   "credential_required",
+  "auth_required",
   "external_health_verification_required",
+]);
+const REPOSITORY_CLASSIFICATIONS = new Set<AgentRepositoryClassification>([
+  "airbyte_abctl_managed",
+  "large_orchestration_repo",
+  "external_orchestrator_required",
+  "kind_kubernetes_backed",
+  "helm_deployed",
+  "auth_required",
 ]);
 const ACTION_TYPES = new Set(["command", "instruction"]);
 const RISK_LEVELS = new Set<RepairRiskLevel>(ACTION_RISK_LEVELS);
@@ -126,6 +150,93 @@ function hasDuplicates(values: string[]): boolean {
 
 function safeEvidence(value: string): string {
   return redactText(value).text;
+}
+
+function readSmallText(file: string): string {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > FILE_SIZE_LIMIT) return "";
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function gitRemoteUrls(repo: string): string[] {
+  const dotGit = path.join(repo, ".git");
+  let configPath = path.join(dotGit, "config");
+  try {
+    if (fs.statSync(dotGit).isFile()) {
+      const pointer = fs.readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)$/im)?.[1]?.trim();
+      if (!pointer) return [];
+      const gitDirectory = path.resolve(repo, pointer);
+      configPath = path.join(gitDirectory, "config");
+      if (!fs.existsSync(configPath)) {
+        const commonDirectory = readSmallText(path.join(gitDirectory, "commondir")).trim();
+        if (commonDirectory) configPath = path.resolve(gitDirectory, commonDirectory, "config");
+      }
+    }
+  } catch {
+    return [];
+  }
+  const config = readSmallText(configPath);
+  return [...config.matchAll(/^\s*url\s*=\s*(.+?)\s*$/gim)].map(match => match[1]);
+}
+
+function detectAirbyteRepository(
+  repo: string,
+  fileTexts: { relativePath: string; text: string }[],
+): { detected: boolean; evidence: string[] } {
+  const readme = readSmallText(path.join(repo, "README.md")) ||
+    readSmallText(path.join(repo, "README"));
+  const settings = readSmallText(path.join(repo, "settings.gradle")) ||
+    readSmallText(path.join(repo, "settings.gradle.kts"));
+  const remotes = gitRemoteUrls(repo);
+  const requiredDirectories = [
+    "airbyte-cdk",
+    "airbyte-integrations",
+    "docker-images",
+    "docusaurus",
+  ];
+  const directoryMatches = requiredDirectories.filter(directory => {
+    try {
+      return fs.statSync(path.join(repo, directory)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  const remoteMatch = remotes.some(remote => /(?:github\.com[:/])airbytehq\/airbyte(?:\.git)?(?:$|[?#])/i.test(remote));
+  const rootNameMatch = path.basename(repo).toLowerCase() === "airbyte";
+  const readmeMatch = /\bAirbyte Open Source\b/i.test(readme);
+  const settingsMatch = /rootProject\.name\s*=\s*['"]airbyte['"]/i.test(settings);
+  const docsMatch = fileTexts.some(file =>
+    (file.relativePath.startsWith("docs/") || file.relativePath.includes("/docs/")) &&
+    /\babctl\b/i.test(file.text)
+  );
+  const detected = remoteMatch || (
+    settingsMatch &&
+    readmeMatch &&
+    directoryMatches.length >= 2
+  ) || (
+    readmeMatch &&
+    docsMatch &&
+    directoryMatches.length >= 3
+  );
+  if (!detected) return { detected: false, evidence: [] };
+
+  return {
+    detected: true,
+    evidence: [
+      ...(remoteMatch ? ["Git remote identifies airbytehq/airbyte."] : []),
+      ...(rootNameMatch ? ["Repository root name is airbyte."] : []),
+      ...(readmeMatch ? ["Root README identifies Airbyte Open Source."] : []),
+      ...(docsMatch ? ["Repository documentation references abctl."] : []),
+      ...(settingsMatch ? ["Gradle settings declare rootProject.name = 'airbyte'."] : []),
+      ...(directoryMatches.length
+        ? [`Airbyte repository directories detected: ${directoryMatches.join(", ")}.`]
+        : []),
+    ],
+  };
 }
 
 function isInspectionFile(relativePath: string): boolean {
@@ -281,10 +392,11 @@ function documentedKindCommands(text: string): RepairCommand[] {
 
 function action(input: Omit<
   AgentPlanAction,
-  "command" | "requiresApproval" | "approvalPrompt" | "blockedReason"
+  "command" | "requiresApproval" | "approvalPrompt" | "blockedReason" | "secretSensitive"
 > & {
   command?: RepairCommand | null;
   blockedReason?: string;
+  secretSensitive?: boolean;
 }): AgentPlanAction {
   const assessment = assessActionRisk({
     actionType: input.actionType,
@@ -304,6 +416,7 @@ function action(input: Omit<
     approvalPrompt: assessment.approvalPrompt,
     blockedReason: assessment.blockedReason,
     verificationStep: assessment.verificationStep,
+    secretSensitive: input.secretSensitive ?? false,
   };
 }
 
@@ -311,7 +424,7 @@ function parseAgentCommand(display: string): { command: RepairCommand | null; er
   const tokens = display.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return { command: null, errors: ["command must not be empty"] };
   const [executable, ...args] = tokens;
-  if (!["abctl", "kind", "bootproof"].includes(executable)) {
+  if (!["abctl", "kind", "bootproof", "brew"].includes(executable)) {
     return { command: null, errors: ["command is not in the deterministic agent-plan registry"] };
   }
   const command = createRepairCommand(executable, args);
@@ -331,8 +444,10 @@ function genericFailureClass(input: {
   heavyOrchestration: boolean;
   credentialRequired: boolean;
   externalHealthAvailable: boolean;
+  airbyteManaged: boolean;
 }): string {
   if (input.priorFailureClass) return input.priorFailureClass;
+  if (input.airbyteManaged) return "airbyte_abctl_managed";
   if (input.missingTools.length) return "host_tool_install_required";
   if (input.hasKindCommand) return "kubernetes_cluster_creation_required";
   if (input.heavyOrchestration) return "heavy_orchestration_required";
@@ -350,6 +465,16 @@ export function validateAgentPlan(value: unknown): AgentPlanValidation {
   for (const key of Object.keys(value)) if (!PLAN_KEYS.has(key)) errors.push(`unsupported field: ${key}`);
   if (plan.schema !== "bootproof/agent-plan/v1") errors.push("invalid agent plan schema");
   if (plan.mode !== "agent-plan") errors.push("invalid agent plan mode");
+  if (!Array.isArray(plan.classifications)) {
+    errors.push("classifications must be an array");
+  } else {
+    if (hasDuplicates(plan.classifications)) errors.push("classifications must not contain duplicates");
+    for (const classification of plan.classifications) {
+      if (!REPOSITORY_CLASSIFICATIONS.has(classification)) {
+        errors.push(`invalid repository classification: ${classification}`);
+      }
+    }
+  }
   if (typeof plan.currentFailureClass !== "string") errors.push("currentFailureClass must be a string");
   for (const field of ["observedEvidence", "suspectedStack", "missingTools", "verificationSteps", "stopConditions"] as const) {
     if (!isStringArray(plan[field])) {
@@ -386,6 +511,9 @@ export function validateAgentPlan(value: unknown): AgentPlanValidation {
       }
       if (typeof item.blockedReason !== "string") {
         errors.push(`candidateNextActions[${index}].blockedReason must be a string`);
+      }
+      if (typeof item.secretSensitive !== "boolean") {
+        errors.push(`candidateNextActions[${index}].secretSensitive must be boolean`);
       }
       if (!isStringArray(item.evidence)) {
         errors.push(`candidateNextActions[${index}].evidence must be a string array`);
@@ -432,6 +560,9 @@ export function validateAgentPlan(value: unknown): AgentPlanValidation {
       if (item.actionType === "instruction" && item.command !== "") {
         errors.push(`candidateNextActions[${index}] instruction actions must use an empty command`);
       }
+      if (item.mutationScope === "credentials" && item.secretSensitive !== true) {
+        errors.push(`candidateNextActions[${index}] credential actions must be secret-sensitive`);
+      }
     }
   }
   return { valid: errors.length === 0, errors: [...new Set(errors)] };
@@ -447,26 +578,32 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
   }));
   const combinedText = fileTexts.map(file => file.text).join("\n");
   const prior = loadPriorAttestation(repo);
+  const airbyte = detectAirbyteRepository(repo, fileTexts);
 
   const gradleFiles = inspectionFiles.filter(file => /(?:^|\/)(?:build|settings)\.gradle(?:\.kts)?$|(?:^|\/)gradle\.properties$|(?:^|\/)gradlew(?:\.bat)?$/i.test(file));
   const dockerFiles = inspectionFiles.filter(file => /(?:^|\/)(?:Dockerfile|(?:docker-)?compose)/i.test(file));
   const kubernetesFiles = inspectionFiles.filter(file => /(?:^|\/)(?:k8s|kubernetes|helm)(?:\/|$)|(?:^|\/)Chart\.yaml$/i.test(file));
   const hasGradle = gradleFiles.length > 0;
-  const hasJava = hasGradle || inspectionFiles.includes("pom.xml") || /\bJava\b|\bJDK\b/i.test(combinedText);
-  const hasAbctl = /\babctl\b/i.test(combinedText);
-  const hasKind = /\bkind\s+(?:create|delete|get|load)\b|\bkind cluster\b/i.test(combinedText);
-  const hasHelm = kubernetesFiles.some(file => /helm|Chart\.yaml/i.test(file)) || /\bhelm\s+(?:install|upgrade|dependency|repo)\b/i.test(combinedText);
-  const hasKubernetes = kubernetesFiles.length > 0 || /\bkubernetes\b|\bkubectl\b/i.test(combinedText);
-  const credentialRequired = /\b(?:credentials? required|login required|authentication required|username and password|initial credentials?)\b/i.test(combinedText);
+  const hasJava = airbyte.detected || hasGradle || inspectionFiles.includes("pom.xml") || /\bJava\b|\bJDK\b/i.test(combinedText);
+  const hasAbctl = airbyte.detected || /\babctl\b/i.test(combinedText);
+  const hasKind = airbyte.detected || /\bkind\s+(?:create|delete|get|load)\b|\bkind cluster\b/i.test(combinedText);
+  const hasHelm = airbyte.detected || kubernetesFiles.some(file => /helm|Chart\.yaml/i.test(file)) || /\bhelm\s+(?:install|upgrade|dependency|repo)\b/i.test(combinedText);
+  const hasKubernetes = airbyte.detected || kubernetesFiles.length > 0 || /\bkubernetes\b|\bkubectl\b/i.test(combinedText);
+  const credentialRequired = airbyte.detected || /\b(?:credentials? required|login required|authentication required|username and password|initial credentials?)\b/i.test(combinedText);
   const abctlCommands = documentedAbctlCommands(combinedText);
   const kindCommands = documentedKindCommands(combinedText);
   const priorHealthUrls = prior.attestation?.verificationMode === "external-health" && prior.attestation.externalHealthUrl
     ? documentedHealthUrls(prior.attestation.externalHealthUrl)
     : [];
-  const healthUrls = uniqueSorted([...documentedHealthUrls(combinedText), ...priorHealthUrls])
+  const healthUrls = uniqueSorted([
+    ...documentedHealthUrls(combinedText),
+    ...priorHealthUrls,
+    ...(airbyte.detected ? ["http://localhost:8001/api/v1/health"] : []),
+  ])
     .sort((a, b) => Number(!/health/i.test(a)) - Number(!/health/i.test(b)) || a.localeCompare(b));
 
   const relevantTools = [
+    ...(airbyte.detected ? ["docker"] : []),
     ...(hasJava ? ["java"] : []),
     ...(hasGradle && !inspectionFiles.some(file => /(?:^|\/)gradlew(?:\.bat)?$/i.test(file)) ? ["gradle"] : []),
     ...(hasAbctl ? ["abctl"] : []),
@@ -477,6 +614,9 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
   const missingTools = uniqueSorted(relevantTools.filter(tool => !isToolAvailable(tool, options)));
   const suspectedStack = uniqueSorted([
     ...inference.stack,
+    ...(airbyte.detected
+      ? ["airbyte", "docker", "nginx-ingress", "temporal", "postgres", "local-auth"]
+      : []),
     ...(hasJava ? ["java"] : []),
     ...(hasGradle ? ["gradle"] : []),
     ...(dockerFiles.length ? ["docker"] : []),
@@ -496,9 +636,20 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     priorFailureClass !== "orchestration_not_supported",
   );
   const canBootProofVerifyExternally = !canBootProofOrchestrateDirectly && healthUrls.length > 0;
+  const classifications: AgentRepositoryClassification[] = airbyte.detected
+    ? [
+        "airbyte_abctl_managed",
+        "large_orchestration_repo",
+        "external_orchestrator_required",
+        "kind_kubernetes_backed",
+        "helm_deployed",
+        "auth_required",
+      ]
+    : [];
 
   const observedEvidence = [
     ...prior.evidence,
+    ...airbyte.evidence,
     ...inspectionFiles.map(file => `Inspected ${file}.`),
     ...(inference.stack.length ? [`Repository inference detected: ${inference.stack.join(", ")}.`] : []),
     ...(gradleFiles.length ? [`Gradle traits: ${gradleFiles.join(", ")}.`] : []),
@@ -511,20 +662,67 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
   ].map(safeEvidence);
 
   const candidateNextActions: AgentPlanAction[] = [];
-  for (const tool of missingTools) {
-    candidateNextActions.push(action({
-      classification: "host_tool_install_required",
-      actionType: "instruction",
-      reason: `${tool} is required by repository or runbook evidence but is not available on PATH. Install a repository-supported version manually; BootProof does not choose an installer or version without evidence.`,
-      evidence: [`Missing tool: ${tool}.`],
-      riskLevel: "medium",
-      mutationScope: "host_tool_install",
-      verificationStep: `${tool} --version`,
-      stopCondition: `Stop if the repository does not document a trusted ${tool} version or installation source.`,
-    }));
+  if (airbyte.detected) {
+    const airbyteInstallCommands: Partial<Record<string, RepairCommand>> = {
+      java: createRepairCommand("brew", ["install", "openjdk"]),
+      kind: createRepairCommand("brew", ["install", "kind"]),
+      helm: createRepairCommand("brew", ["install", "helm"]),
+    };
+    const toolChecks: Record<string, string> = {
+      docker: "docker --version",
+      java: "java -version",
+      abctl: "abctl version",
+      kind: "kind version",
+      helm: "helm version",
+    };
+    for (const tool of missingTools) {
+      const installCommand = airbyteInstallCommands[tool];
+      if (installCommand) {
+        candidateNextActions.push(action({
+          classification: "host_tool_install_required",
+          actionType: "command",
+          command: installCommand,
+          reason: `${tool} is required by the detected Airbyte abctl runbook but is not available on PATH.`,
+          evidence: [`Missing Airbyte runbook tool: ${tool}.`],
+          riskLevel: "high",
+          mutationScope: "host_tool_install",
+          verificationStep: toolChecks[tool],
+          stopCondition: `Stop unless the user explicitly approves installing ${tool} and the Homebrew command is appropriate for this host.`,
+        }));
+      } else {
+        const instruction = tool === "abctl"
+          ? "Install abctl using the current official Airbyte documentation; BootProof does not persist or execute an undocumented installer."
+          : tool === "docker"
+            ? "Install a Docker runtime using the current Airbyte-supported local deployment documentation."
+            : `Install ${tool} using the repository's documented Airbyte development setup.`;
+        candidateNextActions.push(action({
+          classification: "host_tool_install_required",
+          actionType: "instruction",
+          reason: instruction,
+          evidence: [`Missing Airbyte runbook tool: ${tool}.`],
+          riskLevel: "medium",
+          mutationScope: tool === "docker" ? "container_runtime" : "host_tool_install",
+          verificationStep: toolChecks[tool] ?? `${tool} --version`,
+          stopCondition: `Stop until ${tool} is installed from a trusted documented source and its version check succeeds.`,
+        }));
+      }
+    }
+  } else {
+    for (const tool of missingTools) {
+      candidateNextActions.push(action({
+        classification: "host_tool_install_required",
+        actionType: "instruction",
+        reason: `${tool} is required by repository or runbook evidence but is not available on PATH. Install a repository-supported version manually; BootProof does not choose an installer or version without evidence.`,
+        evidence: [`Missing tool: ${tool}.`],
+        riskLevel: "medium",
+        mutationScope: "host_tool_install",
+        verificationStep: `${tool} --version`,
+        stopCondition: `Stop if the repository does not document a trusted ${tool} version or installation source.`,
+      }));
+    }
   }
 
-  for (const command of kindCommands) {
+  for (const command of airbyte.detected ? [] : kindCommands) {
     candidateNextActions.push(action({
       classification: "kubernetes_cluster_creation_required",
       actionType: "command",
@@ -537,7 +735,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       stopCondition: "Stop unless the user explicitly approves local cluster creation; stop on any unexpected cluster or context change.",
     }));
   }
-  if (hasKubernetes && !hasAbctl && kindCommands.length === 0) {
+  if (!airbyte.detected && hasKubernetes && !hasAbctl && kindCommands.length === 0) {
     candidateNextActions.push(action({
       classification: "kubernetes_cluster_creation_required",
       actionType: "instruction",
@@ -550,7 +748,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     }));
   }
 
-  for (const command of abctlCommands) {
+  for (const command of airbyte.detected ? [] : abctlCommands) {
     candidateNextActions.push(action({
       classification: "heavy_orchestration_required",
       actionType: "command",
@@ -563,7 +761,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       stopCondition: "Stop unless the user explicitly approves the one documented orchestration step; stop if deployment status is not healthy.",
     }));
   }
-  if (heavyOrchestration && abctlCommands.length === 0 && kindCommands.length === 0) {
+  if (!airbyte.detected && heavyOrchestration && abctlCommands.length === 0 && kindCommands.length === 0) {
     candidateNextActions.push(action({
       classification: "heavy_orchestration_required",
       actionType: "instruction",
@@ -576,7 +774,31 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     }));
   }
 
-  if (credentialRequired) {
+  if (airbyte.detected) {
+    candidateNextActions.push(action({
+      classification: "external_orchestrator_required",
+      actionType: "command",
+      command: createRepairCommand("abctl", ["local", "install", "--port", "8001"]),
+      reason: "Airbyte local deployment is managed by abctl over Docker, kind, Kubernetes, and Helm; BootProof must not orchestrate it automatically.",
+      evidence: airbyte.evidence,
+      riskLevel: "high",
+      mutationScope: "kubernetes_cluster",
+      verificationStep: "abctl local status",
+      stopCondition: "Stop unless the user explicitly approves this one heavy orchestration action; stop if abctl reports an unhealthy deployment.",
+    }));
+    candidateNextActions.push(action({
+      classification: "auth_required",
+      actionType: "command",
+      command: createRepairCommand("abctl", ["local", "credentials"]),
+      reason: "Airbyte local authentication requires credentials managed by abctl. BootProof must not capture, persist, or print the command output.",
+      evidence: ["Detected Airbyte local authentication boundary."],
+      riskLevel: "high",
+      mutationScope: "credentials",
+      verificationStep: "Use the credentials interactively to confirm authenticated UI access without storing them in the plan or receipts.",
+      stopCondition: "Stop before running this step unless the user explicitly approves credential access; never save its output.",
+      secretSensitive: true,
+    }));
+  } else if (credentialRequired) {
     candidateNextActions.push(action({
       classification: "credential_required",
       actionType: "instruction",
@@ -586,6 +808,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       mutationScope: "credentials",
       verificationStep: "Verify authenticated access manually without storing credentials in the agent plan.",
       stopCondition: "Stop if credentials are unavailable, ambiguous, or would need to be invented or exposed.",
+      secretSensitive: true,
     }));
   }
 
@@ -623,6 +846,19 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
 
   const verificationSteps = uniqueSorted([
     ...candidateNextActions.map(candidate => candidate.verificationStep),
+    ...(airbyte.detected
+      ? [
+          "docker --version",
+          "java -version",
+          "abctl version",
+          "kind version",
+          "helm version",
+          "abctl local status",
+          "curl -i http://localhost:8001/api/v1/health",
+          "curl -i http://localhost:8001/api/v1/instance_configuration",
+          "kubectl --kubeconfig ~/.airbyte/abctl/abctl.kubeconfig get pods -A",
+        ]
+      : []),
     ...(canBootProofOrchestrateDirectly
       ? ["Run bootproof up manually; only its observed signed health evidence can verify the application."]
       : []),
@@ -635,6 +871,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
   const plan: AgentPlan = {
     schema: "bootproof/agent-plan/v1",
     mode: "agent-plan",
+    classifications,
     currentFailureClass: genericFailureClass({
       priorFailureClass,
       missingTools,
@@ -642,6 +879,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       heavyOrchestration,
       credentialRequired,
       externalHealthAvailable: canBootProofVerifyExternally,
+      airbyteManaged: airbyte.detected,
     }),
     observedEvidence: uniqueSorted(observedEvidence),
     suspectedStack,

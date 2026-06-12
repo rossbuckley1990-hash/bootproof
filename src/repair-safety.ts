@@ -364,6 +364,7 @@ function inferredCommandRisk(command: RepairCommand): {
   if (
     executable === "ssh-keygen" ||
     executable === "htpasswd" ||
+    (executable === "abctl" && args[0] === "local" && args[1] === "credentials") ||
     (executable === "openssl" && ["rand", "genpkey", "genrsa", "req"].includes(args[0] ?? ""))
   ) {
     return { riskLevel: "high", mutationScope: "credentials" };
