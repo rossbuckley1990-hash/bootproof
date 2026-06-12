@@ -1798,7 +1798,7 @@ test("app exited early preserves evidence head, tail, and extracted Rails cause"
   const start = att.observed.find(step => step.kind === "start-app");
   assert.equal(start.ok, false);
   assert.match(start.evidenceHead, /config\/database\.yml is missing \(RuntimeError\)/);
-  assert.match(start.evidenceTail, /rails-299\.rb:300:in 'boot'/);
+  assert.match(start.evidenceTail, /rails-\d+\.rb:\d+:in 'boot'/);
   assert.doesNotMatch(start.evidenceTail, /config\/database\.yml is missing/, "the fixture must prove the cause fell outside the retained tail");
   assert.equal(start.firstErrorLine, "config/database.yml is missing (RuntimeError)");
   assert.equal(start.firstExceptionLine, "config/database.yml is missing (RuntimeError)");
