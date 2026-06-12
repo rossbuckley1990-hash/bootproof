@@ -8,7 +8,65 @@ bootproof up . --ci --json
 
 Exit `0` means both `booted` and `healthVerified` are true. Every refusal or failure exits `1`.
 
-## GitHub Actions Example
+## BootProof GitHub Action
+
+The GitHub Action runs the same deterministic CLI interface, writes a Markdown
+job summary, and can post or update a sticky pull request comment:
+
+```yaml
+name: bootproof
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bootproof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: bootproof/action@v1
+        with:
+          install: true
+          diff: true
+          upload-artifact: true
+```
+
+Evidence upload is explicit. `upload-artifact` defaults to `false`; setting it
+to `true` uploads only the action's staged allowlist, including the attestation
+when one was produced. It does not upload the whole `.bootproof/` directory.
+
+The action can explicitly generate redacted registry or federated
+public-candidate artifacts:
+
+```yaml
+      - uses: bootproof/action@v1
+        with:
+          registry-export: true
+          federated-receipt: true
+          upload-artifact: true
+```
+
+Nothing is committed or uploaded to a registry. Cloud upload is not
+implemented in this OSS action, and Cloud inputs are rejected rather than
+silently ignored.
+
+The action never runs `bootproof fix`, `bootproof plan-agent`, agent actions,
+or repair commands. If `agent-plan-summary` is enabled, it only summarises an
+existing `.bootproof/agent-plan.json`.
+
+The action uses its bundled compiled CLI when present. Release tags without a
+bundle install the exact `bootproof` version declared by that action release;
+they never prefer a target repository's local `bootproof` executable. Publish
+that npm version before creating the corresponding action tag.
+
+## Manual GitHub Actions Example
 
 This example records the JSON result and preserves the signed attestation even when verification fails:
 
@@ -74,3 +132,12 @@ local_developer_signed
 They are signed evidence generated on a CI runner, but they are not yet `ci_oidc_signed`. Workload-identity-backed signing remains future work.
 
 BootProof does not silently push commits or upload evidence. The workflow owner chooses whether to retain artifacts or commit `.bootproof/`.
+
+The action records GitHub workflow context as unsigned provenance metadata. It
+does not request an OIDC token, emit `ci_oidc_signed`, or claim SLSA
+provenance.
+
+The action-owned machine artifacts use strict schemas:
+
+- [`schemas/action-verdict-v1.schema.json`](schemas/action-verdict-v1.schema.json)
+- [`schemas/ci-context-v1.schema.json`](schemas/ci-context-v1.schema.json)

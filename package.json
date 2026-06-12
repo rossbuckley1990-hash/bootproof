@@ -20,7 +20,7 @@
     "pack:check": "node scripts/pack-smoke.mjs",
     "release:check": "npm test && npm run build && npm run pack:check && npm publish --dry-run",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/unit.test.mjs tests/e2e.test.mjs",
+    "test": "npm run build && node --test tests/unit.test.mjs tests/action.test.mjs tests/e2e.test.mjs",
     "ci": "npm run lint && npm run test"
   },
   "repository": {
