@@ -15,6 +15,14 @@ import {
   type AgentPlan,
 } from "./agent-plan.js";
 import {
+  agentRunDirectory,
+  appendAgentVerification,
+  createAgentRun,
+  explainAgentRun,
+  latestAgentRunId,
+  readAgentRun,
+} from "./agent-run.js";
+import {
   buildFederatedReceipt,
   buildRegistryEntry,
   currentGitBranch,
@@ -47,11 +55,12 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "verify-url", "plan-agent", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "verify-url", "plan-agent", "explain-run", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
 const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
   analyze: new Set(["workspace", "json", "ci"]),
   plan: new Set(["workspace", "provider", "ci"]),
   "plan-agent": new Set(["json", "ci"]),
+  "explain-run": new Set(["ci"]),
   "apply-repair": new Set(["receipt", "dry-run", "json", "ci"]),
   fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci"]),
   up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command", "external-health"]),
@@ -87,6 +96,7 @@ Usage:
                                                             inspect a repo, show evidence-based inference
   bootproof plan <path|git-url> [--workspace dir]           show the run plan and files that WOULD be generated
   bootproof plan-agent <path|git-url> [--json]              write a risk-classified plan; execute nothing
+  bootproof explain-run <run-id>                            verify and explain a local agent receipt chain
   bootproof up <path|git-url> [options]                     execute the plan, verify localhost, write signed proof
   bootproof verify-url <url> [--timeout ms]                 verify an externally managed HTTP service
   bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
@@ -230,7 +240,7 @@ function printExternalHealthResult(attestation: Attestation, evidencePath: strin
   if (evidencePath) console.log(`Evidence: ${evidencePath}`);
 }
 
-function printAgentPlan(plan: AgentPlan, outputPath: string): void {
+function printAgentPlan(plan: AgentPlan, outputPath: string, runId: string, runPath: string): void {
   console.log(`${BOLD}Agent plan (planning only)${RESET}`);
   if (plan.classifications.length) console.log(`Classifications: ${plan.classifications.join(", ")}`);
   console.log(`Current failure class: ${plan.currentFailureClass || "none established"}`);
@@ -259,6 +269,7 @@ function printAgentPlan(plan: AgentPlan, outputPath: string): void {
     }
   }
   console.log(`Plan: ${outputPath}`);
+  console.log(`Agent run: ${runId} (${runPath})`);
   console.log("No candidate action was executed. Verification remains pending.");
 }
 
@@ -398,6 +409,18 @@ async function main() {
   }
   const targetInput = String(positional[0] ?? ".");
 
+  if (cmd === "explain-run") {
+    if (!positional[0] || positional.length > 1) {
+      bad("explain-run requires exactly one run id");
+      process.exitCode = 1;
+      return;
+    }
+    const run = readAgentRun(process.cwd(), positional[0]);
+    for (const line of explainAgentRun(process.cwd(), positional[0])) console.log(line);
+    process.exitCode = run.chainValid ? 0 : 1;
+    return;
+  }
+
   if (cmd === "verify-url") {
     if (!positional[0] || positional.length > 1) {
       const explanation = "verify-url requires exactly one HTTP or HTTPS URL";
@@ -446,8 +469,13 @@ async function main() {
     const evidencePath = ".bootproof/attestation.json";
     const attestation = await buildExternalHealthAttestation(target, externalHealthUrl as string, timeoutMs);
     writeAttestation(target, attestation);
+    const runId = latestAgentRunId(target);
+    if (runId) appendAgentVerification(target, runId, attestation);
     if (flags.json) console.log(JSON.stringify(externalMachineResult(attestation, evidencePath)));
-    else printExternalHealthResult(attestation, evidencePath);
+    else {
+      printExternalHealthResult(attestation, evidencePath);
+      if (runId) console.log(`Agent run verification: ${runId}`);
+    }
     process.exitCode = attestation.result.healthVerified ? 0 : 1;
     return;
   }
@@ -510,11 +538,16 @@ async function main() {
   if (cmd === "plan-agent") {
     const plan = buildAgentPlan(target);
     const output = writeAgentPlan(target, plan);
+    const summary = createAgentRun(target, plan);
     const displayedOutput = remote
       ? portableRelative(process.cwd(), output)
       : portableRelative(process.cwd(), agentPlanPath(target));
+    const displayedRun = portableRelative(
+      process.cwd(),
+      agentRunDirectory(target, summary.runId),
+    );
     if (flags.json) console.log(JSON.stringify(plan));
-    else printAgentPlan(plan, displayedOutput);
+    else printAgentPlan(plan, displayedOutput, summary.runId, displayedRun);
     return;
   }
 

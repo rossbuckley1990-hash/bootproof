@@ -66,15 +66,24 @@ Inspect repository evidence and write a deterministic, risk-classified plan:
 bootproof plan-agent .
 ```
 
-The command writes `.bootproof/agent-plan.json`. It may describe exact
-candidate commands, mutation scope, risk, required approval, verification
+The command writes `.bootproof/agent-plan.json` and starts a redacted,
+hash-chained local run under `.bootproof/agent-runs/<run-id>/`. It may describe
+exact candidate commands, mutation scope, risk, required approval, verification
 steps, and stop conditions, but it never executes a candidate action and never
 claims the application booted.
+
+Explain and verify a local run from the repository root:
+
+```bash
+bootproof explain-run <run-id>
+```
 
 For Airbyte repositories, planning recognizes the abctl-managed Docker, kind,
 Kubernetes, and Helm runbook. It can describe the approved
 `abctl local install --port 8001` step and external health checks, but it does
 not run abctl, Kubernetes, or credential commands.
+
+See [docs/AGENT_RUN_RECEIPTS.md](docs/AGENT_RUN_RECEIPTS.md).
 
 ## Verified Repairs
 

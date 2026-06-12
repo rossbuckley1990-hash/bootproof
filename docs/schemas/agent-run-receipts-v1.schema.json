@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/agent-run-receipts-v1.schema.json",
+  "title": "BootProof Agent Run Receipts v1",
+  "oneOf": [
+    { "$ref": "#/$defs/initialReceipt" },
+    { "$ref": "#/$defs/planReceipt" },
+    { "$ref": "#/$defs/actionReceipt" },
+    { "$ref": "#/$defs/verificationReceipt" },
+    { "$ref": "#/$defs/finalSummary" }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableHash": {
+      "oneOf": [
+        { "$ref": "#/$defs/hash" },
+        { "type": "null" }
+      ]
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^\\d{8}T\\d{9}Z-[0-9a-f]{12}$"
+    },
+    "redactions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "initialReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "receiptType", "runId", "timestamp", "previousReceiptHash",
+        "receiptHash", "redactionsApplied", "sourceAttestationHash",
+        "sourceSignatureValid", "attestation", "diagnosis"
+      ],
+      "properties": {
+        "schema": { "const": "bootproof/agent-run-initial/v1" },
+        "receiptType": { "const": "initial-attestation" },
+        "runId": { "$ref": "#/$defs/runId" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "previousReceiptHash": { "type": "null" },
+        "receiptHash": { "$ref": "#/$defs/hash" },
+        "redactionsApplied": { "$ref": "#/$defs/redactions" },
+        "sourceAttestationHash": { "$ref": "#/$defs/nullableHash" },
+        "sourceSignatureValid": { "type": "boolean" },
+        "attestation": {
+          "oneOf": [
+            { "type": "object" },
+            { "type": "null" }
+          ]
+        },
+        "diagnosis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "failureClass", "observedEvidence", "verificationMode",
+            "bootproofOrchestrated", "healthVerified"
+          ],
+          "properties": {
+            "failureClass": { "type": ["string", "null"] },
+            "observedEvidence": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "verificationMode": { "type": "string" },
+            "bootproofOrchestrated": { "type": "boolean" },
+            "healthVerified": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "planReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "receiptType", "runId", "timestamp", "previousReceiptHash",
+        "receiptHash", "redactionsApplied", "plan"
+      ],
+      "properties": {
+        "schema": { "const": "bootproof/agent-run-plan/v1" },
+        "receiptType": { "const": "agent-plan" },
+        "runId": { "$ref": "#/$defs/runId" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "previousReceiptHash": { "$ref": "#/$defs/hash" },
+        "receiptHash": { "$ref": "#/$defs/hash" },
+        "redactionsApplied": { "$ref": "#/$defs/redactions" },
+        "plan": { "$ref": "agent-plan-v1.schema.json" }
+      }
+    },
+    "actionReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "receiptType", "runId", "timestamp", "previousReceiptHash",
+        "receiptHash", "redactionsApplied", "actionIndex", "classification",
+        "actionType", "command", "riskLevel", "mutationScope",
+        "approvalStatus", "executionStatus", "verificationResult",
+        "failureClassBefore", "failureClassAfter", "blockedReason",
+        "secretSensitive"
+      ],
+      "properties": {
+        "schema": { "const": "bootproof/agent-action-receipt/v1" },
+        "receiptType": { "const": "action" },
+        "runId": { "$ref": "#/$defs/runId" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "previousReceiptHash": { "$ref": "#/$defs/hash" },
+        "receiptHash": { "$ref": "#/$defs/hash" },
+        "redactionsApplied": { "$ref": "#/$defs/redactions" },
+        "actionIndex": { "type": "integer", "minimum": 0 },
+        "classification": { "type": "string", "minLength": 1 },
+        "actionType": { "enum": ["command", "instruction"] },
+        "command": { "type": "string" },
+        "riskLevel": { "enum": ["none", "low", "medium", "high", "blocked"] },
+        "mutationScope": { "enum": ["none", "repo_only", "project_cache", "container_runtime", "host_tool_install", "host_network", "kubernetes_cluster", "database", "service", "credentials", "unknown"] },
+        "approvalStatus": { "enum": ["not_required", "pending", "approved", "declined", "blocked"] },
+        "executionStatus": { "enum": ["not_executed", "executed", "failed"] },
+        "verificationResult": { "type": ["string", "null"] },
+        "failureClassBefore": { "type": ["string", "null"] },
+        "failureClassAfter": { "type": ["string", "null"] },
+        "blockedReason": { "type": "string" },
+        "secretSensitive": { "type": "boolean" }
+      }
+    },
+    "verificationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "receiptType", "runId", "timestamp", "previousReceiptHash",
+        "receiptHash", "redactionsApplied", "verificationMode",
+        "bootproofOrchestrated", "result", "classification", "requestedUrl",
+        "observedStatus", "observedFinalUrl", "observedAt",
+        "healthObservation", "connectionError", "failureClassBefore",
+        "failureClassAfter", "attestationHash"
+      ],
+      "properties": {
+        "schema": { "const": "bootproof/agent-verification-receipt/v1" },
+        "receiptType": { "const": "verification" },
+        "runId": { "$ref": "#/$defs/runId" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "previousReceiptHash": { "$ref": "#/$defs/hash" },
+        "receiptHash": { "$ref": "#/$defs/hash" },
+        "redactionsApplied": { "$ref": "#/$defs/redactions" },
+        "verificationMode": { "enum": ["bootproof-orchestrated", "external-health"] },
+        "bootproofOrchestrated": { "type": "boolean" },
+        "result": { "enum": ["verified", "not_verified"] },
+        "classification": { "type": ["string", "null"] },
+        "requestedUrl": { "type": ["string", "null"] },
+        "observedStatus": { "type": ["integer", "null"] },
+        "observedFinalUrl": { "type": ["string", "null"] },
+        "observedAt": { "type": ["string", "null"] },
+        "healthObservation": { "type": ["string", "null"] },
+        "connectionError": { "type": ["string", "null"] },
+        "failureClassBefore": { "type": ["string", "null"] },
+        "failureClassAfter": { "type": ["string", "null"] },
+        "attestationHash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "finalSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "runId", "createdAt", "updatedAt", "status",
+        "lastReceiptHash", "receiptCount", "chainValid",
+        "initialFailureClass", "currentFailureClass",
+        "bootproofOrchestrated", "verifiedExternalHealth", "onlyPlanned",
+        "stoppedForApproval", "stoppedDueBlockedAction", "verified",
+        "explanation", "redactionsApplied"
+      ],
+      "properties": {
+        "schema": { "const": "bootproof/agent-run-summary/v1" },
+        "runId": { "$ref": "#/$defs/runId" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "status": { "enum": ["planned", "stopped_for_approval", "stopped_blocked", "awaiting_verification", "verified_external_health", "verified_bootproof_orchestrated", "verification_failed"] },
+        "lastReceiptHash": { "$ref": "#/$defs/hash" },
+        "receiptCount": { "type": "integer", "minimum": 2 },
+        "chainValid": { "type": "boolean" },
+        "initialFailureClass": { "type": ["string", "null"] },
+        "currentFailureClass": { "type": ["string", "null"] },
+        "bootproofOrchestrated": { "type": "boolean" },
+        "verifiedExternalHealth": { "type": "boolean" },
+        "onlyPlanned": { "type": "boolean" },
+        "stoppedForApproval": { "type": "boolean" },
+        "stoppedDueBlockedAction": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "explanation": { "type": "string", "minLength": 1 },
+        "redactionsApplied": { "$ref": "#/$defs/redactions" }
+      }
+    }
+  }
+}
