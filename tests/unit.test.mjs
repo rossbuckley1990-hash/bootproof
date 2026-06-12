@@ -234,6 +234,78 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
 });
 
+test("PHP and Composer runtime failures classify precisely with conservative guidance", () => {
+  const missingPhpEvidence = "zsh: command not found: php";
+  const missingPhp = classifyFailure(missingPhpEvidence);
+  assert.equal(missingPhp.class, "missing_php_runtime");
+  assert.deepEqual(missingPhp.metadata, { runtime: "php" });
+  assert.match(missingPhp.safeNextStep, /Install a PHP version supported by the repository/);
+  assert.doesNotMatch(missingPhp.safeNextStep, /brew install/);
+  assert.equal(
+    diagnoseFailure(missingPhp.class, missingPhpEvidence, missingPhp.explanation).safeNextStep,
+    missingPhp.safeNextStep,
+  );
+
+  const missingPhpWithHomebrew = classifyFailure("Homebrew 4.4.0\nphp: command not found");
+  assert.equal(missingPhpWithHomebrew.class, "missing_php_runtime");
+  assert.match(missingPhpWithHomebrew.safeNextStep, /brew install php/);
+
+  const missingComposerEvidence = "zsh: command not found: composer";
+  const missingComposer = classifyFailure(missingComposerEvidence);
+  assert.equal(missingComposer.class, "missing_composer");
+  assert.deepEqual(missingComposer.metadata, { tool: "composer" });
+  assert.match(missingComposer.safeNextStep, /Install Composer/);
+  assert.doesNotMatch(missingComposer.safeNextStep, /brew install/);
+  assert.equal(
+    diagnoseFailure(missingComposer.class, missingComposerEvidence, missingComposer.explanation).safeNextStep,
+    missingComposer.safeNextStep,
+  );
+
+  const missingComposerWithHomebrew = classifyFailure("/opt/homebrew/bin/brew --version\ncomposer: command not found");
+  assert.equal(missingComposerWithHomebrew.class, "missing_composer");
+  assert.match(missingComposerWithHomebrew.safeNextStep, /brew install composer/);
+
+  const composerLockEvidence = `
+Your lock file does not contain a compatible set of packages. Please run composer update.
+
+  Problem 1
+    - monicahq/monica is locked to version 5.0.0 and an update of this package was not requested.
+    - monicahq/monica 5.0.0 requires php >=8.1 <8.5 -> your php version (8.5.7) does not satisfy that requirement.
+  Problem 2
+    - vendor/legacy-package 2.4.0 requires php ~8.1 || ~8.2 || ~8.3 || ~8.4 -> your php version (8.5.7) does not satisfy that requirement.
+`;
+  const composerLockFailure = classifyFailure(composerLockEvidence);
+  assert.equal(composerLockFailure.class, "unsupported_php_version_for_composer_lock");
+  assert.deepEqual(composerLockFailure.metadata, {
+    currentPhpVersion: "8.5.7",
+    affectedPackages: ["monicahq/monica", "vendor/legacy-package"],
+    supportedPhpConstraints: [">=8.1 <8.5", "~8.1 || ~8.2 || ~8.3 || ~8.4"],
+    suggestedSupportedMajorMinor: "8.4",
+  });
+  assert.match(composerLockFailure.safeNextStep, /PHP 8\.4/);
+  assert.match(composerLockFailure.safeNextStep, /composer install/);
+  assert.doesNotMatch(composerLockFailure.safeNextStep, /composer update|edit.*lock/i);
+  assert.equal(
+    diagnoseFailure(
+      composerLockFailure.class,
+      composerLockEvidence,
+      composerLockFailure.explanation,
+    ).safeNextStep,
+    composerLockFailure.safeNextStep,
+  );
+
+  const missingAutoloadEvidence =
+    "PHP Warning: require(/tmp/monica/vendor/autoload.php): Failed to open stream: No such file or directory";
+  const missingAutoload = classifyFailure(missingAutoloadEvidence);
+  assert.equal(missingAutoload.class, "missing_php_vendor_autoload");
+  assert.deepEqual(missingAutoload.metadata, { filePath: "vendor/autoload.php" });
+  assert.match(missingAutoload.safeNextStep, /composer install/);
+  assert.equal(
+    diagnoseFailure(missingAutoload.class, missingAutoloadEvidence, missingAutoload.explanation).safeNextStep,
+    missingAutoload.safeNextStep,
+  );
+});
+
 test("Mastodon and GitLab failures have precise classes, metadata, and safe next steps", () => {
   const cases = [
     {
@@ -359,6 +431,10 @@ test("real-world classifiers do not overclassify unrelated evidence", () => {
     'PostgreSQL role "postgres" exists',
     "PostgreSQL 17.1 is installed and supported",
     "Redis URL configured: redis://localhost:6379",
+    "zsh: command not found: phpunit",
+    "composer install completed successfully",
+    "vendor/autoload.php loaded successfully",
+    "Your lock file contains a compatible set of packages for PHP 8.5.7",
   ];
   for (const evidence of unrelated) {
     const failureClass = classifyFailure(evidence).class;
@@ -375,6 +451,10 @@ test("real-world classifiers do not overclassify unrelated evidence", () => {
         "unsupported_database_version",
         "unsupported_database_config",
         "redis_unavailable",
+        "missing_php_runtime",
+        "missing_composer",
+        "unsupported_php_version_for_composer_lock",
+        "missing_php_vendor_autoload",
       ].includes(failureClass),
       `${evidence} was overclassified as ${failureClass}`,
     );
@@ -1881,7 +1961,7 @@ test("Laravel Vite CI-HMR failures and advertised port mismatches classify preci
   assert.deepEqual(classified.metadata, mismatch);
   assert.match(classified.safeNextStep, /Laravel app server/);
   assert.equal(classifyFailure("laravel-vite-plugin loaded successfully").class, "unknown_failure");
-  assert.equal(classifyFailure("/bin/sh: php: command not found").class, "missing_runtime_tool");
+  assert.equal(classifyFailure("/bin/sh: php: command not found").class, "missing_php_runtime");
 });
 
 test("execution environment preserves parent variables and applies explicit overrides", () => {

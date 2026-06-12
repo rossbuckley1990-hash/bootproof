@@ -69,7 +69,120 @@ function commaSeparated(value: string | undefined): string[] | undefined {
   return names.length ? names : undefined;
 }
 
+function hasHomebrewEvidence(evidence: string): boolean {
+  return /\bHomebrew\b|\/opt\/homebrew\/|\/usr\/local\/Homebrew\/|\bbrew(?:\s+--version|\s+install|\s+list|\s+services)\b/i.test(evidence);
+}
+
+function missingCommand(evidence: string, command: "php" | "composer"): boolean {
+  return new RegExp(
+    `(?:command not found:\\s*${command}\\b|(?:^|\\s)${command}:\\s*(?:command )?not found\\b|'${command}' is not recognized as an internal or external command|spawn ${command} ENOENT)`,
+    "im",
+  ).test(evidence);
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function suggestedSupportedPhpMajorMinor(constraints: string[]): string | null {
+  for (const constraint of constraints) {
+    const exclusiveUpperBound = constraint.match(/<\s*(\d+)\.(\d+)(?:\.\d+)?/);
+    if (exclusiveUpperBound) {
+      const major = Number(exclusiveUpperBound[1]);
+      const minor = Number(exclusiveUpperBound[2]);
+      if (minor > 0) return `${major}.${minor - 1}`;
+    }
+  }
+  for (const constraint of constraints) {
+    const inclusiveUpperBound = constraint.match(/<=\s*(\d+\.\d+)(?:\.\d+)?/);
+    if (inclusiveUpperBound) return inclusiveUpperBound[1];
+  }
+  const compatibleVersions = constraints.flatMap(constraint =>
+    [...constraint.matchAll(/(?:~|\^)\s*(\d+\.\d+)(?:\.\d+)?/g)].map(match => match[1])
+  );
+  if (compatibleVersions.length > 1) {
+    return compatibleVersions.sort((left, right) => {
+      const [leftMajor, leftMinor] = left.split(".").map(Number);
+      const [rightMajor, rightMinor] = right.split(".").map(Number);
+      return leftMajor - rightMajor || leftMinor - rightMinor;
+    }).at(-1) ?? null;
+  }
+  return null;
+}
+
+function composerLockPhpFailure(evidence: string): FailureClassification | null {
+  if (
+    !/Your lock file does not contain a compatible set of packages/i.test(evidence)
+    || !/\brequires php\b/i.test(evidence)
+    || !/your php version\s*\([^)]+\)/i.test(evidence)
+    || !/does not satisfy that requirement/i.test(evidence)
+  ) {
+    return null;
+  }
+
+  const currentPhpVersion = evidence.match(/your php version\s*\([^)]*?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
+  const requirements = [...evidence.matchAll(
+    /^\s*-\s+([a-z0-9_.-]+\/[a-z0-9_.-]+)\s+.+?\brequires php\s+(.+?)\s+(?:->|but)\s+your php version\s*\([^)]+\)\s+does not satisfy that requirement/igm,
+  )];
+  const affectedPackages = unique(requirements.map(match => match[1]));
+  const supportedPhpConstraints = unique(requirements.map(match => match[2].trim()));
+  const suggestedSupportedMajorMinor = suggestedSupportedPhpMajorMinor(supportedPhpConstraints);
+  const metadata: FailureMetadata = {};
+  if (currentPhpVersion) metadata.currentPhpVersion = currentPhpVersion;
+  if (affectedPackages.length) metadata.affectedPackages = affectedPackages;
+  if (supportedPhpConstraints.length) metadata.supportedPhpConstraints = supportedPhpConstraints;
+  if (suggestedSupportedMajorMinor) metadata.suggestedSupportedMajorMinor = suggestedSupportedMajorMinor;
+
+  return {
+    class: "unsupported_php_version_for_composer_lock",
+    explanation: currentPhpVersion
+      ? `PHP ${currentPhpVersion} does not satisfy package constraints recorded in composer.lock.`
+      : "The available PHP version does not satisfy package constraints recorded in composer.lock.",
+    ...(Object.keys(metadata).length ? { metadata } : {}),
+    safeNextStep: suggestedSupportedMajorMinor
+      ? `Use a PHP version compatible with composer.lock, such as PHP ${suggestedSupportedMajorMinor} based on the reported package constraints, then rerun composer install.`
+      : "Use a PHP version compatible with composer.lock, then rerun composer install.",
+  };
+}
+
 function classifyRealWorldFailure(evidence: string): FailureClassification | null {
+  const composerPhpFailure = composerLockPhpFailure(evidence);
+  if (composerPhpFailure) return composerPhpFailure;
+
+  if (missingCommand(evidence, "php")) {
+    return {
+      class: "missing_php_runtime",
+      explanation: "The repository requires PHP, but the php executable is not available.",
+      metadata: { runtime: "php" },
+      safeNextStep: hasHomebrewEvidence(evidence)
+        ? "Install a PHP version supported by the repository. Homebrew is present, so one reviewed option is: brew install php."
+        : "Install a PHP version supported by the repository, then rerun BootProof.",
+    };
+  }
+
+  if (missingCommand(evidence, "composer")) {
+    return {
+      class: "missing_composer",
+      explanation: "The repository requires Composer, but the composer executable is not available.",
+      metadata: { tool: "composer" },
+      safeNextStep: hasHomebrewEvidence(evidence)
+        ? "Install Composer. Homebrew is present, so one reviewed option is: brew install composer."
+        : "Install Composer using its documented installation method, then rerun BootProof.",
+    };
+  }
+
+  if (
+    /vendor[\\/]autoload\.php/i.test(evidence)
+    && /Failed to open stream:\s*No such file or directory|failed opening required|No such file or directory/i.test(evidence)
+  ) {
+    return {
+      class: "missing_php_vendor_autoload",
+      explanation: "vendor/autoload.php is missing, so the PHP dependencies required by the application are not installed.",
+      metadata: { filePath: "vendor/autoload.php" },
+      safeNextStep: "Resolve any PHP or Composer version issue first, then run composer install to generate vendor/autoload.php.",
+    };
+  }
+
   const laravelViteHmrBlocked =
     /You should not run the Vite HMR server in CI environments/i.test(evidence) &&
     (/LARAVEL_BYPASS_ENV_CHECK=1/i.test(evidence) || /laravel-vite-plugin/i.test(evidence));
@@ -289,6 +402,7 @@ export function classifyFailure(evidence: string): FailureClassification {
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
+  "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",
   "dependency_install_skipped", "python_flask_setup_required", "laravel_vite_ci_hmr_blocked", "missing_env_var", "missing_database_config", "missing_required_config",
   "database_unreachable", "postgres_unavailable", "postgres_role_missing", "database_schema_missing", "unsupported_database_version",
