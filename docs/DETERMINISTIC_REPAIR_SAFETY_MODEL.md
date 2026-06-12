@@ -1,7 +1,7 @@
 # Deterministic Repair Safety Model
 
 Status: foundation plus interactive MVP in progress. The shared action model, safety validation,
-additive receipt schema, uppercase-`Y` command approval, structured executor, and three initial
+additive receipt schema, uppercase-`Y` approval, structured executor, and initial real-world
 playbooks are implemented. Signed repair plans and action-hash approvals remain future work.
 
 ## Product Contract
@@ -489,21 +489,23 @@ Examples of invalid state:
 
 ## Initial Deterministic Playbooks
 
-These are proposed candidates, not implemented behavior.
+These candidates are implemented with exact evidence and repository-state gates. Multi-step
+repairs expose one action per run; later actions are shown but never silently chained.
 
 | Failure class | Proposed action | Scope | Risk | Conditions |
 |---|---|---|---|---|
-| `missing_ruby_version` | `rbenv install <requiredVersion>` | host | medium | Exact safe version metadata; `rbenv` available. |
+| `missing_ruby_version` | `rbenv install <requiredVersion>` | host | medium | Exact safe version metadata. |
 | `missing_build_tool` | `brew install cmake` | host | medium | macOS, exact `cmake` classifier metadata, Homebrew available. Otherwise instruction. |
-| `missing_database_config` | Copy one exact repository example to `config/database.yml` as a patch. | repo | medium | Destination absent; exactly one safe example; secret scan passes. |
+| `native_extension_compile_failed` for `idn-ruby` | Install `libidn` and `pkg-config`, then configure Bundler with the detected static Homebrew prefix in a later approved run. | host | medium | Exact affected gem and Homebrew prefix; no shell substitution. |
+| `missing_database_config` | Copy the PostgreSQL example, otherwise the generic example, to `config/database.yml` as a patch. | repo | medium | Destination absent; source is repository-local; secret scan passes. |
 | `missing_required_config` | Copy the exact sibling example to the reported path as a patch. | repo | medium | Reported safe relative path; unique example; secret scan passes. |
-| `unsupported_database_config` | Remove only classifier-identified unsupported top-level database sections. | repo | high | YAML parses without unsafe/custom tags; supported names known; exact diff shown. |
+| `unsupported_database_config` | Remove only classifier-identified `geo` or `embedding` top-level database sections. | repo | medium | YAML parses; exact diff shown; secret scan passes. |
 | `postgres_unavailable` | Start an exact local PostgreSQL service, such as `brew services start postgresql@17`. | service | medium | Localhost endpoint, exact required major when versioned, and one platform-specific registered service command. Otherwise instruction. |
 | `redis_unavailable` | `brew services start redis` | service | medium | macOS, localhost endpoint, Homebrew available. Otherwise instruction. |
-| `postgres_role_missing` | Create the exact validated role. `createuser -s postgres` is eligible only when repository evidence explicitly requires that exact superuser role. | database | high | Role is shell-safe and repository evidence proves required privileges. Superuser creation otherwise remains instruction-only. |
+| `postgres_role_missing` | `createuser -s <role>` for the exact validated role. | database | medium | Role is shell-safe and comes from classifier metadata. |
 | `database_schema_missing` | Run one exact framework migration command. | database | high | One unambiguous framework and migration directory/config. |
 | `migrations_missing` | Run one exact framework migration command. | database | high | Existing Prisma/Django/Rails/Knex/Drizzle predicates remain unambiguous. |
-| `unsupported_database_version` | Separate install and service-start actions for the exact required PostgreSQL major. | host/service | high | Platform and major version are exact; each action separately approved. |
+| `unsupported_database_version` | Separate install and service-start actions for the exact required PostgreSQL major. | host/service | high | Homebrew and major version are exact; each action separately approved; PATH is never changed. |
 | `service_port_allocated` | Patch a BootProof-owned Compose override/copy using the first available port in a deterministic bounded range. | repo | low | Exact service/port mapping and signed source precondition. |
 | `package_manager_version_mismatch` | Activate the exact declared package manager version. | host | medium | Exact simple version declaration; Corepack available. |
 | `missing_env_var` | Instruction showing exact variable names and safe known values only. | none | low | Never writes `.env`; never invents secret values. |

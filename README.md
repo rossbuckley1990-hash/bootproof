@@ -70,9 +70,10 @@ BootProof reads the latest signature-valid classified failure and maps exact kno
 deterministic actions. Host and service commands show the exact command, scope, and risk, and
 run only when the user types uppercase `Y`. JSON and CI modes never approve commands.
 
-The current MVP covers missing CMake, unavailable Redis, and the safe local `RAILS_ENV`
-instruction. Approved commands are followed by a sandboxed BootProof rerun. Signed receipts
-distinguish declined, failed, progressed, and verified outcomes.
+The deterministic registry also covers exact Ruby, native-extension, repository config,
+PostgreSQL service/role/schema/version, and supported database-section failures. Multi-step
+repairs expose one separately approved action per run; patches are previewed and tested only in
+the repair sandbox. Signed receipts distinguish declined, failed, progressed, and verified outcomes.
 
 Machine mode is:
 

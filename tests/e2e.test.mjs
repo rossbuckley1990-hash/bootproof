@@ -913,11 +913,17 @@ test("fix MVP requires uppercase Y, writes receipts, and records changed-failure
     env,
   );
   assert.equal(approved.code, 1, approved.out);
-  assert.equal(fs.readFileSync(marker, "utf8"), "install cmake\n");
   receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
-  assert.equal(receipt.applyResult.status, "applied");
   assert.ok(receipt.approvedAt);
-  assert.ok(receipt.appliedAt);
+  if (process.platform === "win32") {
+    assert.equal(fs.existsSync(marker), false, "the shell-free runner must not execute a .cmd shim");
+    assert.equal(receipt.applyResult.status, "failed");
+    assert.equal(receipt.appliedAt, undefined);
+  } else {
+    assert.equal(fs.readFileSync(marker, "utf8"), "install cmake\n");
+    assert.equal(receipt.applyResult.status, "applied");
+    assert.ok(receipt.appliedAt);
+  }
   assert.equal(receipt.afterFailureClass, "not_an_application");
   assert.equal(receipt.progressed, true);
   assert.equal(receipt.verified, false);
@@ -986,6 +992,54 @@ test("fix MVP refuses unknown signed failures without guessing", () => {
   );
   assert.equal(result.receiptPath, null);
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+});
+
+test("expanded fix previews repository patches and never overwrites without approval", () => {
+  const repo = freshCopy("library-only");
+  const config = path.join(repo, "config");
+  const destination = path.join(config, "database.yml");
+  fs.mkdirSync(config);
+  fs.writeFileSync(
+    path.join(config, "database.yml.example"),
+    "development:\n  adapter: postgresql\n",
+  );
+  writeFailedAttestation(repo, "missing_database_config", "Could not load database configuration");
+
+  const declined = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local"],
+    "y\n",
+  );
+  assert.equal(declined.code, 1);
+  assert.match(declined.out, /Patch preview:/);
+  assert.match(declined.out, /\+\+\+ b\/config\/database\.yml/);
+  assert.match(declined.out, /Test this patch in the repair sandbox\? Type Y to approve:/);
+  assert.equal(fs.existsSync(destination), false, "lowercase y must not apply or test the patch");
+  let receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.actionType, "patch");
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(receipt.userApprovalRequired, true);
+
+  const approved = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--timeout", "1000"],
+    "Y\n",
+  );
+  assert.equal(approved.code, 1, approved.out);
+  assert.equal(fs.existsSync(destination), false, "approved fix must test the patch only in its sandbox");
+  receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.applyResult.status, "applied");
+  assert.deepEqual(receipt.applyResult.filesChanged, ["config/database.yml"]);
+  assert.equal(receipt.afterFailureClass, "not_an_application");
+  assert.equal(receipt.progressed, true);
+  assert.equal(receipt.verified, false);
+  assert.ok(fs.existsSync(path.join(repo, ".bootproof", "repair-copy-database-config-example.patch")));
+
+  const apply = run(
+    ["apply-repair", repo, "--receipt", path.join(repo, ".bootproof", "repair-receipt.json"), "--json"],
+    true,
+  );
+  assert.equal(apply.code, 1);
+  assert.match(apply.out, /repair receipt is not verified/);
+  assert.equal(fs.existsSync(destination), false);
 });
 
 test("repair: conflicting repository Compose port produces signed verified receipt without touching the working tree", async () => {

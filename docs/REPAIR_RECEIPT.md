@@ -169,7 +169,16 @@ Application exits `0` only after all signed file changes are written and re-hash
 
 | Failure class | Deterministic remediation |
 |---|---|
+| `missing_ruby_version` | Propose `rbenv install <requiredVersion>` as a medium-risk host mutation. |
 | `missing_build_tool` with exact CMake evidence | Propose `brew install cmake` as a host mutation requiring approval. |
+| `native_extension_compile_failed` for `idn-ruby` | Propose Homebrew native dependencies, then a separately approved static-prefix Bundler configuration action. |
+| `missing_database_config` | Preview a patch copying the repository PostgreSQL/example config when the destination is absent and the content is safe to persist. |
+| `missing_required_config` for `config/gitlab.yml` | Preview a patch copying `config/gitlab.yml.example` when the destination is absent. |
+| `postgres_unavailable` | Start only a detected local Homebrew PostgreSQL package and show `pg_isready`; otherwise emit an instruction. |
+| `postgres_role_missing` | Propose `createuser -s <role>` only for an exact shell-safe role from evidence. |
+| `database_schema_missing` | Propose high-risk `bundle exec rails db:migrate`. |
+| `unsupported_database_version` | Propose separate high-risk install and service-start actions for the exact PostgreSQL major without changing PATH. |
+| `unsupported_database_config` | Preview removal of only exact `geo`/`embedding` top-level sections when the patch contains no secrets. |
 | `redis_unavailable` | Propose `brew services start redis` when Homebrew is detectable; otherwise emit a generic instruction. |
 | `missing_env_var` for only `RAILS_ENV` | Emit `RAILS_ENV=development bootproof up . --provider local --unsafe-local --install` as a non-executed instruction. |
 | `service_port_allocated` | Remap a BootProof-generated Compose host port, or create a complete BootProof-owned repaired Compose copy beside the repository file without editing it. |

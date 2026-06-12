@@ -240,6 +240,15 @@ async function commandRepairApproval(command: string, riskLevel: string): Promis
   }
 }
 
+async function patchRepairApproval(): Promise<boolean> {
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await prompt.question("Test this patch in the repair sandbox? Type Y to approve: ") === "Y";
+  } finally {
+    prompt.close();
+  }
+}
+
 function printRepairCandidate(candidate: ReturnType<typeof latestDeterministicRepairCandidate>): void {
   if (!candidate) return;
   const action = candidate.candidate.action;
@@ -247,8 +256,13 @@ function printRepairCandidate(candidate: ReturnType<typeof latestDeterministicRe
   console.log(`Failure: ${candidate.candidate.failureClass}`);
   if (action.command) console.log(`Command: ${action.command.display}`);
   if (action.instruction) console.log(`Instruction: ${action.instruction}`);
+  if (action.patch) console.log(`Patch preview:\n${action.patch.content}`);
   console.log(`Mutation scope: ${action.mutationScope}`);
   console.log(`Risk: ${action.riskLevel}`);
+  for (const followUp of candidate.candidate.followUpActions ?? []) {
+    if (followUp.command) console.log(`Later separately approved command: ${followUp.command.display}`);
+    if (followUp.instruction) console.log(`Follow-up instruction: ${followUp.instruction}`);
+  }
 }
 
 function printRepairApplyResult(result: RepairApplyResult): void {
@@ -435,21 +449,24 @@ async function main() {
       target,
       provider as "docker" | "local" | undefined,
     );
-    let commandApproved = false;
+    let actionApproved = false;
     if (latestCandidate && !flags.json) {
       printRepairCandidate(latestCandidate);
     }
     if (
-      latestCandidate?.candidate.action.actionType === "command" &&
+      latestCandidate &&
+      latestCandidate.candidate.action.actionType !== "instruction" &&
       !flags.json &&
       !flags.ci
     ) {
       const effectiveProvider = provider ?? latestCandidate.attestation.plan.provider;
       if (effectiveProvider !== "local" || flags["unsafe-local"]) {
-        commandApproved = await commandRepairApproval(
-          latestCandidate.candidate.action.command!.display,
-          latestCandidate.candidate.action.riskLevel,
-        );
+        actionApproved = latestCandidate.candidate.action.actionType === "command"
+          ? await commandRepairApproval(
+              latestCandidate.candidate.action.command!.display,
+              latestCandidate.candidate.action.riskLevel,
+            )
+          : await patchRepairApproval();
       }
     }
     const repairResult = await repairRepo(target, {
@@ -458,7 +475,7 @@ async function main() {
       timeoutMs,
       port,
       remoteSource: remoteSource ?? undefined,
-      commandApproved,
+      actionApproved,
     });
     const result = remote ? rebaseRemoteRepairPaths(repairResult, target) : repairResult;
     if (flags.json) console.log(JSON.stringify(result));

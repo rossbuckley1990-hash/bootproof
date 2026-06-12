@@ -520,6 +520,8 @@ test("repair scope whitelist permits boot plumbing and rejects application edits
       before: JSON.stringify({ name: "app", scripts: { start: "node server.js" }, packageManager: "pnpm@9.0.0" }),
       after: JSON.stringify({ name: "app", scripts: { start: "node server.js" }, packageManager: "pnpm@10.0.0" }),
     },
+    { path: "config/database.yml", before: null, after: "development:\n" },
+    { path: "config/gitlab.yml", before: null, after: "production:\n" },
   ]));
   assert.throws(
     () => assertRepairScope([{ path: "src/server.js", before: "old", after: "patched" }]),
@@ -639,6 +641,219 @@ test("deterministic fix MVP maps only exact known failures to repair candidates"
     "unknown_failure",
     "unclassified failure",
   )), null);
+});
+
+test("expanded deterministic repair registry maps exact failures with safe scopes and risks", () => {
+  const attestation = (failureClass, failureEvidence) => ({
+    result: {
+      booted: false,
+      healthVerified: false,
+      failureClass,
+      failureEvidence,
+      explanation: failureEvidence,
+    },
+  });
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-expanded-repairs-"));
+  const config = path.join(repo, "config");
+  const homebrew = path.join(repo, "homebrew");
+  fs.mkdirSync(config, { recursive: true });
+  fs.mkdirSync(path.join(homebrew, "opt"), { recursive: true });
+  fs.writeFileSync(path.join(config, "database.yml.postgresql"), "development:\n  adapter: postgresql\n");
+  fs.writeFileSync(path.join(config, "gitlab.yml.example"), "production:\n  host: localhost\n");
+
+  const candidates = [];
+  const ruby = deterministicRepairCandidateFor(attestation(
+    "missing_ruby_version",
+    "rbenv: version '3.3.11' is not installed",
+  ));
+  assert.equal(ruby.action.command.display, "rbenv install 3.3.11");
+  assert.equal(ruby.action.mutationScope, "host");
+  assert.equal(ruby.action.riskLevel, "medium");
+  candidates.push(ruby);
+
+  const idnInstall = deterministicRepairCandidateFor(attestation(
+    "native_extension_compile_failed",
+    "An error occurred while installing idn-ruby (0.1.0), and Bundler cannot continue.",
+  ), { homebrewAvailable: true, homebrewPrefix: homebrew });
+  assert.equal(idnInstall.action.command.display, "brew install libidn pkg-config");
+  assert.equal(idnInstall.action.mutationScope, "host");
+  assert.equal(idnInstall.action.riskLevel, "medium");
+  assert.equal(
+    idnInstall.followUpActions[0].command.display,
+    `bundle config build.idn-ruby --with-idn-dir=${path.join(homebrew, "opt/libidn")}`,
+  );
+  candidates.push(idnInstall);
+
+  fs.mkdirSync(path.join(homebrew, "opt/libidn"));
+  const idnConfig = deterministicRepairCandidateFor(attestation(
+    "native_extension_compile_failed",
+    "An error occurred while installing idn-ruby (0.1.0), and Bundler cannot continue.",
+  ), { homebrewAvailable: true, homebrewPrefix: homebrew });
+  assert.equal(idnConfig.action.command.executable, "bundle");
+  assert.equal(idnConfig.action.mutationScope, "host");
+  assert.equal(idnConfig.action.riskLevel, "medium");
+  candidates.push(idnConfig);
+
+  const privateHomebrew = path.join(os.homedir(), `bootproof-private-homebrew-${process.pid}`);
+  const privatePrefixConfig = deterministicRepairCandidateFor(attestation(
+    "native_extension_compile_failed",
+    "An error occurred while installing idn-ruby (0.1.0), and Bundler cannot continue.",
+  ), { homebrewAvailable: true, homebrewPrefix: privateHomebrew });
+  assert.equal(privatePrefixConfig.action.command.display, "brew install libidn pkg-config");
+  assert.equal(privatePrefixConfig.followUpActions, undefined);
+  assert.equal(JSON.stringify(privatePrefixConfig).includes(os.homedir()), false);
+
+  const databaseConfig = deterministicRepairCandidateFor(attestation(
+    "missing_database_config",
+    "Could not load database configuration",
+  ), { repoPath: repo });
+  assert.equal(databaseConfig.action.actionType, "patch");
+  assert.equal(databaseConfig.action.mutationScope, "repo");
+  assert.equal(databaseConfig.action.riskLevel, "medium");
+  assert.match(databaseConfig.action.patch.content, /config\/database\.yml/);
+  assert.equal(fs.existsSync(path.join(config, "database.yml")), false);
+  candidates.push(databaseConfig);
+
+  const gitlabConfig = deterministicRepairCandidateFor(attestation(
+    "missing_required_config",
+    "No such file or directory @ rb_sysopen - config/gitlab.yml",
+  ), { repoPath: repo });
+  assert.equal(gitlabConfig.action.actionType, "patch");
+  assert.equal(gitlabConfig.action.mutationScope, "repo");
+  assert.equal(gitlabConfig.action.riskLevel, "medium");
+  assert.equal(fs.existsSync(path.join(config, "gitlab.yml")), false);
+  candidates.push(gitlabConfig);
+
+  const postgres = deterministicRepairCandidateFor(attestation(
+    "postgres_unavailable",
+    'connection to server at "127.0.0.1", port 5432 failed: Connection refused',
+  ), {
+    homebrewAvailable: true,
+    homebrewPrefix: homebrew,
+    homebrewPostgresPackage: "postgresql@17",
+  });
+  assert.equal(postgres.action.command.display, "brew services start postgresql@17");
+  assert.equal(postgres.action.mutationScope, "service");
+  assert.equal(postgres.action.riskLevel, "medium");
+  assert.equal(postgres.followUpActions[0].instruction, "pg_isready");
+  candidates.push(postgres);
+
+  const role = deterministicRepairCandidateFor(attestation(
+    "postgres_role_missing",
+    'FATAL: role "postgres" does not exist',
+  ));
+  assert.equal(role.action.command.display, "createuser -s postgres");
+  assert.equal(role.action.mutationScope, "database");
+  assert.equal(role.action.riskLevel, "medium");
+  candidates.push(role);
+
+  const schema = deterministicRepairCandidateFor(attestation(
+    "database_schema_missing",
+    'PG::UndefinedTable: ERROR: relation "application_settings" does not exist',
+  ));
+  assert.equal(schema.action.command.display, "bundle exec rails db:migrate");
+  assert.equal(schema.action.mutationScope, "database");
+  assert.equal(schema.action.riskLevel, "high");
+  candidates.push(schema);
+
+  const versionInstall = deterministicRepairCandidateFor(attestation(
+    "unsupported_database_version",
+    "PostgreSQL 16.14 is installed, but GitLab requires PostgreSQL >= 17",
+  ), { homebrewAvailable: true, homebrewPrefix: homebrew });
+  assert.equal(versionInstall.action.command.display, "brew install postgresql@17");
+  assert.equal(versionInstall.action.mutationScope, "host");
+  assert.equal(versionInstall.action.riskLevel, "high");
+  assert.equal(versionInstall.followUpActions[0].command.display, "brew services start postgresql@17");
+  candidates.push(versionInstall);
+
+  fs.mkdirSync(path.join(homebrew, "opt/postgresql@17"));
+  const versionStart = deterministicRepairCandidateFor(attestation(
+    "unsupported_database_version",
+    "PostgreSQL 16.14 is installed, but GitLab requires PostgreSQL >= 17",
+  ), { homebrewAvailable: true, homebrewPrefix: homebrew });
+  assert.equal(versionStart.action.command.display, "brew services start postgresql@17");
+  assert.equal(versionStart.action.mutationScope, "service");
+  assert.equal(versionStart.action.riskLevel, "high");
+  candidates.push(versionStart);
+
+  fs.writeFileSync(
+    path.join(config, "database.yml"),
+    ["main:", "  adapter: postgresql", "geo:", "  adapter: postgresql", "embedding:", "  adapter: postgresql", ""].join("\n"),
+  );
+  const unsupportedConfig = deterministicRepairCandidateFor(attestation(
+    "unsupported_database_config",
+    "unsupported database names in 'config/database.yml': geo, embedding\nSupported database names: main, ci",
+  ), { repoPath: repo });
+  assert.equal(unsupportedConfig.action.actionType, "patch");
+  assert.equal(unsupportedConfig.action.mutationScope, "repo");
+  assert.equal(unsupportedConfig.action.riskLevel, "medium");
+  assert.match(unsupportedConfig.action.patch.content, /-geo:/);
+  assert.match(unsupportedConfig.action.patch.content, /-embedding:/);
+  candidates.push(unsupportedConfig);
+
+  const redis = deterministicRepairCandidateFor(attestation(
+    "redis_unavailable",
+    "Redis::CannotConnectError Connection refused - connect(2) for 127.0.0.1:6379",
+  ), { homebrewAvailable: true });
+  assert.equal(redis.action.command.display, "brew services start redis");
+  assert.equal(redis.action.mutationScope, "service");
+  assert.equal(redis.action.riskLevel, "medium");
+  candidates.push(redis);
+
+  for (const candidate of candidates) {
+    for (const action of [candidate.action, ...(candidate.followUpActions ?? [])]) {
+      assert.equal(validateRepairAction(action).valid, true, `${candidate.id}: ${action.explanation}`);
+      if (action.actionType === "command" || action.actionType === "patch") {
+        assert.equal(action.requiresApproval, true);
+      }
+    }
+  }
+});
+
+test("expanded repair patches refuse stale destinations, secrets, and unsupported sections", () => {
+  const attestation = (failureClass, failureEvidence) => ({
+    result: {
+      booted: false,
+      healthVerified: false,
+      failureClass,
+      failureEvidence,
+      explanation: failureEvidence,
+    },
+  });
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-refused-repairs-"));
+  const config = path.join(repo, "config");
+  fs.mkdirSync(config);
+  fs.writeFileSync(path.join(config, "database.yml.example"), "development:\n");
+  fs.writeFileSync(path.join(config, "database.yml"), "existing:\n");
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "missing_database_config",
+    "Could not load database configuration",
+  ), { repoPath: repo }), null, "an existing destination must never be overwritten");
+
+  fs.rmSync(path.join(config, "database.yml"));
+  fs.writeFileSync(
+    path.join(config, "database.yml.example"),
+    "development:\n  password: ordinary-but-real-secret\n",
+  );
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "missing_database_config",
+    "Could not load database configuration",
+  ), { repoPath: repo }), null, "a patch that would persist a secret must be refused");
+
+  fs.writeFileSync(path.join(config, "database.yml"), "main:\n  adapter: postgresql\nanalytics:\n  adapter: postgresql\n");
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "unsupported_database_config",
+    "unsupported database names in 'config/database.yml': analytics",
+  ), { repoPath: repo }), null, "only geo and embedding are eligible for deterministic removal");
+
+  if (process.platform !== "win32") {
+    const linkedRepo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-linked-config-repair-"));
+    fs.symlinkSync(config, path.join(linkedRepo, "config"));
+    assert.equal(deterministicRepairCandidateFor(attestation(
+      "missing_database_config",
+      "Could not load database configuration",
+    ), { repoPath: linkedRepo }), null, "patch discovery must not traverse a symlinked config directory");
+  }
 });
 
 test("deterministic repair progress requires verified health or a changed failure class", () => {
