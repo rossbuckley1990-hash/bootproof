@@ -1,0 +1,129 @@
+name: BootProof
+description: Run BootProof in CI, retain evidence, and report an honest pull request verdict.
+author: BootProof
+
+inputs:
+  install:
+    description: Allow BootProof to run the repository's detected dependency installation step.
+    required: false
+    default: "true"
+  working-directory:
+    description: Repository directory BootProof should inspect and run.
+    required: false
+    default: "."
+  comment:
+    description: Post or update the sticky BootProof pull request comment when permission exists.
+    required: false
+    default: "true"
+  upload-artifact:
+    description: Explicitly upload the staged BootProof evidence artifact.
+    required: false
+    default: "false"
+  diff:
+    description: Run BootProof's static infrastructure diff.
+    required: false
+    default: "false"
+  base-ref:
+    description: Explicit base Git ref for diff mode.
+    required: false
+    default: ""
+  head-ref:
+    description: Explicit head Git ref for diff mode.
+    required: false
+    default: ""
+  fail-on-drift:
+    description: Fail the action when the static diff says fresh proof is required.
+    required: false
+    default: "false"
+  fail-on-unverified:
+    description: Fail the action unless BootProof observes verified boot or external health.
+    required: false
+    default: "true"
+  registry-export:
+    description: Explicitly create and retain a redacted local registry export.
+    required: false
+    default: "false"
+  federated-receipt:
+    description: Explicitly create a federated public-candidate receipt artifact. Nothing is committed.
+    required: false
+    default: "false"
+  bootproof-cloud-upload:
+    description: Reserved for a separate private Cloud integration. Unsupported by this OSS action.
+    required: false
+    default: "false"
+  bootproof-cloud-token:
+    description: Reserved for a separate private Cloud integration. Never used by this OSS action.
+    required: false
+    default: ""
+  agent-plan-summary:
+    description: Summarise an existing local agent plan without executing any action.
+    required: false
+    default: "false"
+  github-token:
+    description: GitHub token used only for the optional pull request comment.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  verified:
+    description: Whether BootProof observed verified boot or verified external health.
+    value: ${{ steps.bootproof.outputs.verified }}
+  failure-class:
+    description: BootProof failure class when verification did not succeed.
+    value: ${{ steps.bootproof.outputs.failure_class }}
+  attestation-path:
+    description: Staged attestation path, when an attestation was produced.
+    value: ${{ steps.bootproof.outputs.attestation_path }}
+  artifact-directory:
+    description: Local directory containing the explicit artifact allowlist.
+    value: ${{ steps.bootproof.outputs.artifact_directory }}
+  summary-path:
+    description: Generated Markdown summary path.
+    value: ${{ steps.bootproof.outputs.summary_path }}
+  comment-url:
+    description: Sticky pull request comment URL, when posted or updated.
+    value: ${{ steps.bootproof.outputs.comment_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run BootProof
+      id: bootproof
+      shell: bash
+      env:
+        BOOTPROOF_ACTION_INSTALL: ${{ inputs.install }}
+        BOOTPROOF_ACTION_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        BOOTPROOF_ACTION_COMMENT: ${{ inputs.comment }}
+        BOOTPROOF_ACTION_UPLOAD_ARTIFACT: ${{ inputs.upload-artifact }}
+        BOOTPROOF_ACTION_DIFF: ${{ inputs.diff }}
+        BOOTPROOF_ACTION_BASE_REF: ${{ inputs.base-ref }}
+        BOOTPROOF_ACTION_HEAD_REF: ${{ inputs.head-ref }}
+        BOOTPROOF_ACTION_FAIL_ON_DRIFT: ${{ inputs.fail-on-drift }}
+        BOOTPROOF_ACTION_FAIL_ON_UNVERIFIED: ${{ inputs.fail-on-unverified }}
+        BOOTPROOF_ACTION_REGISTRY_EXPORT: ${{ inputs.registry-export }}
+        BOOTPROOF_ACTION_FEDERATED_RECEIPT: ${{ inputs.federated-receipt }}
+        BOOTPROOF_ACTION_CLOUD_UPLOAD: ${{ inputs.bootproof-cloud-upload }}
+        BOOTPROOF_ACTION_CLOUD_TOKEN: ${{ inputs.bootproof-cloud-token }}
+        BOOTPROOF_ACTION_AGENT_PLAN_SUMMARY: ${{ inputs.agent-plan-summary }}
+        BOOTPROOF_ACTION_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/scripts/github-action.mjs"
+
+    - name: Upload BootProof evidence
+      if: ${{ always() && inputs.upload-artifact == 'true' && steps.bootproof.outputs.artifact_ready == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: bootproof-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.bootproof.outputs.artifact_directory }}
+        if-no-files-found: error
+        include-hidden-files: false
+
+    - name: Enforce BootProof verdict
+      if: ${{ always() }}
+      shell: bash
+      env:
+        BOOTPROOF_ACTION_VERDICT_PATH: ${{ steps.bootproof.outputs.verdict_path }}
+      run: node "$GITHUB_ACTION_PATH/scripts/github-action-enforce.mjs"
+
+branding:
+  icon: check-circle
+  color: green

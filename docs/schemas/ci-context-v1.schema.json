@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/ci-context-v1.schema.json",
+  "title": "BootProof CI Context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repository",
+    "workflow",
+    "runId",
+    "runAttempt",
+    "sha",
+    "ref",
+    "actor",
+    "eventName",
+    "job",
+    "serverUrl",
+    "githubActions",
+    "oidcSigned"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bootproof/ci-context/v1"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "workflow": {
+      "type": "string"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "runAttempt": {
+      "type": "string"
+    },
+    "sha": {
+      "type": "string"
+    },
+    "ref": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    },
+    "eventName": {
+      "type": "string"
+    },
+    "job": {
+      "type": "string"
+    },
+    "serverUrl": {
+      "type": "string"
+    },
+    "githubActions": {
+      "type": "boolean"
+    },
+    "oidcSigned": {
+      "const": false
+    }
+  }
+}

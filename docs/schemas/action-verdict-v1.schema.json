@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/action-verdict-v1.schema.json",
+  "title": "BootProof GitHub Action Verdict v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "verified",
+    "shouldFail",
+    "failureReason",
+    "failureClass",
+    "bootproofExitCode",
+    "driftDetected",
+    "commandsExecuted",
+    "cloudUploadPerformed",
+    "federatedReceiptCommitted",
+    "agentActionsExecuted"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bootproof/action-verdict/v1"
+    },
+    "verified": {
+      "type": "boolean"
+    },
+    "shouldFail": {
+      "type": "boolean"
+    },
+    "failureReason": {
+      "type": "string"
+    },
+    "failureClass": {
+      "type": "string"
+    },
+    "bootproofExitCode": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "driftDetected": {
+      "type": "boolean"
+    },
+    "commandsExecuted": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "cloudUploadPerformed": {
+      "const": false
+    },
+    "federatedReceiptCommitted": {
+      "const": false
+    },
+    "agentActionsExecuted": {
+      "const": false
+    }
+  }
+}
