@@ -145,7 +145,69 @@ function composerLockPhpFailure(evidence: string): FailureClassification | null 
   };
 }
 
+function laravelEvidence(evidence: string): boolean {
+  return /\bLaravel\b|laravel[\\/]framework|Illuminate\\|php artisan|artisan migrate/i.test(evidence);
+}
+
+function laravelSqliteDatabaseMissing(evidence: string): FailureClassification | null {
+  if (
+    !/Database file at path\b/i.test(evidence)
+    || !/does not exist/i.test(evidence)
+    || !/Connection:\s*sqlite\b/i.test(evidence)
+  ) {
+    return null;
+  }
+  const databasePath = evidence.match(/Database file at path\s+\[([^\]]+)\]\s+does not exist/i)?.[1]?.trim()
+    ?? evidence.match(/Database file at path\s+(.+?)\s+does not exist/i)?.[1]?.trim().replace(/^['"]|['"]$/g, "");
+  return {
+    class: "laravel_sqlite_database_missing",
+    explanation: "Laravel reached its SQLite connection, but the configured database file does not exist.",
+    metadata: {
+      ...(databasePath ? { databasePath } : {}),
+      connection: "sqlite",
+      framework: "laravel",
+    },
+    safeNextStep: [
+      "Create the local SQLite database file and then run Laravel migrations after review:",
+      "mkdir -p database",
+      "touch database/database.sqlite",
+      "php artisan migrate",
+    ].join("\n"),
+  };
+}
+
+function laravelMigrationsRequired(evidence: string): FailureClassification | null {
+  if (!laravelEvidence(evidence)) return null;
+  const missingTable =
+    evidence.match(/no such table:\s*([A-Za-z0-9_.-]+)/i)?.[1]
+    ?? evidence.match(/Base table or view not found[\s\S]{0,200}?\bTable\s+['"`]([^'"`]+)['"`]\s+does(?:n't| not)\s+exist/i)?.[1]
+    ?? evidence.match(/\bTable\s+['"`]([^'"`]+)['"`]\s+does(?:n't| not)\s+exist/i)?.[1]
+    ?? evidence.match(/\b(sessions?|cache|cache_locks|users|jobs|failed_jobs|migrations?)\s+table\s+(?:is\s+)?(?:missing|does not exist|not found)/i)?.[1];
+  const migrationTableMissing = /migration(?:s)? table\b[^\n]*(?:missing|does not exist|not found)/i.test(evidence);
+  const namedLaravelTableMissing =
+    /\b(?:sessions?|cache|cache_locks|users|jobs|failed_jobs|migrations)\b/i.test(evidence)
+    && /(?:no such table|Base table or view not found|does(?:n't| not) exist|missing)/i.test(evidence);
+  if (!missingTable && !migrationTableMissing && !namedLaravelTableMissing) return null;
+  return {
+    class: "laravel_migrations_required",
+    explanation: missingTable
+      ? `Laravel started, but required database table ${missingTable} is missing.`
+      : "Laravel started, but its required database tables have not been migrated.",
+    metadata: {
+      framework: "laravel",
+      ...(missingTable ? { table: missingTable } : {}),
+    },
+    safeNextStep: "Run the Laravel migrations after explicit approval: php artisan migrate",
+  };
+}
+
 function classifyRealWorldFailure(evidence: string): FailureClassification | null {
+  const sqliteMissing = laravelSqliteDatabaseMissing(evidence);
+  if (sqliteMissing) return sqliteMissing;
+
+  const laravelMigrations = laravelMigrationsRequired(evidence);
+  if (laravelMigrations) return laravelMigrations;
+
   const composerPhpFailure = composerLockPhpFailure(evidence);
   if (composerPhpFailure) return composerPhpFailure;
 
@@ -403,6 +465,7 @@ export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
   "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
+  "laravel_sqlite_database_missing", "laravel_migrations_required",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",
   "dependency_install_skipped", "python_flask_setup_required", "laravel_vite_ci_hmr_blocked", "missing_env_var", "missing_database_config", "missing_required_config",
   "database_unreachable", "postgres_unavailable", "postgres_role_missing", "database_schema_missing", "unsupported_database_version",

@@ -21,6 +21,8 @@ export type FailureClass =
   | "missing_composer"
   | "unsupported_php_version_for_composer_lock"
   | "missing_php_vendor_autoload"
+  | "laravel_sqlite_database_missing"
+  | "laravel_migrations_required"
   | "missing_build_tool"
   | "native_extension_compile_failed"
   | "package_manager_version_mismatch"

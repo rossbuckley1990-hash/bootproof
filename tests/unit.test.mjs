@@ -306,6 +306,92 @@ Your lock file does not contain a compatible set of packages. Please run compose
   );
 });
 
+test("Laravel SQLite and migration failures classify with approval-gated repair risk", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-laravel-sqlite-"));
+  try {
+    fs.writeFileSync(path.join(repo, "artisan"), "#!/usr/bin/env php\n");
+    fs.writeFileSync(path.join(repo, "composer.json"), JSON.stringify({
+      require: { "laravel/framework": "^11.0" },
+    }));
+    fs.mkdirSync(path.join(repo, "database"));
+    const databasePath = path.join(repo, "database", "database.sqlite");
+    const sqliteEvidence = [
+      `Database file at path [${databasePath}] does not exist.`,
+      "Ensure this is an absolute path to the database.",
+      "Connection: sqlite",
+    ].join("\n");
+    const sqliteMissing = classifyFailure(sqliteEvidence);
+    assert.equal(sqliteMissing.class, "laravel_sqlite_database_missing");
+    assert.deepEqual(sqliteMissing.metadata, {
+      databasePath,
+      connection: "sqlite",
+      framework: "laravel",
+    });
+    assert.match(sqliteMissing.safeNextStep, /mkdir -p database/);
+    assert.match(sqliteMissing.safeNextStep, /touch database\/database\.sqlite/);
+    assert.match(sqliteMissing.safeNextStep, /php artisan migrate/);
+
+    const failedAttestation = (failureClass, failureEvidence) => ({
+      result: {
+        booted: false,
+        healthVerified: false,
+        failureClass,
+        failureEvidence,
+        explanation: failureEvidence,
+      },
+    });
+    const sqliteRepair = deterministicRepairCandidateFor(
+      failedAttestation(sqliteMissing.class, sqliteEvidence),
+      { repoPath: repo },
+    );
+    assert.equal(sqliteRepair.action.actionType, "patch");
+    assert.equal(sqliteRepair.action.mutationScope, "repo_only");
+    assert.equal(sqliteRepair.action.riskLevel, "medium");
+    assert.equal(sqliteRepair.action.requiresApproval, true);
+    assert.deepEqual(sqliteRepair.action.patch.files, ["database/database.sqlite"]);
+    assert.equal(sqliteRepair.followUpActions[0].command.display, "php artisan migrate");
+    assert.equal(sqliteRepair.followUpActions[0].mutationScope, "database");
+    assert.equal(sqliteRepair.followUpActions[0].riskLevel, "high");
+    assert.equal(sqliteRepair.followUpActions[0].requiresApproval, true);
+    assert.equal(fs.existsSync(databasePath), false, "classification and planning must not create SQLite files");
+
+    const migrationEvidence = [
+      "Illuminate\\Database\\QueryException",
+      "SQLSTATE[HY000]: General error: 1 no such table: sessions",
+      "vendor/laravel/framework/src/Illuminate/Database/Connection.php",
+    ].join("\n");
+    const migrationsRequired = classifyFailure(migrationEvidence);
+    assert.equal(migrationsRequired.class, "laravel_migrations_required");
+    assert.deepEqual(migrationsRequired.metadata, {
+      framework: "laravel",
+      table: "sessions",
+    });
+    assert.match(migrationsRequired.safeNextStep, /php artisan migrate/);
+    const migrationRepair = deterministicRepairCandidateFor(
+      failedAttestation(migrationsRequired.class, migrationEvidence),
+      { repoPath: repo },
+    );
+    assert.equal(migrationRepair.action.command.display, "php artisan migrate");
+    assert.equal(migrationRepair.action.mutationScope, "database");
+    assert.equal(migrationRepair.action.riskLevel, "high");
+    assert.equal(migrationRepair.action.requiresApproval, true);
+
+    const baseTableMissing = classifyFailure(
+      "Illuminate\\Database\\QueryException: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'monica.users' doesn't exist at vendor/laravel/framework/src/Illuminate/Database/Connection.php",
+    );
+    assert.equal(baseTableMissing.class, "laravel_migrations_required");
+    assert.equal(baseTableMissing.metadata.table, "monica.users");
+
+    const migrationTableMissing = classifyFailure(
+      "Laravel migration table missing; run php artisan migrate",
+    );
+    assert.equal(migrationTableMissing.class, "laravel_migrations_required");
+    assert.equal(migrationTableMissing.metadata.table, "migration");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("Mastodon and GitLab failures have precise classes, metadata, and safe next steps", () => {
   const cases = [
     {
@@ -435,6 +521,8 @@ test("real-world classifiers do not overclassify unrelated evidence", () => {
     "composer install completed successfully",
     "vendor/autoload.php loaded successfully",
     "Your lock file contains a compatible set of packages for PHP 8.5.7",
+    "SQLite database/database.sqlite exists and is ready",
+    "no such table: sessions",
   ];
   for (const evidence of unrelated) {
     const failureClass = classifyFailure(evidence).class;
@@ -455,6 +543,8 @@ test("real-world classifiers do not overclassify unrelated evidence", () => {
         "missing_composer",
         "unsupported_php_version_for_composer_lock",
         "missing_php_vendor_autoload",
+        "laravel_sqlite_database_missing",
+        "laravel_migrations_required",
       ].includes(failureClass),
       `${evidence} was overclassified as ${failureClass}`,
     );
@@ -2097,14 +2187,14 @@ test("health verification accepts HTTP 302 to /users/sign_in without following i
   });
 });
 
-test("health verification accepts HTTP 302 to /login", async () => {
+test("health verification accepts Laravel HTTP 302 to an absolute /login URL", async () => {
   await withHttpServer((_request, response) => {
-    response.writeHead(302, { location: "/login" });
+    response.writeHead(302, { location: "http://127.0.0.1:8000/login" });
     response.end();
   }, async url => {
     const health = await pollHealth(url, 1000, 20);
     assert.equal(health.evidence.statusCode, 302);
-    assert.equal(health.evidence.redirectLocation, "/login");
+    assert.equal(health.evidence.redirectLocation, "http://127.0.0.1:8000/login");
     assert.equal(health.evidence.acceptedAsHealthy, true);
   });
 });

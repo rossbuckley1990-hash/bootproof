@@ -398,6 +398,77 @@ export function deterministicRepairCandidateFor(
     });
   }
 
+  if (failureClass === "laravel_sqlite_database_missing" && options.repoPath) {
+    const databasePath = classified.metadata?.databasePath;
+    const normalizedEvidencePath = typeof databasePath === "string"
+      ? databasePath.replace(/\\/g, "/")
+      : "";
+    const relative = "database/database.sqlite";
+    const databaseDirectory = normalizedRepoFile(options.repoPath, "database");
+    const destination = normalizedRepoFile(options.repoPath, relative);
+    const laravelMarkers =
+      fs.existsSync(path.join(options.repoPath, "artisan"))
+      && fs.existsSync(path.join(options.repoPath, "composer.json"));
+    if (
+      !normalizedEvidencePath.endsWith(`/${relative}`)
+      && normalizedEvidencePath !== relative
+    ) {
+      return null;
+    }
+    if (
+      !laravelMarkers
+      || !databaseDirectory
+      || !fs.existsSync(databaseDirectory)
+      || !fs.statSync(databaseDirectory).isDirectory()
+      || !destination
+      || fs.existsSync(destination)
+    ) {
+      return null;
+    }
+    const patch = unifiedDiff(relative, null, "");
+    if (!safePatchContent(patch)) return null;
+    return {
+      id: "create-laravel-sqlite-database",
+      failureClass,
+      action: buildRepairAction({
+        actionType: "patch",
+        mutationScope: "repo_only",
+        riskLevel: "medium",
+        patch: {
+          format: "unified-diff",
+          content: patch,
+          files: [relative],
+        },
+        explanation: "Create the exact missing local SQLite database file as a reviewed repository patch.",
+        evidenceRefs: [".bootproof/attestation.json", relative],
+      }),
+      followUpActions: [buildRepairAction({
+        actionType: "command",
+        mutationScope: "database",
+        riskLevel: "high",
+        command: createRepairCommand("php", ["artisan", "migrate"]),
+        explanation: "After the SQLite file exists, run Laravel migrations in a separately approved step.",
+        evidenceRefs: [".bootproof/attestation.json"],
+      })],
+      fileChanges: [{ path: relative, before: null, after: "" }],
+    };
+  }
+
+  if (failureClass === "laravel_migrations_required") {
+    return {
+      id: "run-laravel-database-migrations",
+      failureClass,
+      action: buildRepairAction({
+        actionType: "command",
+        mutationScope: "database",
+        riskLevel: "high",
+        command: createRepairCommand("php", ["artisan", "migrate"]),
+        explanation: "Run the exact Laravel migration command selected from preserved missing-table evidence.",
+        evidenceRefs: [".bootproof/attestation.json"],
+      }),
+    };
+  }
+
   if (failureClass === "postgres_unavailable") {
     const host = classified.metadata?.host;
     if (host && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") return null;

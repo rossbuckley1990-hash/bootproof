@@ -25,6 +25,8 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `missing_composer` | The repository requires Composer, but the `composer` executable is unavailable. | Install Composer through an evidenced or documented method. |
 | `unsupported_php_version_for_composer_lock` | The current PHP version does not satisfy package constraints recorded in `composer.lock`. | Select a compatible PHP version, then rerun `composer install`; do not edit the lockfile as the first step. |
 | `missing_php_vendor_autoload` | `vendor/autoload.php` is absent after PHP dependencies failed or were not installed. | Resolve PHP/Composer compatibility, then run `composer install`. |
+| `laravel_sqlite_database_missing` | Laravel's configured SQLite database file does not exist. | Review and approve creation of `database/database.sqlite`, then separately approve `php artisan migrate`. |
+| `laravel_migrations_required` | Laravel started, but one or more required database tables are missing. | Run `php artisan migrate` only with explicit approval because it mutates local database state. |
 | `missing_build_tool` | A named native build tool required by a dependency is absent. | Install the reported tool, such as `brew install cmake`. |
 | `native_extension_compile_failed` | A gem native extension failed to compile. | Install the affected gem's native dependencies and rerun installation. |
 | `package_manager_version_mismatch` | The available package-manager version differs from the exact/simple declared version. | Activate the declared version, then rerun. |
