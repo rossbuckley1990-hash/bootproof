@@ -19,7 +19,7 @@ authorize autonomous execution.
 | Agent planning | Planning-only foundation exists | `bootproof plan-agent` writes a strict local agent plan with evidence, risk-classified candidate actions, approvals, verification steps, and stop conditions. It executes no candidate action. |
 | Shared action risk model | Exists | Deterministic repair and `plan-agent` use one strict action-risk classifier with canonical mutation scopes, approval prompts, blocked reasons, verification steps, a hard blocklist, and at-least-medium risk for unknown commands. |
 | Airbyte runbook recognition | Exists | Planning identifies Airbyte from repository identity and structural evidence, emits the abctl-managed orchestration classifications, uses the shared high-risk Kubernetes model, marks credential access secret-sensitive, and plans external health verification without execution. |
-| Local agent receipt chain | Partial primitives only | Signed attestations and signed repair receipts contain before/after hashes and lifecycle state. There is no run directory, chained action/verification receipts, final summary, or `explain-run`. |
+| Local agent receipt chain | Exists for planning and verification | `plan-agent` creates a redacted run directory with hash-linked diagnosis, plan, and action receipts. Repository-scoped external health can append verification receipts, the derived final summary states ownership and stop status, and `explain-run` verifies the chain. Approved action execution remains intentionally unimplemented. |
 
 ## Existing Capabilities
 
@@ -135,34 +135,27 @@ BootProof writes `.bootproof/attestation.json`,
 `.bootproof/repair-after-attestation.json`. Repair receipts are signed and bind
 before/after attestations with hashes.
 
-These files are overwritten or replaced per repair attempt. They are not a
-run-scoped append-only receipt chain, and there is no previous-receipt hash.
-`bootproof explain` can explain one attestation or repair receipt, but cannot
-explain a complete agent run.
+Repair files remain attempt-scoped. Agent planning now additionally creates a
+run-scoped local chain under `.bootproof/agent-runs/<run-id>/`, where immutable
+diagnosis, plan, action, and verification receipts link by SHA-256 hash.
+`final-summary.json` records the current derived status, and
+`bootproof explain-run <run-id>` verifies and explains the chain.
 
-## Missing Capabilities
-
-### Agent Run Receipts
-
-The following do not exist:
+## Existing Agent Run Capability
 
 - `.bootproof/agent-runs/<run-id>/`;
-- `initial-attestation.json`;
-- run-scoped `agent-plan.json`;
-- per-action receipts;
-- per-verification receipts;
-- `final-summary.json`;
-- a receipt hash chain;
+- redacted initial attestation and plan snapshots;
+- per-action planning receipts;
+- appendable verification receipts;
+- previous-receipt SHA-256 links;
+- a derived final summary;
 - `bootproof explain-run <run-id>`.
+
+Planning still executes nothing. No autonomous or approved action runner exists.
 
 ## Recommended Next Prompt Order
 
-1. **Add the local agent-run receipt chain.**
-   Introduce the run directory, initial attestation, plan snapshot,
-   hash-chained action and verification receipts, final summary, and
-   `explain-run`. Keep all output local, redacted, signed where appropriate,
-   and append-only within a run.
-2. **Only after the preceding contracts are stable, add a human-driven
+1. **Only after the receipt contracts are stable, add a human-driven
    single-step runner.**
    Execute exactly one approved local action, verify it, write the chained
    receipts, and stop for a new explicit approval. Do not add autonomous

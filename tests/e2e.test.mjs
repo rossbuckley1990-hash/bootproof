@@ -658,6 +658,24 @@ test("plan-agent writes a local plan and executes no repository command", () => 
     candidate.mutationScope === "none" &&
     candidate.requiresApproval === false
   ));
+  const runsDirectory = path.join(repo, ".bootproof", "agent-runs");
+  const runIds = fs.readdirSync(runsDirectory);
+  assert.equal(runIds.length, 1);
+  const runDirectory = path.join(runsDirectory, runIds[0]);
+  assert.equal(fs.existsSync(path.join(runDirectory, "initial-attestation.json")), true);
+  assert.equal(fs.existsSync(path.join(runDirectory, "agent-plan.json")), true);
+  assert.equal(fs.existsSync(path.join(runDirectory, "actions")), true);
+  assert.equal(fs.existsSync(path.join(runDirectory, "verifications")), true);
+  const summary = JSON.parse(fs.readFileSync(path.join(runDirectory, "final-summary.json"), "utf8"));
+  assert.equal(summary.onlyPlanned, true);
+  assert.equal(summary.verified, false);
+  assert.equal(summary.bootproofOrchestrated, false);
+  assert.ok(["stopped_for_approval", "stopped_blocked"].includes(summary.status));
+
+  const explained = run(["explain-run", runIds[0]], false, {}, repo);
+  assert.match(explained.out, /Receipt chain: valid/);
+  assert.match(explained.out, /BootProof only planned; no action was executed/);
+  assert.match(explained.out, /Verified: no/);
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "attestation.json")), false);
 });
 
@@ -698,6 +716,45 @@ test("plan-agent emits an Airbyte runbook plan and executes no Airbyte command",
     candidate.secretSensitive === true &&
     candidate.mutationScope === "credentials"
   ));
+});
+
+test("external health verification appends to the latest local agent run", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 200;
+    response.end('{"available":true}');
+  }, async url => {
+    const repo = freshCopy("airbyte");
+    const planned = run(["plan-agent", repo]);
+    assert.equal(planned.code, 0);
+    const runsDirectory = path.join(repo, ".bootproof", "agent-runs");
+    const [runId] = fs.readdirSync(runsDirectory);
+
+    const verified = await runAsync(["up", repo, "--external-health", url]);
+    assert.equal(verified.code, 0, verified.out);
+    assert.match(verified.out, new RegExp(`Agent run verification: ${runId}`));
+    const runDirectory = path.join(runsDirectory, runId);
+    const verificationFiles = fs.readdirSync(path.join(runDirectory, "verifications"));
+    assert.equal(verificationFiles.length, 1);
+    const verification = JSON.parse(fs.readFileSync(
+      path.join(runDirectory, "verifications", verificationFiles[0]),
+      "utf8",
+    ));
+    assert.equal(verification.verificationMode, "external-health");
+    assert.equal(verification.bootproofOrchestrated, false);
+    assert.equal(verification.result, "verified");
+    assert.equal(verification.classification, "external_service_verified");
+
+    const summary = JSON.parse(fs.readFileSync(path.join(runDirectory, "final-summary.json"), "utf8"));
+    assert.equal(summary.status, "verified_external_health");
+    assert.equal(summary.verifiedExternalHealth, true);
+    assert.equal(summary.bootproofOrchestrated, false);
+    assert.equal(summary.verified, true);
+    assert.match(summary.explanation, /did not start or orchestrate/);
+
+    const explained = run(["explain-run", runId], false, {}, repo);
+    assert.match(explained.out, /verified external health and did not start/);
+    assert.match(explained.out, /Receipt chain: valid/);
+  });
 });
 
 test("machine interface: --ci human output has no ANSI and refuses unsafe local execution", () => {

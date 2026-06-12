@@ -24,6 +24,14 @@ import {
   validateAgentPlan,
   writeAgentPlan,
 } from "../dist/agent-plan.js";
+import {
+  agentRunDirectory,
+  appendAgentVerification,
+  createAgentRun,
+  explainAgentRun,
+  generateAgentRunId,
+  readAgentRun,
+} from "../dist/agent-run.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
@@ -740,6 +748,157 @@ test("agent plan JSON schema is strict and contains generic safety classificatio
     assert.match(schema, new RegExp(classification));
   }
   assert.match(schema, /secretSensitive/);
+});
+
+test("agent planning creates a stable redacted local receipt chain without execution", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-agent-run-"));
+  fs.cpSync(path.join(FIX, "airbyte"), repo, { recursive: true });
+  const initialAttestation = buildAttestation({
+    repo,
+    plan: {
+      provider: "local",
+      steps: [],
+      healthUrl: "http://localhost:8001/api/v1/health",
+      healthCandidates: ["http://localhost:8001/api/v1/health"],
+      generatedFiles: [],
+    },
+    observed: [],
+    startedAt: "2026-06-12T10:00:00.000Z",
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    failureClass: "orchestration_not_supported",
+    failureEvidence: "API_TOKEN=receipt-secret path=/Users/local-user/private",
+    explanation: '{"password":"receipt-password"}',
+  });
+  fs.mkdirSync(path.join(repo, ".bootproof"), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo, ".bootproof", "attestation.json"),
+    JSON.stringify(initialAttestation, null, 2) + "\n",
+  );
+
+  const plan = buildAgentPlan(repo, {
+    availableTools: new Set(["docker", "java", "abctl", "kind", "helm"]),
+  });
+  const createdAt = "2026-06-12T10:01:02.003Z";
+  assert.equal(
+    generateAgentRunId(repo, plan, createdAt),
+    generateAgentRunId(repo, plan, createdAt),
+  );
+  const summary = createAgentRun(repo, plan, { createdAt });
+  const directory = agentRunDirectory(repo, summary.runId);
+  assert.equal(fs.existsSync(directory), true);
+  assert.equal(fs.existsSync(path.join(directory, "initial-attestation.json")), true);
+  assert.equal(fs.existsSync(path.join(directory, "agent-plan.json")), true);
+  assert.equal(fs.existsSync(path.join(directory, "actions")), true);
+  assert.equal(fs.existsSync(path.join(directory, "verifications")), true);
+  assert.equal(fs.existsSync(path.join(directory, "final-summary.json")), true);
+
+  const run = readAgentRun(repo, summary.runId);
+  assert.equal(run.chainValid, true, run.errors.join("; "));
+  assert.equal(run.summary.onlyPlanned, true);
+  assert.equal(run.summary.verified, false);
+  assert.equal(run.summary.bootproofOrchestrated, false);
+  assert.equal(run.summary.status, "stopped_for_approval");
+  for (const [index, receipt] of run.receipts.entries()) {
+    assert.equal(
+      receipt.previousReceiptHash,
+      index === 0 ? null : run.receipts[index - 1].receiptHash,
+    );
+  }
+
+  const files = fs.readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => fs.readFileSync(path.join(entry.parentPath, entry.name), "utf8"))
+    .join("\n");
+  assert.doesNotMatch(files, /receipt-secret|receipt-password|\/Users\/local-user/);
+  assert.match(files, /\[redacted\]/);
+  const actionReceipts = run.receipts.filter(receipt => receipt.receiptType === "action");
+  assert.ok(actionReceipts.length > 0);
+  assert.ok(actionReceipts.some(receipt => receipt.secretSensitive === true));
+  assert.doesNotMatch(files, /"booted"\s*:\s*true|"success"\s*:\s*true/);
+  assert.equal(fs.existsSync(path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE")), false);
+});
+
+test("agent run appends external health verification and explains ownership honestly", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-agent-run-external-"));
+  fs.cpSync(path.join(FIX, "airbyte"), repo, { recursive: true });
+  const plan = buildAgentPlan(repo, {
+    availableTools: new Set(["docker", "java", "abctl", "kind", "helm"]),
+  });
+  const summary = createAgentRun(repo, plan, {
+    createdAt: "2026-06-12T11:00:00.000Z",
+  });
+  const attestation = buildAttestation({
+    repo,
+    plan: {
+      provider: "local",
+      steps: [{
+        id: "external-health",
+        kind: "health",
+        description: "Observe external health",
+        required: true,
+      }],
+      healthUrl: "http://localhost:8001/api/v1/health",
+      healthCandidates: ["http://localhost:8001/api/v1/health"],
+      generatedFiles: [],
+    },
+    observed: [],
+    startedAt: "2026-06-12T11:01:00.000Z",
+    booted: false,
+    healthVerified: true,
+    healthObservation: "HTTP 200 OK at http://localhost:8001/api/v1/health",
+    failureClass: null,
+    failureEvidence: null,
+    explanation: "External health was observed. BootProof did not start or orchestrate the service.",
+    verificationMode: "external-health",
+    bootproofOrchestrated: false,
+    externalHealthUrl: "http://localhost:8001/api/v1/health",
+    observedStatus: 200,
+    observedFinalUrl: "http://localhost:8001/api/v1/health",
+    observedAt: "2026-06-12T11:01:00.100Z",
+    responseSnippet: '{"available":true}',
+    classification: "external_service_verified",
+  });
+  const verification = appendAgentVerification(
+    repo,
+    summary.runId,
+    attestation,
+    "2026-06-12T11:01:01.000Z",
+  );
+  assert.equal(verification.verificationMode, "external-health");
+  assert.equal(verification.bootproofOrchestrated, false);
+  assert.equal(verification.result, "verified");
+  assert.equal(verification.classification, "external_service_verified");
+
+  const run = readAgentRun(repo, summary.runId);
+  assert.equal(run.chainValid, true, run.errors.join("; "));
+  assert.equal(run.summary.status, "verified_external_health");
+  assert.equal(run.summary.verifiedExternalHealth, true);
+  assert.equal(run.summary.bootproofOrchestrated, false);
+  assert.equal(run.summary.onlyPlanned, false);
+  assert.equal(run.summary.verified, true);
+  assert.match(run.summary.explanation, /did not start or orchestrate/);
+  const explanation = explainAgentRun(repo, summary.runId).join("\n");
+  assert.match(explanation, /Receipt chain: valid/);
+  assert.match(explanation, /verified external health and did not start/);
+});
+
+test("agent run receipt schema is strict and documents every local receipt type", () => {
+  const schema = fs.readFileSync(
+    path.resolve("docs/schemas/agent-run-receipts-v1.schema.json"),
+    "utf8",
+  );
+  assert.match(schema, /"additionalProperties": false/);
+  for (const receiptSchema of [
+    "bootproof/agent-run-initial/v1",
+    "bootproof/agent-run-plan/v1",
+    "bootproof/agent-action-receipt/v1",
+    "bootproof/agent-verification-receipt/v1",
+    "bootproof/agent-run-summary/v1",
+  ]) {
+    assert.match(schema, new RegExp(receiptSchema.replaceAll("/", "\\/")));
+  }
 });
 
 test("repair scope whitelist permits boot plumbing and rejects application edits", () => {
