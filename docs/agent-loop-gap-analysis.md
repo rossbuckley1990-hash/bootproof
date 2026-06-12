@@ -7,8 +7,8 @@ Target architecture:
 > Diagnose -> Classify -> Plan -> Risk-Classify -> Approve -> Execute One Step
 > -> Verify -> Receipt -> Repeat
 
-This audit describes the current OSS repository after Prompt 10. It does not
-authorize autonomous execution and does not change runtime behavior.
+This document tracks the current OSS agent-loop architecture. It does not
+authorize autonomous execution.
 
 ## Status Summary
 
@@ -18,7 +18,7 @@ authorize autonomous execution and does not change runtime behavior.
 | External health verification | Exists | `verify-url` and `up --external-health` record external-health attestations with explicit non-orchestration ownership and honest auth/unreachable classifications. |
 | Agent planning | Planning-only foundation exists | `bootproof plan-agent` writes a strict local agent plan with evidence, risk-classified candidate actions, approvals, verification steps, and stop conditions. It executes no candidate action. |
 | Shared action risk model | Exists | Deterministic repair and `plan-agent` use one strict action-risk classifier with canonical mutation scopes, approval prompts, blocked reasons, verification steps, a hard blocklist, and at-least-medium risk for unknown commands. |
-| Airbyte runbook recognition | Partial generic foundation | Planning recognizes documented `abctl`, kind, Helm, Kubernetes, Gradle, credential, and local health markers. It does not yet identify Airbyte specifically or emit Airbyte-specific classifications/runbooks. |
+| Airbyte runbook recognition | Exists | Planning identifies Airbyte from repository identity and structural evidence, emits the abctl-managed orchestration classifications, uses the shared high-risk Kubernetes model, marks credential access secret-sensitive, and plans external health verification without execution. |
 | Local agent receipt chain | Partial primitives only | Signed attestations and signed repair receipts contain before/after hashes and lifecycle state. There is no run directory, chained action/verification receipts, final summary, or `explain-run`. |
 
 ## Existing Capabilities
@@ -142,19 +142,6 @@ explain a complete agent run.
 
 ## Missing Capabilities
 
-### Airbyte Recognition and Runbook
-
-The repository has no Airbyte-specific handling for:
-
-- `airbytehq/airbyte`;
-- `airbyte_abctl_managed`;
-- `external_orchestrator_required`;
-- repository-identity-backed selection of the Airbyte runbook.
-
-Generic planning can preserve documented commands, health endpoints, and
-credential sensitivity, but `orchestration_not_supported` still does not
-encode Airbyte or external-orchestrator semantics.
-
 ### Agent Run Receipts
 
 The following do not exist:
@@ -170,17 +157,12 @@ The following do not exist:
 
 ## Recommended Next Prompt Order
 
-1. **Add deterministic Airbyte recognition and a planning-only runbook.**
-   Detect the repository and orchestration traits, classify the managed/external
-   orchestrator path, propose `abctl local install --port 8001` as high risk,
-   mark credentials secret-sensitive, and use the external health endpoint as
-   the final verification step. Do not execute the plan.
-2. **Add the local agent-run receipt chain.**
+1. **Add the local agent-run receipt chain.**
    Introduce the run directory, initial attestation, plan snapshot,
    hash-chained action and verification receipts, final summary, and
    `explain-run`. Keep all output local, redacted, signed where appropriate,
    and append-only within a run.
-3. **Only after the preceding contracts are stable, add a human-driven
+2. **Only after the preceding contracts are stable, add a human-driven
    single-step runner.**
    Execute exactly one approved local action, verify it, write the chained
    receipts, and stop for a new explicit approval. Do not add autonomous

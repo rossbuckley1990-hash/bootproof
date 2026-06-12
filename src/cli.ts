@@ -232,6 +232,7 @@ function printExternalHealthResult(attestation: Attestation, evidencePath: strin
 
 function printAgentPlan(plan: AgentPlan, outputPath: string): void {
   console.log(`${BOLD}Agent plan (planning only)${RESET}`);
+  if (plan.classifications.length) console.log(`Classifications: ${plan.classifications.join(", ")}`);
   console.log(`Current failure class: ${plan.currentFailureClass || "none established"}`);
   console.log(`Suspected stack: ${plan.suspectedStack.length ? plan.suspectedStack.join(", ") : "none established"}`);
   console.log(`BootProof direct orchestration: ${plan.canBootProofOrchestrateDirectly ? "available" : "not established"}`);
@@ -252,6 +253,7 @@ function printAgentPlan(plan: AgentPlan, outputPath: string): void {
       console.log(`     Approval required: ${candidate.requiresApproval ? "yes" : "no"}`);
       console.log(`     Approval: ${candidate.approvalPrompt}`);
       if (candidate.blockedReason) console.log(`     Blocked: ${candidate.blockedReason}`);
+      if (candidate.secretSensitive) console.log("     Secret-sensitive: yes; command output must not be saved");
       console.log(`     Verify after action: ${candidate.verificationStep}`);
       console.log(`     Stop condition: ${candidate.stopCondition}`);
     }

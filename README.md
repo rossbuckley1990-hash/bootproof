@@ -71,6 +71,11 @@ candidate commands, mutation scope, risk, required approval, verification
 steps, and stop conditions, but it never executes a candidate action and never
 claims the application booted.
 
+For Airbyte repositories, planning recognizes the abctl-managed Docker, kind,
+Kubernetes, and Helm runbook. It can describe the approved
+`abctl local install --port 8001` step and external health checks, but it does
+not run abctl, Kubernetes, or credential commands.
+
 ## Verified Repairs
 
 For the small deterministic repair registry:

@@ -621,6 +621,101 @@ test("planning-only agent loop distinguishes direct BootProof orchestration", ()
   assert.doesNotMatch(JSON.stringify(plan), /"booted":true|"verified":true|"success":true/i);
 });
 
+test("plan-agent recognizes the Airbyte abctl runbook without executing it", () => {
+  const repo = path.join(FIX, "airbyte");
+  const marker = path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE");
+  fs.rmSync(marker, { force: true });
+  const plan = buildAgentPlan(repo, { availableTools: new Set() });
+
+  assert.equal(plan.currentFailureClass, "airbyte_abctl_managed");
+  assert.deepEqual(plan.classifications, [
+    "airbyte_abctl_managed",
+    "large_orchestration_repo",
+    "external_orchestrator_required",
+    "kind_kubernetes_backed",
+    "helm_deployed",
+    "auth_required",
+  ]);
+  for (const tool of ["docker", "java", "abctl", "kind", "helm"]) {
+    assert.ok(plan.missingTools.includes(tool), `expected missing Airbyte tool ${tool}`);
+    assert.ok(plan.suspectedStack.includes(tool === "docker" ? "docker" : tool));
+  }
+  assert.equal(plan.missingTools.includes("gradle"), false, "the repository Gradle wrapper avoids a host Gradle install");
+  assert.equal(plan.canBootProofOrchestrateDirectly, false);
+  assert.equal(plan.canBootProofVerifyExternally, true);
+
+  const installs = new Map(plan.candidateNextActions.map(candidate => [candidate.command, candidate]));
+  for (const command of ["brew install openjdk", "brew install kind", "brew install helm"]) {
+    const candidate = installs.get(command);
+    assert.ok(candidate, `missing Airbyte install candidate: ${command}`);
+    assert.equal(candidate.riskLevel, "high");
+    assert.equal(candidate.mutationScope, "host_tool_install");
+    assert.equal(candidate.requiresApproval, true);
+  }
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.classification === "host_tool_install_required" &&
+    candidate.actionType === "instruction" &&
+    /official Airbyte documentation/.test(candidate.reason)
+  ));
+
+  const deploy = installs.get("abctl local install --port 8001");
+  assert.ok(deploy);
+  const sharedAssessment = assessActionRisk({
+    actionType: "command",
+    command: createRepairCommand("abctl", ["local", "install", "--port", "8001"]),
+    riskLevel: "low",
+    mutationScope: "none",
+    verificationStep: "abctl local status",
+  });
+  assert.equal(deploy.riskLevel, sharedAssessment.riskLevel);
+  assert.equal(deploy.mutationScope, sharedAssessment.mutationScope);
+  assert.equal(deploy.requiresApproval, sharedAssessment.requiresApproval);
+  assert.equal(deploy.classification, "external_orchestrator_required");
+
+  const credentials = installs.get("abctl local credentials");
+  assert.ok(credentials);
+  assert.equal(credentials.classification, "auth_required");
+  assert.equal(credentials.mutationScope, "credentials");
+  assert.equal(credentials.riskLevel, "high");
+  assert.equal(credentials.secretSensitive, true);
+  assert.match(credentials.reason, /must not capture, persist, or print/);
+
+  for (const step of [
+    "docker --version",
+    "java -version",
+    "abctl version",
+    "kind version",
+    "helm version",
+    "abctl local status",
+    "curl -i http://localhost:8001/api/v1/health",
+    "curl -i http://localhost:8001/api/v1/instance_configuration",
+    "kubectl --kubeconfig ~/.airbyte/abctl/abctl.kubeconfig get pods -A",
+  ]) {
+    assert.ok(plan.verificationSteps.includes(step), `missing Airbyte verification step: ${step}`);
+  }
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.classification === "external_health_verification_required" &&
+    candidate.command === "bootproof verify-url http://localhost:8001/api/v1/health"
+  ));
+  assert.equal(validateAgentPlan(plan).valid, true);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("plan-agent recognizes the canonical Airbyte Git remote without network access", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-airbyte-remote-"));
+  fs.mkdirSync(path.join(repo, ".git"));
+  fs.writeFileSync(
+    path.join(repo, ".git", "config"),
+    '[remote "origin"]\n\turl = https://github.com/airbytehq/airbyte.git\n',
+  );
+  const plan = buildAgentPlan(repo, { availableTools: new Set(["docker", "java", "abctl", "kind", "helm"]) });
+  assert.ok(plan.classifications.includes("airbyte_abctl_managed"));
+  assert.ok(plan.observedEvidence.includes("Git remote identifies airbytehq/airbyte."));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.command === "abctl local install --port 8001"
+  ));
+});
+
 test("agent plan JSON schema is strict and contains generic safety classifications", () => {
   const schema = fs.readFileSync(path.resolve("docs/schemas/agent-plan-v1.schema.json"), "utf8");
   assert.match(schema, /"additionalProperties": false/);
@@ -629,11 +724,22 @@ test("agent plan JSON schema is strict and contains generic safety classificatio
     "host_tool_install_required",
     "kubernetes_cluster_creation_required",
     "heavy_orchestration_required",
+    "external_orchestrator_required",
     "credential_required",
+    "auth_required",
     "external_health_verification_required",
   ]) {
     assert.match(schema, new RegExp(classification));
   }
+  for (const classification of [
+    "airbyte_abctl_managed",
+    "large_orchestration_repo",
+    "kind_kubernetes_backed",
+    "helm_deployed",
+  ]) {
+    assert.match(schema, new RegExp(classification));
+  }
+  assert.match(schema, /secretSensitive/);
 });
 
 test("repair scope whitelist permits boot plumbing and rejects application edits", () => {
@@ -741,6 +847,16 @@ test("shared action risk model classifies commands without allowing risk downgra
   });
   assert.equal(migration.riskLevel, "high");
   assert.equal(migration.mutationScope, "database");
+
+  const credentials = assessActionRisk({
+    actionType: "command",
+    command: createRepairCommand("abctl", ["local", "credentials"]),
+    riskLevel: "low",
+    mutationScope: "none",
+  });
+  assert.equal(credentials.riskLevel, "high");
+  assert.equal(credentials.mutationScope, "credentials");
+  assert.equal(credentials.requiresApproval, true);
 
   const unknown = assessActionRisk({
     actionType: "command",
