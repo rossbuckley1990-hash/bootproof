@@ -24,9 +24,11 @@ import {
   assertRepairScope,
   assertRepairTargetPath,
   composePortRepair,
+  deterministicRepairCandidateFor,
   migrationRepairFor,
   packageManagerActivationCommand,
   prismaRepairCommand,
+  repairProgressed,
   registeredRemediationsFor,
 } from "../dist/repair.js";
 import {
@@ -576,6 +578,79 @@ test("deterministic repair safety accepts exact safe commands and repo patches",
   assert.equal(patch.requiresApproval, true);
 });
 
+test("deterministic fix MVP maps only exact known failures to repair candidates", () => {
+  const attestation = (failureClass, failureEvidence) => ({
+    result: {
+      booted: false,
+      healthVerified: false,
+      failureClass,
+      failureEvidence,
+      explanation: failureEvidence,
+    },
+  });
+
+  const cmake = deterministicRepairCandidateFor(attestation(
+    "missing_build_tool",
+    "ERROR: CMake is required to build Rugged",
+  ));
+  assert.equal(cmake.id, "install-cmake-with-homebrew");
+  assert.equal(cmake.action.command.display, "brew install cmake");
+  assert.equal(cmake.action.mutationScope, "host");
+  assert.equal(cmake.action.riskLevel, "medium");
+  assert.equal(cmake.action.requiresApproval, true);
+
+  const redis = deterministicRepairCandidateFor(attestation(
+    "redis_unavailable",
+    "Redis::CannotConnectError Connection refused - connect(2) for 127.0.0.1:6379",
+  ), { homebrewAvailable: true });
+  assert.equal(redis.action.command.display, "brew services start redis");
+  assert.equal(redis.action.mutationScope, "service");
+  assert.equal(redis.action.requiresApproval, true);
+
+  const redisInstruction = deterministicRepairCandidateFor(attestation(
+    "redis_unavailable",
+    "Redis::CannotConnectError Connection refused - connect(2) for 127.0.0.1:6379",
+  ), { homebrewAvailable: false });
+  assert.equal(redisInstruction.action.actionType, "instruction");
+  assert.equal(redisInstruction.action.command, null);
+  assert.match(redisInstruction.action.instruction, /Start Redis using your local service manager/);
+
+  const rails = deterministicRepairCandidateFor(attestation(
+    "missing_env_var",
+    "The RAILS_ENV environment variable is not set.",
+  ));
+  assert.equal(rails.action.actionType, "instruction");
+  assert.equal(rails.action.requiresApproval, false);
+  assert.equal(
+    rails.action.instruction,
+    "RAILS_ENV=development bootproof up . --provider local --unsafe-local --install",
+  );
+  assert.equal(rails.action.patch, null, "missing env guidance must never patch protected env files");
+
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "missing_build_tool",
+    "A different build tool is unavailable",
+  )), null);
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "missing_env_var",
+    "Missing required secret: API_SECRET",
+  )), null);
+  assert.equal(deterministicRepairCandidateFor(attestation(
+    "unknown_failure",
+    "unclassified failure",
+  )), null);
+});
+
+test("deterministic repair progress requires verified health or a changed failure class", () => {
+  const after = (failureClass, booted = false, healthVerified = false) => ({
+    result: { failureClass, booted, healthVerified },
+  });
+  assert.equal(repairProgressed("missing_build_tool", after("missing_build_tool")), false);
+  assert.equal(repairProgressed("missing_build_tool", after("missing_env_var")), true);
+  assert.equal(repairProgressed("missing_build_tool", after(null, true, true)), true);
+  assert.equal(repairProgressed("missing_build_tool", null), false);
+});
+
 test("deterministic repair safety rejects dangerous commands without executing them", () => {
   const commands = [
     createRepairCommand("sudo", ["brew", "install", "cmake"]),
@@ -753,10 +828,11 @@ test("repair receipt schema and honesty additions are documented", () => {
   assert.match(schema, /preconditions/);
   assert.match(schema, /beforeAttestationSha256/);
   const honesty = fs.readFileSync(path.resolve("docs/HONESTY_CONTRACT.md"), "utf8");
-  assert.match(honesty, /only ever proposed with a verified before and after attestation/i);
-  assert.match(honesty, /repair generation never touches the user's working tree/i);
+  assert.match(honesty, /signature-valid classified failed attestation/i);
+  assert.match(honesty, /only after .* user types uppercase `Y`/i);
+  assert.match(honesty, /repair generation never patches the user's working tree/i);
   assert.match(honesty, /application logic is never edited/i);
-  assert.match(honesty, /never proposed on hope/i);
+  assert.match(honesty, /Declined, failed, progressed, and verified/i);
   assert.match(honesty, /stale or tampered receipts write nothing/i);
 });
 

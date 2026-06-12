@@ -250,7 +250,16 @@ function healthStatus(att: Attestation): RegistryEntry["healthStatus"] {
 }
 
 function repairCommand(receipt: RepairReceipt | null | undefined): string | null {
-  return receipt?.repair.planDelta ?? receipt?.repair.envDelta ?? null;
+  return receipt?.repair?.planDelta
+    ?? receipt?.repair?.envDelta
+    ?? receipt?.proposedAction.command?.display
+    ?? receipt?.proposedAction.instruction
+    ?? null;
+}
+
+function registryRepairKind(receipt: RepairReceipt): RepairKind {
+  if (receipt.repair) return receipt.repair.kind;
+  return receipt.actionType === "command" ? "environment" : "plan-step";
 }
 
 export function currentGitBranch(repo: string): string | null {
@@ -316,11 +325,12 @@ export function buildRegistryEntry(att: Attestation, options: RegistryBuildOptio
     healthStatus: healthStatus(att),
     healthUrlPattern: healthUrl.text,
     healthRedirectLocationPattern: healthRedirect.text,
-    ...(receipt ? { repairActionType: receipt.repair.kind } : {}),
+    ...(receipt ? { repairActionType: registryRepairKind(receipt) } : {}),
     ...(repair ? { repairCommandHash: sha256(repair) } : {}),
     ...(repairRedacted.text ? { repairCommandRedacted: repairRedacted.text } : {}),
-    ...(receipt ? { beforeFailureClass: receipt.verification.before.failureClass } : {}),
-    ...(receipt ? { progressed: receipt.verification.after.booted } : {}),
+    ...(receipt ? { beforeFailureClass: receipt.beforeFailureClass } : {}),
+    ...(receipt?.afterFailureClass ? { afterFailureClass: receipt.afterFailureClass } : {}),
+    ...(receipt ? { progressed: receipt.progressed } : {}),
     verified: att.result.booted === true && att.result.healthVerified === true,
     attestationHash: hashObject(att),
     ...(receipt ? { repairReceiptHash: hashObject(receipt) } : {}),

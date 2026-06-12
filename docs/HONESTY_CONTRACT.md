@@ -17,11 +17,12 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 11. A process starting is not enough. A health signal must be observed.
 12. Confidence describes evidence found, not predicted success.
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
-14. A repair is only ever proposed with a verified before and after attestation.
-15. Repair generation never touches the user's working tree; applying a diff requires the separate explicit `apply-repair` command. This separation is intentional and is not bypassed by `fix`.
-16. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
-17. An unverified or failed remediation is reported as such and is never proposed on hope.
-18. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
+14. A deterministic repair suggestion requires a signature-valid classified failed attestation.
+15. Commands run only after the exact command, mutation scope, and risk are shown and the user types uppercase `Y`. JSON and CI modes never approve commands.
+16. Repair generation never patches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
+17. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
+18. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
+19. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
 
 These behaviors are enforced by tests.
 
@@ -71,16 +72,22 @@ A repository Compose receipt is equally narrow. `docker compose up -d` exit 0 pr
 
 ## Verified Repairs
 
-`bootproof fix` copies the repository to a temporary sandbox, applies one registered deterministic remediation, and reruns the full BootProof verification engine. It reuses an existing failed attestation only when its signature is valid and it names the exact current clean Git commit; otherwise the failure is reproduced in the sandbox first.
+`bootproof fix` reads the latest signature-valid classified failure. The first interactive
+command playbooks cover missing CMake and unavailable Redis; `RAILS_ENV` receives a safe
+instruction only. Commands are structured argv, pass the safety validator, and require the
+literal response `Y`. After an approved command, BootProof copies the repository to a temporary
+sandbox and reruns the normal proof engine.
 
 The original working tree is never used as the repair target. BootProof writes only its evidence under `.bootproof/`:
 
 - the signed failed before attestation
 - a human-reviewable patch when files changed
-- the signed healthy after attestation
-- the signed repair receipt linking both hashes
+- the signed after attestation when a command was rerun
+- the signed repair receipt recording suggestion, approval, application, progress, and verification
 
-If the sandbox does not reach observed HTTP health, no repair receipt or patch is emitted. The failed attempt is appended to signed failure evidence.
+Declined, failed, and unverified attempts still produce receipts because failed attestations and
+repair attempts are valuable. `verified` remains false unless the rerun observes healthy HTTP.
+`progressed` is true only for verified health or a changed failure class.
 
 `bootproof fix` never auto-applies a patch. `bootproof apply-repair` is a separate, explicit mutation command. It verifies the receipt signature, scope whitelist, signed content hashes, and current preimages before writing. A mismatch writes nothing.
 

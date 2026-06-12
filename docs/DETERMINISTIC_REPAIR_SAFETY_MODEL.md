@@ -1,8 +1,8 @@
 # Deterministic Repair Safety Model
 
-Status: foundation in progress. The shared action model, safety validation, and additive receipt
-schema are implemented. The planning-only CLI, action approval flow, and host-command executor
-remain future work.
+Status: foundation plus interactive MVP in progress. The shared action model, safety validation,
+additive receipt schema, uppercase-`Y` command approval, structured executor, and three initial
+playbooks are implemented. Signed repair plans and action-hash approvals remain future work.
 
 ## Product Contract
 
@@ -33,8 +33,9 @@ The current implementation already provides useful foundations:
 - exact file preimage checks
 - a separate `bootproof apply-repair` command for repository file changes
 
-However, current `bootproof fix` can execute registered plan/environment commands in a sandbox
-before action-level approval. The proposed model changes that boundary:
+The first MVP directly prompts for exact CMake and Redis commands and records instructions for
+`RAILS_ENV`. Existing legacy sandbox remediations remain until the full planning model changes
+the boundary:
 
 1. `bootproof fix` plans only.
 2. `bootproof apply-repair` is the only command or patch mutation entrypoint.
@@ -666,9 +667,9 @@ implementation step inside the already established signed file-preimage boundary
 
 The current foundation does not implement:
 
-- command or patch execution
-- interactive approval
-- new repair playbooks
+- additional repair playbooks beyond the three-command/instruction MVP
 - receipt migration
+- signed repair plans or action-hash approval
+- general command or patch application through the new model
 - AI repair
 - hosted services, Cloud upload, crawler, telemetry, or automatic sharing

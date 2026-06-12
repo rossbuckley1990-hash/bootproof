@@ -66,9 +66,13 @@ For the small deterministic repair registry:
 bootproof fix .
 ```
 
-BootProof reuses a signature-valid failure only at the exact clean Git commit; otherwise it reproduces the failure in a temporary copy. It applies one known remediation there and reruns full verification. It emits a signed `bootproof/repair-receipt/v1` only when the before run failed and the after run observed successful HTTP health.
+BootProof reads the latest signature-valid classified failure and maps exact known failures to
+deterministic actions. Host and service commands show the exact command, scope, and risk, and
+run only when the user types uppercase `Y`. JSON and CI modes never approve commands.
 
-The original working tree is not edited. File changes are written as a reviewable patch under `.bootproof/`; the human decides whether to apply it.
+The current MVP covers missing CMake, unavailable Redis, and the safe local `RAILS_ENV`
+instruction. Approved commands are followed by a sandboxed BootProof rerun. Signed receipts
+distinguish declined, failed, progressed, and verified outcomes.
 
 Machine mode is:
 
