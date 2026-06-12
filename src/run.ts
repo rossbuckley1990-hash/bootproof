@@ -8,6 +8,7 @@ import {
   buildExecutionEnv,
   detectHealthCandidatePortMismatch,
   execResultEvidence,
+  extractHealthCandidates,
   healthCandidatePortMismatchEvidence,
   processEvidenceText,
   runToCompletion,
@@ -418,16 +419,28 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const t = new Date().toISOString();
       const app = superviseApp(planned.command, inference.repoPath, env);
       const inferredHealthUrl = plan.healthUrl;
+      const inferredHealthCandidates = new Set(plan.healthCandidates);
       const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs, app.output);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      for (const advertisedHealthUrl of extractHealthCandidates(app.output())) {
+        if (!health.candidates.includes(advertisedHealthUrl)) {
+          health.candidates.push(advertisedHealthUrl);
+        }
+        if (
+          !inferredHealthCandidates.has(advertisedHealthUrl)
+          && !health.discoveredCandidates.includes(advertisedHealthUrl)
+        ) {
+          health.discoveredCandidates.push(advertisedHealthUrl);
+        }
+      }
       plan.healthCandidates = health.candidates;
       if (health.url) plan.healthUrl = health.url;
-      const portMismatchEvidence = healthCandidatePortMismatchEvidence(
-        detectHealthCandidatePortMismatch(
-          inferredHealthUrl,
-          health.discoveredCandidates,
-          planned.command,
-        ),
+      const portMismatch = detectHealthCandidatePortMismatch(
+        inferredHealthUrl,
+        health.discoveredCandidates,
+        planned.command,
       );
+      const portMismatchEvidence = healthCandidatePortMismatchEvidence(portMismatch);
       const exit = app.exited();
       if (exit && !health.responded) {
         const processEvidence = app.evidence();
@@ -456,11 +469,13 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         : `no HTTP response at candidates ${health.candidates.join(", ")} within ${opts.timeoutMs}ms`;
       observed.push(step("health", "health", undefined, ht, null, false, healthFailureMessage, processEvidence));
       const c = classifyFailure(`${healthFailureMessage}\n${evidence}`);
-      const healthClass = health.responded && health.status !== null && health.status >= 500
-        ? "health_http_error"
-        : c.class === "unknown_failure"
-          ? classifyHealthFailure(healthFailureMessage)
-          : c.class;
+      const healthClass = portMismatch
+        ? "health_candidate_port_mismatch"
+        : health.responded && health.status !== null && health.status >= 500
+          ? "health_http_error"
+          : c.class === "unknown_failure"
+            ? classifyHealthFailure(healthFailureMessage)
+            : c.class;
       const healthExplanation = healthClass === "health_http_error"
         ? "The app responded on the configured health URL, but returned HTTP 5xx. BootProof observed a running server, but not a verified healthy boot."
         : c.explanation;

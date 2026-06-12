@@ -63,6 +63,16 @@ export function diagnoseFailure(
         "The PHP dependency autoloader is absent, so the application cannot start reliably.",
         "Resolve any PHP or Composer version issue first, then run composer install to generate vendor/autoload.php.",
       );
+    case "laravel_sqlite_database_missing":
+      return preciseFailure(
+        "Laravel cannot use the configured SQLite connection because its local database file is absent.",
+        "After review, create database/database.sqlite and run php artisan migrate. Both steps mutate local state and require explicit approval.",
+      );
+    case "laravel_migrations_required":
+      return preciseFailure(
+        "Laravel started, but its required database tables are absent.",
+        "Run php artisan migrate only after explicit approval because it mutates local database state.",
+      );
     case "missing_build_tool":
       return preciseFailure(
         "The dependency installation cannot complete without the required native build tool.",
