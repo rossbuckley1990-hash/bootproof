@@ -18,12 +18,22 @@ import {
 } from "./proof.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
 import { inferRepo } from "./infer.js";
+import {
+  buildRepairAction,
+  buildRepairReceiptBase,
+  createRepairCommand,
+  type RepairCommand,
+  type RepairMutationScope,
+  type RepairReceiptBase,
+  type RepairRiskLevel,
+} from "./repair-safety.js";
 import type { Attestation, FailureClass, PackageManager, PreparationCommand } from "./types.js";
+
+export * from "./repair-safety.js";
 
 export type RepairKind = "repo-diff" | "plan-step" | "environment";
 
-export interface RepairReceipt {
-  schema: "bootproof/repair-receipt/v1";
+export interface RepairReceipt extends RepairReceiptBase {
   tool: string;
   repo: { remote: string | null; commit: string | null; dirty: boolean | null };
   environment: { os: string; arch: string; node: string };
@@ -108,6 +118,9 @@ interface AppliedRepair {
   envDelta: string | null;
   environment?: Record<string, string>;
   additionalPreparationCommands?: PreparationCommand[];
+  mutationScope: RepairMutationScope;
+  riskLevel: RepairRiskLevel;
+  command?: RepairCommand;
 }
 
 interface RepairContext {
@@ -371,6 +384,8 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
       preconditions: [{ path: repoCompose, content: source }],
       planDelta: `Create ${repairFile} as a complete repaired copy of ${repoCompose}. Use service step: ${command}`,
       envDelta: null,
+      mutationScope: "repo",
+      riskLevel: "low",
     };
   }
 
@@ -397,6 +412,8 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
     preconditions: [],
     planDelta: null,
     envDelta: null,
+    mutationScope: "repo",
+    riskLevel: "low",
   };
 }
 
@@ -430,6 +447,9 @@ async function activatePackageManager(context: RepairContext): Promise<AppliedRe
     planDelta: null,
     envDelta: command,
     environment,
+    mutationScope: "host",
+    riskLevel: "medium",
+    command: createRepairCommand("corepack", ["prepare", `${packageManager}@${packageManagerVersion}`, "--activate"]),
   };
 }
 
@@ -456,6 +476,11 @@ function readPackageJson(repo: string): Record<string, any> | null {
 
 function hasAnyFile(repo: string, files: string[]): string | null {
   return files.find(file => fs.existsSync(path.join(repo, file))) ?? null;
+}
+
+function structuredPlaybookCommand(command: string): RepairCommand {
+  const [executable, ...args] = command.split(" ");
+  return createRepairCommand(executable, args);
 }
 
 export function migrationRepairFor(repo: string, evidence: string): MigrationRepair | null {
@@ -562,6 +587,9 @@ async function deployFrameworkMigrations(context: RepairContext): Promise<Applie
     planDelta: `Insert after dependency installation and before application start: ${migration.command}`,
     envDelta: null,
     additionalPreparationCommands: [preparation],
+    mutationScope: "database",
+    riskLevel: "high",
+    command: structuredPlaybookCommand(migration.command),
   };
 }
 
@@ -632,6 +660,43 @@ function persistFailureAttestation(
   return attestation;
 }
 
+function proposedActionFor(applied: AppliedRepair) {
+  if (applied.fileChanges.length) {
+    const patch = applied.patch ?? applied.diff;
+    if (!patch) throw new Error("repair file changes require an exact patch");
+    return buildRepairAction({
+      actionType: "patch",
+      mutationScope: "repo",
+      riskLevel: applied.riskLevel,
+      patch: {
+        format: "unified-diff",
+        content: patch,
+        files: applied.fileChanges.map(change => normalizedRelative(change.path)),
+      },
+      explanation: applied.description,
+      evidenceRefs: [".bootproof/attestation.json"],
+    });
+  }
+  if (applied.command) {
+    return buildRepairAction({
+      actionType: "command",
+      mutationScope: applied.mutationScope,
+      riskLevel: applied.riskLevel,
+      command: applied.command,
+      explanation: applied.description,
+      evidenceRefs: [".bootproof/attestation.json"],
+    });
+  }
+  return buildRepairAction({
+    actionType: "instruction",
+    mutationScope: "none",
+    riskLevel: applied.riskLevel,
+    instruction: applied.description,
+    explanation: applied.description,
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+}
+
 function buildRepairReceipt(
   repo: string,
   before: Attestation,
@@ -656,8 +721,29 @@ function buildRepairReceipt(
   const beforeHash = sha256Attestation(before);
   const afterHash = sha256Attestation(after);
   const info = gitInfo(repo);
+  const finishedAt = new Date().toISOString();
+  const proposedAction = proposedActionFor(applied);
+  const base = buildRepairReceiptBase({
+    repairId: applied.id,
+    createdAt: finishedAt,
+    bootproofVersion: TOOL_ID.replace(/^bootproof@/, ""),
+    beforeFailureClass: before.result.failureClass,
+    beforeEvidenceHash: sha256Text(before.result.failureEvidence ?? ""),
+    proposedAction,
+    appliedAt: finishedAt,
+    applyResult: {
+      status: "applied",
+      exitCode: 0,
+      filesChanged: applied.filesChanged.map(normalizedRelative),
+      evidence: null,
+    },
+    progressed: true,
+    verified: true,
+    explanation: applied.description,
+    redactionsApplied: [],
+  });
   const receipt: RepairReceipt = {
-    schema: "bootproof/repair-receipt/v1",
+    ...base,
     tool: TOOL_ID,
     repo: { remote: info.remote, commit: info.commit, dirty: info.dirty },
     environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
@@ -695,7 +781,7 @@ function buildRepairReceipt(
       },
     },
     startedAt,
-    finishedAt: new Date().toISOString(),
+    finishedAt,
     signer: null,
     signature: null,
   };

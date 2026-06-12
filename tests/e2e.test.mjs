@@ -861,6 +861,15 @@ test("repair: conflicting repository Compose port produces signed verified recei
     const receiptPath = path.join(repo, result.receiptPath);
     const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
     assert.equal(receipt.schema, "bootproof/repair-receipt/v1");
+    assert.equal(receipt.repairId, "remap-conflicting-service-port");
+    assert.equal(receipt.actionType, "patch");
+    assert.equal(receipt.mutationScope, "repo");
+    assert.equal(receipt.riskLevel, "low");
+    assert.equal(receipt.userApprovalRequired, true);
+    assert.equal(receipt.applyResult.status, "applied");
+    assert.equal(receipt.progressed, true);
+    assert.equal(receipt.verified, true);
+    assert.equal(receipt.proposedAction.source, "deterministic_playbook");
     assert.equal(receipt.repair.kind, "plan-step");
     assert.deepEqual(receipt.repair.filesChanged, ["docker-compose.bootproof.override.yml"]);
     assert.equal(receipt.repair.diff, null);
@@ -973,6 +982,11 @@ test("repair: declared package manager activation is verified end to end", async
   assert.equal(hashWorkingTree(repo), beforeHash);
 
   const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
+  assert.equal(receipt.actionType, "command");
+  assert.equal(receipt.mutationScope, "host");
+  assert.equal(receipt.riskLevel, "medium");
+  assert.equal(receipt.userApprovalRequired, true);
+  assert.equal(receipt.proposedAction.command.display, "corepack prepare pnpm@10.24.0 --activate");
   assert.equal(receipt.repair.kind, "environment");
   assert.equal(receipt.repair.envDelta, "corepack prepare pnpm@10.24.0 --activate");
   assert.deepEqual(receipt.repair.fileChanges, []);

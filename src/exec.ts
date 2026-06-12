@@ -84,18 +84,61 @@ export function processEvidenceText(evidence: ProcessEvidence): string {
   ].filter(Boolean).join("\n");
 }
 
+function setExecutionEnvValue(env: NodeJS.ProcessEnv, name: string, value: string | undefined): void {
+  for (const existing of Object.keys(env)) {
+    if (existing !== name && existing.toLowerCase() === name.toLowerCase()) delete env[existing];
+  }
+  if (value === undefined) delete env[name];
+  else env[name] = value;
+}
+
 export function buildExecutionEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, CI: "true", BOOTPROOF: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of ["PATH", "HOME", "SHELL"]) {
+    const inherited = Object.keys(process.env).find(existing => existing.toLowerCase() === name.toLowerCase());
+    if (inherited) setExecutionEnvValue(env, name, process.env[inherited]);
+  }
+  setExecutionEnvValue(env, "CI", "true");
+  setExecutionEnvValue(env, "BOOTPROOF", "1");
   for (const [name, value] of Object.entries(overrides)) {
-    if (value === undefined) delete env[name];
-    else env[name] = value;
+    setExecutionEnvValue(env, name, value);
   }
   return env;
 }
 
+export function extractLeadingEnvironmentAssignments(command: string): {
+  command: string;
+  environment: Record<string, string>;
+} {
+  const environment: Record<string, string> = {};
+  let remaining = command;
+  while (true) {
+    const match = remaining.match(
+      /^\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|<>]+))\s+/,
+    );
+    if (!match) break;
+    environment[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+    remaining = remaining.slice(match[0].length);
+  }
+  if (!remaining.trim() || Object.keys(environment).length === 0) {
+    return { command, environment: {} };
+  }
+  return { command: remaining, environment };
+}
+
+function shellInvocation(command: string, env: NodeJS.ProcessEnv): { command: string; env: NodeJS.ProcessEnv } {
+  if (process.platform !== "win32") return { command, env: buildExecutionEnv(env) };
+  const extracted = extractLeadingEnvironmentAssignments(command);
+  return {
+    command: extracted.command,
+    env: buildExecutionEnv({ ...env, ...extracted.environment }),
+  };
+}
+
 export function runToCompletion(command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<ExecResult> {
   return new Promise(resolve => {
-    const child = spawn(command, { cwd, shell: true, detached: process.platform !== "win32", env: buildExecutionEnv(env) });
+    const invocation = shellInvocation(command, env);
+    const child = spawn(invocation.command, { cwd, shell: true, detached: process.platform !== "win32", env: invocation.env });
     let stdoutHead = "", stdout = "", stderrHead = "", stderr = "", timedOut = false;
     child.stdout?.on("data", d => {
       const chunk = String(d);
@@ -132,7 +175,8 @@ export interface SupervisedApp {
 }
 
 export function superviseApp(command: string, cwd: string, env: NodeJS.ProcessEnv): SupervisedApp {
-  const child = spawn(command, { cwd, shell: true, detached: process.platform !== "win32", env: buildExecutionEnv(env) });
+  const invocation = shellInvocation(command, env);
+  const child = spawn(invocation.command, { cwd, shell: true, detached: process.platform !== "win32", env: invocation.env });
   let outHead = "", outTail = "", exit: { code: number | null; early: boolean } | null = null;
   const capture = (data: unknown) => {
     const chunk = String(data);

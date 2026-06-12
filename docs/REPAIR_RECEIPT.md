@@ -15,6 +15,16 @@ No receipt is emitted unless both statements are signed evidence:
 bootproof/repair-receipt/v1
 ```
 
+The strict machine schemas are:
+
+- [`schemas/repair-action-v1.schema.json`](schemas/repair-action-v1.schema.json)
+- [`schemas/repair-receipt-v1.schema.json`](schemas/repair-receipt-v1.schema.json)
+
+The v1 receipt now includes additive safety-foundation fields: the deterministic proposed
+action, mutation scope, risk level, approval requirement, apply result, progress and
+verification booleans, and redaction record. Existing signed verification fields remain for
+backward-compatible inspection and application.
+
 ```json
 {
   "schema": "bootproof/repair-receipt/v1",
