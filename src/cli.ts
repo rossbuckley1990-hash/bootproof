@@ -33,6 +33,7 @@ import {
   repairRepo,
   verifyRepairReceipt,
   type RepairApplyResult,
+  type RepairAction,
   type RepairReceipt,
   type RepairResult,
 } from "./repair.js";
@@ -248,7 +249,9 @@ function printAgentPlan(plan: AgentPlan, outputPath: string): void {
       console.log(`     Reason: ${candidate.reason}`);
       console.log(`     Risk: ${candidate.riskLevel}`);
       console.log(`     Mutation scope: ${candidate.mutationScope}`);
-      console.log(`     Approval required: yes`);
+      console.log(`     Approval required: ${candidate.requiresApproval ? "yes" : "no"}`);
+      console.log(`     Approval: ${candidate.approvalPrompt}`);
+      if (candidate.blockedReason) console.log(`     Blocked: ${candidate.blockedReason}`);
       console.log(`     Verify after action: ${candidate.verificationStep}`);
       console.log(`     Stop condition: ${candidate.stopCondition}`);
     }
@@ -307,10 +310,11 @@ function printRepairResult(result: RepairResult): void {
   if (result.receiptPath) console.log(`Receipt: ${result.receiptPath}`);
 }
 
-async function commandRepairApproval(command: string, riskLevel: string): Promise<boolean> {
-  console.log("This repair may modify your local machine or services.");
-  console.log(`Command: ${command}`);
-  console.log(`Risk: ${riskLevel}`);
+async function commandRepairApproval(action: RepairAction): Promise<boolean> {
+  console.log(action.approvalPrompt);
+  console.log(`Command: ${action.command!.display}`);
+  console.log(`Mutation scope: ${action.mutationScope}`);
+  console.log(`Risk: ${action.riskLevel}`);
   const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     return await prompt.question("Run this command? Type Y to approve: ") === "Y";
@@ -319,7 +323,8 @@ async function commandRepairApproval(command: string, riskLevel: string): Promis
   }
 }
 
-async function patchRepairApproval(): Promise<boolean> {
+async function patchRepairApproval(action: RepairAction): Promise<boolean> {
+  console.log(action.approvalPrompt);
   const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     return await prompt.question("Test this patch in the repair sandbox? Type Y to approve: ") === "Y";
@@ -338,6 +343,8 @@ function printRepairCandidate(candidate: ReturnType<typeof latestDeterministicRe
   if (action.patch) console.log(`Patch preview:\n${action.patch.content}`);
   console.log(`Mutation scope: ${action.mutationScope}`);
   console.log(`Risk: ${action.riskLevel}`);
+  console.log(`Approval: ${action.approvalPrompt}`);
+  console.log(`Verify after action: ${action.verificationStep}`);
   for (const followUp of candidate.candidate.followUpActions ?? []) {
     if (followUp.command) console.log(`Later separately approved command: ${followUp.command.display}`);
     if (followUp.instruction) console.log(`Follow-up instruction: ${followUp.instruction}`);
@@ -607,11 +614,8 @@ async function main() {
       const effectiveProvider = provider ?? latestCandidate.attestation.plan.provider;
       if (effectiveProvider !== "local" || flags["unsafe-local"]) {
         actionApproved = latestCandidate.candidate.action.actionType === "command"
-          ? await commandRepairApproval(
-              latestCandidate.candidate.action.command!.display,
-              latestCandidate.candidate.action.riskLevel,
-            )
-          : await patchRepairApproval();
+          ? await commandRepairApproval(latestCandidate.candidate.action)
+          : await patchRepairApproval(latestCandidate.candidate.action);
       }
     }
     const repairResult = await repairRepo(target, {

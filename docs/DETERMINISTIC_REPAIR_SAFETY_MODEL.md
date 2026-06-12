@@ -137,9 +137,12 @@ Implemented foundation schema: `bootproof/repair-action/v1`.
 {
   "schema": "bootproof/repair-action/v1",
   "actionType": "command",
-  "mutationScope": "host",
-  "riskLevel": "medium",
+  "mutationScope": "host_tool_install",
+  "riskLevel": "high",
   "requiresApproval": true,
+  "approvalPrompt": "This action may install or change tools on your local machine. Review the exact command before approving it.",
+  "blockedReason": "",
+  "verificationStep": "Rerun BootProof and require observed health evidence before marking progress.",
   "command": {
     "executable": "rbenv",
     "args": ["install", "3.3.11"],
@@ -158,15 +161,23 @@ Required enums:
 
 ```text
 actionType: command | patch | instruction
-mutationScope: repo | host | service | database | none
-riskLevel: low | medium | high | blocked
+mutationScope: none | repo_only | project_cache | container_runtime |
+  host_tool_install | host_network | kubernetes_cluster | database |
+  service | credentials | unknown
+riskLevel: none | low | medium | high | blocked
 ```
 
 Rules:
 
-- `command` and `patch` always have `requiresApproval: true`.
-- `instruction` has `mutationScope: none` and is not executable.
+- `medium` and `high` actions always have `requiresApproval: true`.
+- `none` and `low` actions may be displayed without approval.
+- repository patches still require approval and use `mutationScope: repo_only`.
+- instructions are not executable.
 - `riskLevel: blocked` cannot have an executable command or applicable patch.
+- unknown commands are at least `medium` risk and use `mutationScope: unknown`
+  unless a stricter deterministic classification applies.
+- the shared classifier assigns high risk to host installs, Kubernetes creation
+  or application, database migrations, and credential generation.
 - Exactly one of `command`, `patch`, or `instruction` is present.
 - The future signed plan adds playbook identity, preconditions, progression rules, and an
   action hash around this validated action payload.
@@ -397,8 +408,8 @@ Proposed receipt:
     "id": "install-required-ruby",
     "actionHash": "...",
     "actionType": "command",
-    "mutationScope": "host",
-    "riskLevel": "medium",
+    "mutationScope": "host_tool_install",
+    "riskLevel": "high",
     "exactCommand": "rbenv install 3.3.11",
     "exactPatchHash": null
   },

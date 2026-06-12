@@ -402,7 +402,7 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
       preconditions: [{ path: repoCompose, content: source }],
       planDelta: `Create ${repairFile} as a complete repaired copy of ${repoCompose}. Use service step: ${command}`,
       envDelta: null,
-      mutationScope: "repo",
+      mutationScope: "repo_only",
       riskLevel: "low",
     };
   }
@@ -430,7 +430,7 @@ async function remapConflictingServicePort(context: RepairContext): Promise<Appl
     preconditions: [],
     planDelta: null,
     envDelta: null,
-    mutationScope: "repo",
+    mutationScope: "repo_only",
     riskLevel: "low",
   };
 }
@@ -465,7 +465,7 @@ async function activatePackageManager(context: RepairContext): Promise<AppliedRe
     planDelta: null,
     envDelta: command,
     environment,
-    mutationScope: "host",
+    mutationScope: "project_cache",
     riskLevel: "medium",
     command: createRepairCommand("corepack", ["prepare", `${packageManager}@${packageManagerVersion}`, "--activate"]),
   };
@@ -684,7 +684,7 @@ function proposedActionFor(applied: AppliedRepair) {
     if (!patch) throw new Error("repair file changes require an exact patch");
     return buildRepairAction({
       actionType: "patch",
-      mutationScope: "repo",
+      mutationScope: "repo_only",
       riskLevel: applied.riskLevel,
       patch: {
         format: "unified-diff",

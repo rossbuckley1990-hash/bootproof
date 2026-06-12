@@ -180,7 +180,7 @@ function copyConfigCandidate(input: {
     failureClass: input.failureClass,
     action: buildRepairAction({
       actionType: "patch",
-      mutationScope: "repo",
+      mutationScope: "repo_only",
       riskLevel: input.riskLevel,
       patch: {
         format: "unified-diff",
@@ -265,7 +265,7 @@ export function deterministicRepairCandidateFor(
       failureClass,
       action: buildRepairAction({
         actionType: "command",
-        mutationScope: "host",
+        mutationScope: "host_tool_install",
         riskLevel: "medium",
         command: createRepairCommand("rbenv", ["install", requiredVersion]),
         explanation: `Install the exact Ruby ${requiredVersion} version required by the preserved rbenv failure.`,
@@ -281,7 +281,7 @@ export function deterministicRepairCandidateFor(
       failureClass,
       action: buildRepairAction({
         actionType: "command",
-        mutationScope: "host",
+        mutationScope: "host_tool_install",
         riskLevel: "medium",
         command: createRepairCommand("brew", ["install", "cmake"]),
         explanation: "Install the exact CMake build tool identified by the preserved failure evidence.",
@@ -332,7 +332,7 @@ export function deterministicRepairCandidateFor(
         failureClass,
         action: buildRepairAction({
           actionType: "command",
-          mutationScope: "host",
+          mutationScope: "project_cache",
           riskLevel: "medium",
           command: configCommand,
           explanation: "Configure Bundler with the detected Homebrew libidn prefix without shell substitution.",
@@ -343,7 +343,7 @@ export function deterministicRepairCandidateFor(
     const followUpActions = libidnPrefix && configCommandSafe
       ? [buildRepairAction({
           actionType: "command",
-          mutationScope: "host",
+          mutationScope: "project_cache",
           riskLevel: "medium",
           command: configCommand!,
           explanation: "After libidn is installed, configure Bundler with its deterministic Homebrew prefix in a separately approved run.",
@@ -355,7 +355,7 @@ export function deterministicRepairCandidateFor(
       failureClass,
       action: buildRepairAction({
         actionType: "command",
-        mutationScope: "host",
+        mutationScope: "host_tool_install",
         riskLevel: "medium",
         command: createRepairCommand("brew", ["install", "libidn", "pkg-config"]),
         explanation: libidnPrefix && configCommandSafe
@@ -501,7 +501,7 @@ export function deterministicRepairCandidateFor(
       failureClass,
       action: buildRepairAction({
         actionType: "command",
-        mutationScope: "host",
+        mutationScope: "host_tool_install",
         riskLevel: "high",
         command: createRepairCommand("brew", ["install", formula]),
         explanation: `Install PostgreSQL ${major} without changing PATH automatically. A later separately approved action will start ${formula}.`,
@@ -543,7 +543,7 @@ export function deterministicRepairCandidateFor(
       failureClass,
       action: buildRepairAction({
         actionType: "patch",
-        mutationScope: "repo",
+        mutationScope: "repo_only",
         riskLevel: "medium",
         patch: {
           format: "unified-diff",

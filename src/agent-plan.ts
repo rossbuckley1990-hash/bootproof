@@ -4,8 +4,13 @@ import { inferRepo } from "./infer.js";
 import { attestationPath, verifySignature } from "./proof.js";
 import { redactText } from "./redact.js";
 import {
+  ACTION_MUTATION_SCOPES,
+  ACTION_RISK_LEVELS,
+  assessActionRisk,
   createRepairCommand,
+  validateActionRiskAssessment,
   validateRepairCommand,
+  type RepairCommand,
   type RepairMutationScope,
   type RepairRiskLevel,
 } from "./repair-safety.js";
@@ -26,7 +31,9 @@ export interface AgentPlanAction {
   evidence: string[];
   riskLevel: RepairRiskLevel;
   mutationScope: RepairMutationScope;
-  requiresApproval: true;
+  requiresApproval: boolean;
+  approvalPrompt: string;
+  blockedReason: string;
   verificationStep: string;
   stopCondition: string;
 }
@@ -77,6 +84,8 @@ const ACTION_KEYS = new Set([
   "riskLevel",
   "mutationScope",
   "requiresApproval",
+  "approvalPrompt",
+  "blockedReason",
   "verificationStep",
   "stopCondition",
 ]);
@@ -88,8 +97,8 @@ const CLASSIFICATIONS = new Set<AgentSafetyClassification>([
   "external_health_verification_required",
 ]);
 const ACTION_TYPES = new Set(["command", "instruction"]);
-const RISK_LEVELS = new Set<RepairRiskLevel>(["low", "medium", "high", "blocked"]);
-const MUTATION_SCOPES = new Set<RepairMutationScope>(["repo", "host", "service", "database", "none"]);
+const RISK_LEVELS = new Set<RepairRiskLevel>(ACTION_RISK_LEVELS);
+const MUTATION_SCOPES = new Set<RepairMutationScope>(ACTION_MUTATION_SCOPES);
 const INSPECTION_LIMIT = 256;
 const FILE_SIZE_LIMIT = 128 * 1024;
 const IGNORED_DIRECTORIES = new Set([
@@ -250,46 +259,69 @@ function documentedHealthUrls(text: string): string[] {
   });
 }
 
-function documentedAbctlCommands(text: string): string[] {
-  const commands: string[] = [];
+function documentedAbctlCommands(text: string): RepairCommand[] {
+  const commands = new Map<string, RepairCommand>();
   for (const match of text.matchAll(/\babctl\s+local\s+install(?:\s+--port\s+(\d{2,5}))?/gi)) {
     const args = ["local", "install", ...(match[1] ? ["--port", match[1]] : [])];
     const command = createRepairCommand("abctl", args);
-    if (validateRepairCommand(command).valid) commands.push(command.display);
+    if (validateRepairCommand(command).valid) commands.set(command.display, command);
   }
-  return uniqueSorted(commands);
+  return [...commands.values()].sort((a, b) => a.display.localeCompare(b.display));
 }
 
-function documentedKindCommands(text: string): string[] {
-  const commands: string[] = [];
+function documentedKindCommands(text: string): RepairCommand[] {
+  const commands = new Map<string, RepairCommand>();
   for (const match of text.matchAll(/\bkind\s+create\s+cluster(?:\s+--name\s+([A-Za-z0-9_.-]+))?/gi)) {
     const args = ["create", "cluster", ...(match[1] ? ["--name", match[1]] : [])];
     const command = createRepairCommand("kind", args);
-    if (validateRepairCommand(command).valid) commands.push(command.display);
+    if (validateRepairCommand(command).valid) commands.set(command.display, command);
   }
-  return uniqueSorted(commands);
+  return [...commands.values()].sort((a, b) => a.display.localeCompare(b.display));
 }
 
-function action(input: Omit<AgentPlanAction, "requiresApproval">): AgentPlanAction {
+function action(input: Omit<
+  AgentPlanAction,
+  "command" | "requiresApproval" | "approvalPrompt" | "blockedReason"
+> & {
+  command?: RepairCommand | null;
+  blockedReason?: string;
+}): AgentPlanAction {
+  const assessment = assessActionRisk({
+    actionType: input.actionType,
+    command: input.command,
+    riskLevel: input.riskLevel,
+    mutationScope: input.mutationScope,
+    blockedReason: input.blockedReason,
+    verificationStep: input.verificationStep,
+  });
   return {
     ...input,
+    command: assessment.command,
     evidence: uniqueSorted(input.evidence.map(safeEvidence)),
-    requiresApproval: true,
+    riskLevel: assessment.riskLevel,
+    mutationScope: assessment.mutationScope,
+    requiresApproval: assessment.requiresApproval,
+    approvalPrompt: assessment.approvalPrompt,
+    blockedReason: assessment.blockedReason,
+    verificationStep: assessment.verificationStep,
   };
 }
 
-function validateAgentCommand(display: string): string[] {
+function parseAgentCommand(display: string): { command: RepairCommand | null; errors: string[] } {
   const tokens = display.trim().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return ["command must not be empty"];
+  if (tokens.length === 0) return { command: null, errors: ["command must not be empty"] };
   const [executable, ...args] = tokens;
   if (!["abctl", "kind", "bootproof"].includes(executable)) {
-    return ["command is not in the deterministic agent-plan registry"];
+    return { command: null, errors: ["command is not in the deterministic agent-plan registry"] };
   }
   const command = createRepairCommand(executable, args);
   if (command.display !== display) {
-    return ["command must be a canonical single command without shell quoting or chaining"];
+    return {
+      command: null,
+      errors: ["command must be a canonical single command without shell quoting or chaining"],
+    };
   }
-  return validateRepairCommand(command).errors;
+  return { command, errors: validateRepairCommand(command).errors };
 }
 
 function genericFailureClass(input: {
@@ -347,10 +379,13 @@ export function validateAgentPlan(value: unknown): AgentPlanValidation {
       if (!CLASSIFICATIONS.has(item.classification as AgentSafetyClassification)) errors.push(`candidateNextActions[${index}] has invalid classification`);
       if (!ACTION_TYPES.has(String(item.actionType))) errors.push(`candidateNextActions[${index}] has invalid actionType`);
       if (typeof item.command !== "string") errors.push(`candidateNextActions[${index}].command must be a string`);
-      for (const field of ["reason", "verificationStep", "stopCondition"] as const) {
+      for (const field of ["reason", "approvalPrompt", "verificationStep", "stopCondition"] as const) {
         if (typeof item[field] !== "string" || !item[field]!.trim()) {
           errors.push(`candidateNextActions[${index}].${field} must be a non-empty string`);
         }
+      }
+      if (typeof item.blockedReason !== "string") {
+        errors.push(`candidateNextActions[${index}].blockedReason must be a string`);
       }
       if (!isStringArray(item.evidence)) {
         errors.push(`candidateNextActions[${index}].evidence must be a string array`);
@@ -359,11 +394,40 @@ export function validateAgentPlan(value: unknown): AgentPlanValidation {
       }
       if (!RISK_LEVELS.has(item.riskLevel as RepairRiskLevel)) errors.push(`candidateNextActions[${index}] has invalid riskLevel`);
       if (!MUTATION_SCOPES.has(item.mutationScope as RepairMutationScope)) errors.push(`candidateNextActions[${index}] has invalid mutationScope`);
-      if (item.requiresApproval !== true) errors.push(`candidateNextActions[${index}].requiresApproval must be true`);
+      errors.push(...validateActionRiskAssessment({
+        actionType: item.actionType,
+        command: item.command,
+        riskLevel: item.riskLevel,
+        mutationScope: item.mutationScope,
+        requiresApproval: item.requiresApproval,
+        approvalPrompt: item.approvalPrompt,
+        blockedReason: item.blockedReason,
+        verificationStep: item.verificationStep,
+      }).errors.map(error => `candidateNextActions[${index}]: ${error}`));
       if (item.actionType === "command" && !item.command?.trim()) {
         errors.push(`candidateNextActions[${index}] command actions require a command`);
       } else if (item.actionType === "command" && item.command) {
-        errors.push(...validateAgentCommand(item.command).map(error => `candidateNextActions[${index}]: ${error}`));
+        const parsed = parseAgentCommand(item.command);
+        errors.push(...parsed.errors.map(error => `candidateNextActions[${index}]: ${error}`));
+        if (parsed.command) {
+          const assessed = assessActionRisk({
+            actionType: "command",
+            command: parsed.command,
+            riskLevel: item.riskLevel,
+            mutationScope: item.mutationScope,
+            requiresApproval: item.requiresApproval,
+            verificationStep: item.verificationStep,
+          });
+          if (assessed.riskLevel !== item.riskLevel) {
+            errors.push(`candidateNextActions[${index}] understates command risk`);
+          }
+          if (assessed.mutationScope !== item.mutationScope) {
+            errors.push(`candidateNextActions[${index}] has incorrect command mutation scope`);
+          }
+          if (assessed.requiresApproval !== item.requiresApproval) {
+            errors.push(`candidateNextActions[${index}] has incorrect approval requirement`);
+          }
+        }
       }
       if (item.actionType === "instruction" && item.command !== "") {
         errors.push(`candidateNextActions[${index}] instruction actions must use an empty command`);
@@ -440,8 +504,8 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     ...(gradleFiles.length ? [`Gradle traits: ${gradleFiles.join(", ")}.`] : []),
     ...(dockerFiles.length ? [`Docker traits: ${dockerFiles.join(", ")}.`] : []),
     ...(kubernetesFiles.length ? [`Kubernetes/Helm traits: ${kubernetesFiles.join(", ")}.`] : []),
-    ...abctlCommands.map(command => `Documented runbook command: ${command}.`),
-    ...kindCommands.map(command => `Documented cluster command: ${command}.`),
+    ...abctlCommands.map(command => `Documented runbook command: ${command.display}.`),
+    ...kindCommands.map(command => `Documented cluster command: ${command.display}.`),
     ...healthUrls.map(url => `Documented external health endpoint: ${url}.`),
     ...(credentialRequired ? ["Documentation indicates a credential-sensitive authentication step."] : []),
   ].map(safeEvidence);
@@ -451,11 +515,10 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     candidateNextActions.push(action({
       classification: "host_tool_install_required",
       actionType: "instruction",
-      command: "",
       reason: `${tool} is required by repository or runbook evidence but is not available on PATH. Install a repository-supported version manually; BootProof does not choose an installer or version without evidence.`,
       evidence: [`Missing tool: ${tool}.`],
       riskLevel: "medium",
-      mutationScope: "host",
+      mutationScope: "host_tool_install",
       verificationStep: `${tool} --version`,
       stopCondition: `Stop if the repository does not document a trusted ${tool} version or installation source.`,
     }));
@@ -467,9 +530,9 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       actionType: "command",
       command,
       reason: "The documented runbook requires creation of a local Kubernetes cluster.",
-      evidence: [`Documented cluster command: ${command}.`],
+      evidence: [`Documented cluster command: ${command.display}.`],
       riskLevel: "high",
-      mutationScope: "service",
+      mutationScope: "kubernetes_cluster",
       verificationStep: "kubectl cluster-info",
       stopCondition: "Stop unless the user explicitly approves local cluster creation; stop on any unexpected cluster or context change.",
     }));
@@ -478,11 +541,10 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     candidateNextActions.push(action({
       classification: "kubernetes_cluster_creation_required",
       actionType: "instruction",
-      command: "",
       reason: "Kubernetes traits were found, but no exact safe cluster-creation command was documented.",
       evidence: kubernetesFiles.map(file => `Kubernetes marker: ${file}.`),
       riskLevel: "high",
-      mutationScope: "service",
+      mutationScope: "kubernetes_cluster",
       verificationStep: "Verify the selected Kubernetes context and required workloads before any health claim.",
       stopCondition: "Stop until a human selects and approves the repository's documented cluster workflow.",
     }));
@@ -494,9 +556,9 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       actionType: "command",
       command,
       reason: "The repository documents an external orchestrator runbook that BootProof must not execute automatically.",
-      evidence: [`Documented runbook command: ${command}.`],
+      evidence: [`Documented runbook command: ${command.display}.`],
       riskLevel: "high",
-      mutationScope: "service",
+      mutationScope: "kubernetes_cluster",
       verificationStep: "abctl local status",
       stopCondition: "Stop unless the user explicitly approves the one documented orchestration step; stop if deployment status is not healthy.",
     }));
@@ -505,11 +567,10 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     candidateNextActions.push(action({
       classification: "heavy_orchestration_required",
       actionType: "instruction",
-      command: "",
       reason: "The repository requires multi-service or external orchestration, but no exact safe command was established.",
       evidence: suspectedStack.filter(stack => ["kubernetes", "kind", "helm", "abctl"].includes(stack)),
       riskLevel: "high",
-      mutationScope: "service",
+      mutationScope: "kubernetes_cluster",
       verificationStep: "Confirm all documented services and workloads are running before checking application health.",
       stopCondition: "Stop until the repository's documented runbook is reviewed and one exact action is explicitly approved.",
     }));
@@ -519,11 +580,10 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     candidateNextActions.push(action({
       classification: "credential_required",
       actionType: "instruction",
-      command: "",
       reason: "A later authentication step requires real credentials. BootProof will not infer, invent, persist, or expose them.",
       evidence: ["Documentation indicates a credential-sensitive authentication step."],
       riskLevel: "high",
-      mutationScope: "none",
+      mutationScope: "credentials",
       verificationStep: "Verify authenticated access manually without storing credentials in the agent plan.",
       stopCondition: "Stop if credentials are unavailable, ambiguous, or would need to be invented or exposed.",
     }));
@@ -536,7 +596,7 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
       candidateNextActions.push(action({
         classification: "external_health_verification_required",
         actionType: "command",
-        command: command.display,
+        command,
         reason: "BootProof cannot safely orchestrate this stack directly, but a documented external HTTP health endpoint can be observed.",
         evidence: [`Documented external health endpoint: ${url}.`],
         riskLevel: "low",
@@ -551,11 +611,11 @@ export function buildAgentPlan(repoPath: string, options: AgentPlanOptions = {})
     candidateNextActions.push(action({
       classification: "heavy_orchestration_required",
       actionType: "instruction",
-      command: "",
       reason: "BootProof found no trustworthy direct orchestration path or exact deterministic next command.",
       evidence: [inference.notAppReason ?? inference.commandScope],
       riskLevel: "blocked",
-      mutationScope: "none",
+      mutationScope: "unknown",
+      blockedReason: "No trustworthy direct orchestration path or exact deterministic next command was established.",
       verificationStep: "Obtain a documented runbook and explicit health contract before proceeding.",
       stopCondition: "Stop because the next step is unknown or unsupported.",
     }));

@@ -10,6 +10,9 @@
     "mutationScope",
     "riskLevel",
     "requiresApproval",
+    "approvalPrompt",
+    "blockedReason",
+    "verificationStep",
     "command",
     "patch",
     "instruction",
@@ -21,9 +24,12 @@
   "properties": {
     "schema": { "const": "bootproof/repair-action/v1" },
     "actionType": { "enum": ["command", "patch", "instruction"] },
-    "mutationScope": { "enum": ["repo", "host", "service", "database", "none"] },
-    "riskLevel": { "enum": ["low", "medium", "high", "blocked"] },
+    "mutationScope": { "enum": ["none", "repo_only", "project_cache", "container_runtime", "host_tool_install", "host_network", "kubernetes_cluster", "database", "service", "credentials", "unknown"] },
+    "riskLevel": { "enum": ["none", "low", "medium", "high", "blocked"] },
     "requiresApproval": { "type": "boolean", "default": true },
+    "approvalPrompt": { "type": "string", "minLength": 1 },
+    "blockedReason": { "type": "string" },
+    "verificationStep": { "type": "string", "minLength": 1 },
     "command": {
       "anyOf": [
         { "$ref": "#/$defs/command" },
@@ -54,8 +60,7 @@
           "command": { "$ref": "#/$defs/command" },
           "patch": { "type": "null" },
           "instruction": { "type": "null" },
-          "mutationScope": { "enum": ["repo", "host", "service", "database"] },
-          "requiresApproval": { "const": true }
+          "mutationScope": { "enum": ["none", "repo_only", "project_cache", "container_runtime", "host_tool_install", "host_network", "kubernetes_cluster", "database", "service", "credentials", "unknown"] }
         }
       }
     },
@@ -66,7 +71,7 @@
           "command": { "type": "null" },
           "patch": { "$ref": "#/$defs/patch" },
           "instruction": { "type": "null" },
-          "mutationScope": { "const": "repo" },
+          "mutationScope": { "const": "repo_only" },
           "requiresApproval": { "const": true }
         }
       }
@@ -77,8 +82,15 @@
         "properties": {
           "command": { "type": "null" },
           "patch": { "type": "null" },
-          "instruction": { "type": "string", "minLength": 1 },
-          "mutationScope": { "const": "none" }
+          "instruction": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "riskLevel": { "enum": ["medium", "high"] } } },
+      "then": {
+        "properties": {
+          "requiresApproval": { "const": true }
         }
       }
     }
