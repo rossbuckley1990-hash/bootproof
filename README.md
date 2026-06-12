@@ -156,6 +156,26 @@ Run dependency installation only when intended:
 npx bootproof up . --install
 ```
 
+Verify an externally managed service without asking BootProof to start or
+orchestrate it:
+
+```bash
+abctl local install --port 8001
+bootproof verify-url http://localhost:8001/api/v1/health
+```
+
+To retain the same observation as `.bootproof/attestation.json` for the current
+repository:
+
+```bash
+bootproof up . --external-health http://localhost:8001/api/v1/health
+```
+
+External health accepts observed HTTP 2xx and 3xx responses. HTTP 401/403 is
+reported as `auth_required`; connection failures are
+`external_health_unreachable`. These results always set
+`bootproofOrchestrated: false` and never claim BootProof started the service.
+
 Explain and verify the signed result:
 
 ```bash

@@ -11,6 +11,8 @@ export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 export type FailureClass =
   | "not_an_application"
   | "orchestration_not_supported"
+  | "auth_required"
+  | "external_health_unreachable"
   | "runtime_engine_mismatch"
   | "missing_ruby_version"
   | "missing_package_manager"
@@ -44,6 +46,13 @@ export type FailureClass =
   | "health_http_error"
   | "workspace_ambiguous"
   | "unknown_failure";
+
+export type VerificationMode = "bootproof-orchestrated" | "external-health";
+
+export type ExternalVerificationClassification =
+  | "external_service_verified"
+  | "auth_required"
+  | "external_health_unreachable";
 
 export interface ServiceNeed {
   kind: "postgres" | "mysql" | "redis" | "mongodb";
@@ -161,6 +170,14 @@ export interface AttestationTrust {
 export interface Attestation {
   schema: "bootproof/attestation/v1";
   tool: string;
+  verificationMode: VerificationMode;
+  bootproofOrchestrated: boolean;
+  externalHealthUrl: string | null;
+  observedStatus: number | null;
+  observedFinalUrl: string | null;
+  observedAt: string | null;
+  responseSnippet: string;
+  classification: ExternalVerificationClassification | null;
   repo: { path: string; remote: string | null; commit: string | null; dirty: boolean | null };
   environment: { os: string; arch: string; node: string };
   trust: AttestationTrust;

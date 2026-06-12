@@ -65,9 +65,12 @@ The health engine already:
 - preserves failed observations;
 - clears stale health evidence during later successful observations.
 
-These primitives can support a future external-health attestation, but current
-attestations describe `bootproof up` runs and set `booted` only through that
-execution path.
+External verification now provides `bootproof verify-url <url>` and
+`bootproof up . --external-health <url>`. Its attestations use
+`verificationMode: external-health`, set `bootproofOrchestrated: false`, and
+classify successful HTTP 2xx/3xx observations as `external_service_verified`.
+HTTP 401/403 is `auth_required`; connection and non-success responses are
+`external_health_unreachable`.
 
 ### Safety and Receipt Primitives
 
@@ -139,21 +142,6 @@ explain a complete agent run.
 
 ## Missing Capabilities
 
-### External Health
-
-The following do not exist:
-
-- `bootproof verify-url <url>`;
-- `bootproof up . --external-health <url>`;
-- an external-health attestation mode;
-- `external_service_verified`;
-- `external_health_unreachable`;
-- `auth_required`.
-
-The existing `bootproof verify` command validates stored signatures and may
-make a non-attested bonus health observation for a previously booted
-attestation. It is not external service verification.
-
 ### Agent Planning
 
 The following do not exist:
@@ -203,26 +191,21 @@ The following do not exist:
    adds `blockedReason`, `verificationStep`, secret sensitivity, action source,
    and deterministic risk classification. Unknown commands must be at least
    medium risk; blocked commands remain non-executable.
-2. **Add external-health attestations.**
-   Implement `verify-url` and `--external-health` with a distinct attestation
-   mode and the three external-health failure/result classes. Reuse existing
-   HTTP evidence, never set or imply `startedByBootProof`, and make no process
-   ownership claim.
-3. **Add planning-only `plan-agent`.**
+2. **Add planning-only `plan-agent`.**
    Persist `.bootproof/agent-plan.json` with strict schemas and risk-classified
    candidate actions. It must perform no action execution, approval prompting,
    telemetry, or upload.
-4. **Add deterministic Airbyte recognition and a planning-only runbook.**
+3. **Add deterministic Airbyte recognition and a planning-only runbook.**
    Detect the repository and orchestration traits, classify the managed/external
    orchestrator path, propose `abctl local install --port 8001` as high risk,
    mark credentials secret-sensitive, and use the external health endpoint as
    the final verification step. Do not execute the plan.
-5. **Add the local agent-run receipt chain.**
+4. **Add the local agent-run receipt chain.**
    Introduce the run directory, initial attestation, plan snapshot,
    hash-chained action and verification receipts, final summary, and
    `explain-run`. Keep all output local, redacted, signed where appropriate,
    and append-only within a run.
-6. **Only after the preceding contracts are stable, add a human-driven
+5. **Only after the preceding contracts are stable, add a human-driven
    single-step runner.**
    Execute exactly one approved local action, verify it, write the chained
    receipts, and stop for a new explicit approval. Do not add autonomous
@@ -253,4 +236,3 @@ The following do not exist:
 - `docs/schemas/repair-receipt-v1.schema.json`
 - `tests/unit.test.mjs`
 - `tests/e2e.test.mjs`
-

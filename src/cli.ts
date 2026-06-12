@@ -5,8 +5,9 @@ import * as readline from "node:readline/promises";
 import { inferRepo } from "./infer.js";
 import { buildPlan, composeFileFor, envExampleFor } from "./plan.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
-import { verifySignature, attestationPath, TOOL_ID } from "./proof.js";
+import { verifySignature, attestationPath, writeAttestation, TOOL_ID } from "./proof.js";
 import { pollHealth } from "./exec.js";
+import { buildExternalHealthAttestation } from "./external-health.js";
 import {
   buildFederatedReceipt,
   buildRegistryEntry,
@@ -39,13 +40,14 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "verify-url", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
 const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
   analyze: new Set(["workspace", "json", "ci"]),
   plan: new Set(["workspace", "provider", "ci"]),
   "apply-repair": new Set(["receipt", "dry-run", "json", "ci"]),
   fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci"]),
-  up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command"]),
+  up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command", "external-health"]),
+  "verify-url": new Set(["timeout", "json", "ci"]),
   verify: new Set(["ci"]),
   attest: new Set(["ci"]),
   registry: new Set(["mode", "federated", "ci"]),
@@ -77,6 +79,7 @@ Usage:
                                                             inspect a repo, show evidence-based inference
   bootproof plan <path|git-url> [--workspace dir]           show the run plan and files that WOULD be generated
   bootproof up <path|git-url> [options]                     execute the plan, verify localhost, write signed proof
+  bootproof verify-url <url> [--timeout ms]                 verify an externally managed HTTP service
   bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
   bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
@@ -93,6 +96,7 @@ Options for up:
   --install                 run the dependency install step (off by default)
   --workspace <dir>         pick a monorepo workspace
   --command <command>       override the inferred application start command
+  --external-health <url>   verify an externally managed service; do not start the app
   --port <n>                override inferred port
   --timeout <ms>            health verification timeout (default 60000)
   --dry-run                 show what would happen; executes nothing, writes nothing
@@ -176,6 +180,45 @@ function machineFailure(explanation: string) {
     trust: null,
     writtenFiles: [],
   };
+}
+
+function externalMachineResult(attestation: Attestation, evidencePath: string | null) {
+  return {
+    schema: "bootproof/result/v1",
+    booted: false,
+    healthVerified: attestation.result.healthVerified,
+    failureClass: attestation.result.failureClass,
+    classification: attestation.classification,
+    verificationMode: attestation.verificationMode,
+    bootproofOrchestrated: attestation.bootproofOrchestrated,
+    externalHealthUrl: attestation.externalHealthUrl,
+    observedStatus: attestation.observedStatus,
+    observedFinalUrl: attestation.observedFinalUrl,
+    observedAt: attestation.observedAt,
+    responseSnippet: attestation.responseSnippet,
+    attestationPath: evidencePath,
+    plan: attestation.plan,
+    observed: attestation.observed,
+    explanation: attestation.result.explanation,
+    trust: attestation.trust,
+    writtenFiles: evidencePath ? [evidencePath] : [],
+  };
+}
+
+function printExternalHealthResult(attestation: Attestation, evidencePath: string | null): void {
+  const result = attestation.result;
+  if (result.healthVerified) {
+    ok(`${BOLD}EXTERNAL SERVICE VERIFIED${RESET}${GREEN} — ${result.healthObservation} (observed, signed)`);
+  } else {
+    bad(`${BOLD}NOT VERIFIED${RESET}${RED} — ${attestation.classification}`);
+    if (attestation.observedStatus !== null) {
+      console.log(`Observed: HTTP ${attestation.observedStatus} at ${attestation.observedFinalUrl}`);
+    }
+    const connectionError = result.healthEvidence?.connectionError;
+    if (connectionError) console.log(`Connection error: ${connectionError}`);
+  }
+  console.log("Ownership: externally managed (bootproofOrchestrated=false).");
+  if (evidencePath) console.log(`Evidence: ${evidencePath}`);
 }
 
 function printFailure(failureClass: NonNullable<Attestation["result"]["failureClass"]>, diagnosis: FailureDiagnosis, evidencePath: string) {
@@ -309,6 +352,61 @@ async function main() {
     return;
   }
   const targetInput = String(positional[0] ?? ".");
+
+  if (cmd === "verify-url") {
+    if (!positional[0] || positional.length > 1) {
+      const explanation = "verify-url requires exactly one HTTP or HTTPS URL";
+      if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
+      else bad(explanation);
+      process.exitCode = 1;
+      return;
+    }
+    const timeoutMs = Number(flags.timeout ?? 5000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      const explanation = `invalid --timeout value: ${String(flags.timeout)} (expected a positive number)`;
+      if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
+      else bad(explanation);
+      process.exitCode = 1;
+      return;
+    }
+    const attestation = await buildExternalHealthAttestation(process.cwd(), targetInput, timeoutMs);
+    if (flags.json) console.log(JSON.stringify(attestation));
+    else printExternalHealthResult(attestation, null);
+    process.exitCode = attestation.result.healthVerified ? 0 : 1;
+    return;
+  }
+
+  if (cmd === "up" && flags["external-health"] !== undefined) {
+    const externalHealthUrl = flags["external-health"];
+    const incompatibleFlag = ["provider", "unsafe-local", "install", "workspace", "port", "dry-run", "command"]
+      .find(flag => flags[flag] !== undefined);
+    const timeoutMs = Number(flags.timeout ?? 5000);
+    const optionError =
+      typeof externalHealthUrl !== "string" || externalHealthUrl.trim().length === 0
+        ? "--external-health requires an HTTP or HTTPS URL"
+        : incompatibleFlag
+          ? `--external-health cannot be combined with --${incompatibleFlag}`
+          : !Number.isFinite(timeoutMs) || timeoutMs <= 0
+            ? `invalid --timeout value: ${String(flags.timeout)} (expected a positive number)`
+            : isRemoteTarget(targetInput)
+              ? "--external-health requires a local evidence directory, not a remote repository URL"
+              : null;
+    if (optionError) {
+      if (flags.json) console.log(JSON.stringify(machineFailure(optionError)));
+      else bad(optionError);
+      process.exitCode = 1;
+      return;
+    }
+    const target = path.resolve(targetInput);
+    const evidencePath = ".bootproof/attestation.json";
+    const attestation = await buildExternalHealthAttestation(target, externalHealthUrl as string, timeoutMs);
+    writeAttestation(target, attestation);
+    if (flags.json) console.log(JSON.stringify(externalMachineResult(attestation, evidencePath)));
+    else printExternalHealthResult(attestation, evidencePath);
+    process.exitCode = attestation.result.healthVerified ? 0 : 1;
+    return;
+  }
+
   let target = path.resolve(targetInput);
   let remote: RemoteClone | null = null;
   let remoteSource: string | null = null;
@@ -576,6 +674,12 @@ async function main() {
     const sig = verifySignature(att);
     (sig ? ok : bad)(`signature ${sig ? "valid" : "INVALID"} (ed25519, trust-on-first-use)`);
     console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
+    if (att.verificationMode === "external-health") {
+      console.log(`${DIM}attested: classification=${att.classification} bootproofOrchestrated=false at ${att.observedAt ?? att.finishedAt}${RESET}`);
+      console.log("This attestation observes an externally managed service; it does not claim BootProof started the application.");
+      if (!sig) process.exitCode = 1;
+      return;
+    }
     console.log(`${DIM}attested: booted=${att.result.booted} at commit ${att.repo.commit ?? "unknown"} on ${att.environment.os} node ${att.environment.node}${RESET}`);
     const retainedRemote = managedRemoteSource(att.repo.path);
     if (retainedRemote) {
@@ -694,6 +798,16 @@ async function main() {
     }
     const att = proof as Attestation;
     console.log(`${BOLD}Attestation explained${RESET}`);
+    if (att.verificationMode === "external-health") {
+      console.log(att.result.healthVerified
+        ? `This externally managed service was VERIFIED: ${att.result.healthObservation}.`
+        : `This external health check did NOT verify. Classification: ${att.classification}.`);
+      console.log("BootProof did not start or orchestrate this service.");
+      console.log(att.result.explanation);
+      if (att.plan.healthCandidates?.length) console.log(`Health candidates: ${att.plan.healthCandidates.join(", ")}`);
+      for (const o of att.observed) console.log(`  ${o.ok ? "\u2713" : "\u2717"} ${o.id}: ${o.observation}`);
+      return;
+    }
     console.log(att.result.booted ? `This run BOOTED: ${att.result.healthObservation}.` : `This run did NOT verify. Failure class: ${att.result.failureClass}.`);
     console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
     if (!att.result.booted && att.result.failureClass) {
@@ -714,7 +828,7 @@ async function main() {
 
 main().catch(err => {
   const argv = process.argv.slice(2);
-  if (argv.includes("--json") && argv[0] === "up") {
+  if (argv.includes("--json") && (argv[0] === "up" || argv[0] === "verify-url")) {
     console.log(JSON.stringify(machineFailure(String(err?.message ?? err))));
   } else if (argv.includes("--json") && argv[0] === "fix") {
     const result: RepairResult = {

@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
@@ -39,6 +40,19 @@ const runWithInput = (args, input, env = {}, cwd = process.cwd()) => {
     code: result.status ?? 1,
   };
 };
+
+const runAsync = (args, env = {}, cwd = process.cwd()) => new Promise(resolve => {
+  execFile(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+    env: mergeEnv(env),
+    cwd,
+  }, (error, stdout, stderr) => {
+    resolve({
+      out: `${stdout ?? ""}${stderr ?? ""}`,
+      code: typeof error?.code === "number" ? error.code : error ? 1 : 0,
+    });
+  });
+});
 
 function freshCopy(name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bp-e2e-"));
@@ -79,6 +93,21 @@ async function getFreePort() {
       server.close(error => error ? reject(error) : resolve(address.port));
     });
   });
+}
+
+async function withHttpServer(handler, runWithUrl) {
+  const server = await new Promise((resolve, reject) => {
+    const candidate = http.createServer(handler);
+    candidate.once("error", reject);
+    candidate.listen(0, "127.0.0.1", () => resolve(candidate));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    return await runWithUrl(`http://127.0.0.1:${address.port}/`);
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 }
 
 function fakeRemote(fixture, canonicalUrl, setup) {
@@ -538,6 +567,68 @@ test("machine interface: --ci --json exits zero only for observed healthy boot",
   assert.equal(result.healthVerified, true);
   assert.equal(result.failureClass, null);
   assert.ok(result.observed.some(o => o.kind === "health" && o.ok));
+});
+
+test("verify-url emits signed external health proof without writing repository files", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 200;
+    response.setHeader("x-airbyte-health", "available");
+    response.end('{"available":true}');
+  }, async url => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-verify-url-"));
+    const { out, code } = await runAsync(["verify-url", url, "--json"], {}, cwd);
+    assert.equal(code, 0);
+    const attestation = JSON.parse(out);
+    assert.equal(attestation.schema, "bootproof/attestation/v1");
+    assert.equal(attestation.verificationMode, "external-health");
+    assert.equal(attestation.bootproofOrchestrated, false);
+    assert.equal(attestation.classification, "external_service_verified");
+    assert.equal(attestation.result.booted, false);
+    assert.equal(attestation.result.healthVerified, true);
+    assert.equal(attestation.result.healthEvidence.headers["x-airbyte-health"], "available");
+    assert.equal(attestation.responseSnippet, '{"available":true}');
+    assert.equal(fs.existsSync(path.join(cwd, ".bootproof")), false);
+  });
+});
+
+test("up --external-health writes external attestation and never claims orchestration", async () => {
+  await withHttpServer((_request, response) => {
+    response.statusCode = 302;
+    response.setHeader("location", "/login");
+    response.end("redirecting");
+  }, async url => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-up-external-"));
+    const { out, code } = await runAsync(["up", repo, "--external-health", url]);
+    assert.equal(code, 0);
+    assert.match(out, /EXTERNAL SERVICE VERIFIED/);
+    assert.match(out, /bootproofOrchestrated=false/);
+    assert.doesNotMatch(out, /\bBOOTED\b|started and supervised/);
+    const attestation = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(attestation.verificationMode, "external-health");
+    assert.equal(attestation.bootproofOrchestrated, false);
+    assert.equal(attestation.observedStatus, 302);
+    assert.equal(attestation.observedFinalUrl, url);
+    assert.equal(attestation.result.healthEvidence.redirectLocation, "/login");
+    assert.equal(attestation.classification, "external_service_verified");
+    assert.equal(attestation.result.booted, false);
+    assert.equal(attestation.result.healthVerified, true);
+    assert.match(attestation.result.explanation, /did not start or orchestrate/);
+  });
+});
+
+test("up --external-health rejects execution flags instead of ignoring them", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-up-external-flags-"));
+  const { out, code } = await runAsync([
+    "up",
+    repo,
+    "--external-health",
+    "http://127.0.0.1:8001/health",
+    "--provider",
+    "local",
+  ]);
+  assert.equal(code, 1);
+  assert.match(out, /cannot be combined with --provider/);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof")), false);
 });
 
 test("machine interface: --ci human output has no ANSI and refuses unsafe local execution", () => {

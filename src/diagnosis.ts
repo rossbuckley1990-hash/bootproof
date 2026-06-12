@@ -113,6 +113,18 @@ export function diagnoseFailure(
         whyRefused: "The detected application requires backend/frontend or repository-specific orchestration that BootProof cannot yet execute safely.",
         safeNextStep: "Use the repository's documented runbook. Treat this attestation as diagnosis only, not proof of a localhost boot.",
       };
+    case "auth_required":
+      return {
+        whatHappened: explanation,
+        whyRefused: "The external endpoint requires authentication, so its response is not sufficient public health evidence.",
+        safeNextStep: "Provide a separate unauthenticated health endpoint, or verify authentication manually without exposing credentials to BootProof.",
+      };
+    case "external_health_unreachable":
+      return {
+        whatHappened: explanation,
+        whyRefused: "BootProof did not observe a successful HTTP response from the externally managed service.",
+        safeNextStep: "Confirm the external service and endpoint are reachable, then rerun the external health verification.",
+      };
     case "workspace_ambiguous":
       if (/multiple workspaces in parallel|starts multiple workspaces in parallel/i.test(explanation)) {
         return {
