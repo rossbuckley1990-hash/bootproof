@@ -9,6 +9,7 @@
     "repairId",
     "createdAt",
     "bootproofVersion",
+    "source",
     "beforeFailureClass",
     "beforeEvidenceHash",
     "proposedAction",
@@ -27,6 +28,7 @@
     "repairId": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string", "format": "date-time" },
     "bootproofVersion": { "type": "string", "minLength": 1 },
+    "source": { "enum": ["deterministic_playbook", "ai_suggested"] },
     "beforeFailureClass": { "type": "string", "minLength": 1 },
     "beforeEvidenceHash": { "$ref": "#/$defs/hash" },
     "proposedAction": { "$ref": "repair-action-v1.schema.json" },
@@ -177,9 +179,10 @@
         "after": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["booted", "healthObservation", "attestationSha256"],
+          "required": ["booted", "bootproofOrchestrated", "healthObservation", "attestationSha256"],
           "properties": {
-            "booted": { "const": true },
+            "booted": { "type": "boolean" },
+            "bootproofOrchestrated": { "type": "boolean" },
             "healthObservation": { "type": "string" },
             "attestationSha256": { "$ref": "#/$defs/hash" }
           }

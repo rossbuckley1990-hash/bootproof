@@ -20,11 +20,13 @@ import {
 } from "./proof.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
 import { inferRepo } from "./infer.js";
+import { buildExternalHealthAttestation } from "./external-health.js";
 import {
   buildRepairAction,
   buildRepairReceiptBase,
   createRepairCommand,
   validateRepairAction,
+  type RepairAction,
   type RepairCommand,
   type RepairMutationScope,
   type RepairReceiptBase,
@@ -60,7 +62,12 @@ export interface RepairReceipt extends RepairReceiptBase {
   };
   verification?: {
     before: { booted: false; failureClass: FailureClass; attestationSha256: string };
-    after: { booted: true; healthObservation: string; attestationSha256: string };
+    after: {
+      booted: boolean;
+      bootproofOrchestrated: boolean;
+      healthObservation: string;
+      attestationSha256: string;
+    };
   };
   startedAt?: string;
   finishedAt?: string;
@@ -143,6 +150,12 @@ interface RepairContext {
   sandbox: string;
   before: UpOutcome;
   failureClass: FailureClass;
+}
+
+interface LifecycleRepairCandidate {
+  id: string;
+  failureClass: FailureClass;
+  action: RepairAction;
 }
 
 interface RegisteredRemediation {
@@ -794,6 +807,7 @@ function buildRepairReceipt(
       },
       after: {
         booted: true,
+        bootproofOrchestrated: true,
         healthObservation: after.result.healthObservation,
         attestationSha256: afterHash,
       },
@@ -869,6 +883,13 @@ export function latestDeterministicRepairCandidate(
   return candidate ? { attestation, candidate } : null;
 }
 
+export function latestFailedAttestation(
+  repoPath: string,
+  requestedProvider?: "docker" | "local",
+): Attestation | null {
+  return signedFailedAttestation(path.resolve(repoPath), requestedProvider);
+}
+
 interface StructuredRepairCommandResult {
   exitCode: number | null;
   evidence: string;
@@ -917,7 +938,7 @@ async function runStructuredRepairCommand(
 function buildLifecycleRepairReceipt(input: {
   repo: string;
   before: Attestation;
-  candidate: DeterministicRepairCandidate;
+  candidate: LifecycleRepairCandidate;
   createdAt: string;
   approvedAt?: string;
   appliedAt?: string;
@@ -927,7 +948,10 @@ function buildLifecycleRepairReceipt(input: {
   redactionsApplied?: string[];
 }): RepairReceipt {
   const after = input.after ?? null;
-  const verified = Boolean(after?.result.booted && after.result.healthVerified);
+  const verified = Boolean(
+    after?.result.healthVerified &&
+    (after.result.booted || after.verificationMode === "external-health"),
+  );
   const progressed = repairProgressed(input.candidate.failureClass, after);
   const info = gitInfo(input.repo);
   const redactedRemote = redactText(info.remote ?? "");
@@ -975,7 +999,8 @@ function buildLifecycleRepairReceipt(input: {
               attestationSha256: sha256Attestation(input.before),
             },
             after: {
-              booted: true,
+              booted: after.result.booted,
+              bootproofOrchestrated: after.bootproofOrchestrated,
               healthObservation: after.result.healthObservation,
               attestationSha256: sha256Attestation(after),
             },
@@ -1242,6 +1267,272 @@ async function executeDeterministicRepairCandidate(
     ])],
   });
   return result(receipt, explanation, afterFile);
+}
+
+function verifiedAfterRepair(attestation: Attestation | null): boolean {
+  return Boolean(
+    attestation?.result.healthVerified &&
+    (attestation.result.booted || attestation.verificationMode === "external-health"),
+  );
+}
+
+function writeRepairAfterAttestation(repo: string, attestation: Attestation | null): string | null {
+  if (!attestation) return null;
+  const file = afterAttestationPath(repo);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(attestation, null, 2) + "\n");
+  return file;
+}
+
+async function rerunAfterAiRepair(
+  sandbox: string,
+  before: Attestation,
+  provider: "docker" | "local",
+  options: RepairOptions,
+  composeProjectName: string,
+): Promise<{ after: Attestation | null; outcome: UpOutcome | null; error: string }> {
+  try {
+    if (before.verificationMode === "external-health" && before.externalHealthUrl) {
+      const after = await buildExternalHealthAttestation(
+        sandbox,
+        before.externalHealthUrl,
+        options.timeoutMs,
+      );
+      return { after, outcome: null, error: "" };
+    }
+    const outcome = await up(sandbox, {
+      provider,
+      unsafeLocal: options.unsafeLocal,
+      dryRun: false,
+      timeoutMs: options.timeoutMs,
+      install: true,
+      port: options.port,
+      remoteSource: options.remoteSource,
+      environment: { COMPOSE_PROJECT_NAME: composeProjectName },
+    });
+    return { after: outcome.attestation, outcome, error: "" };
+  } catch (error) {
+    return {
+      after: null,
+      outcome: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function executeAiSuggestedRepair(
+  repoPath: string,
+  before: Attestation,
+  action: RepairAction,
+  options: RepairOptions,
+): Promise<RepairResult> {
+  const repo = path.resolve(repoPath);
+  const startedAt = new Date().toISOString();
+  const failureClass = before.result.failureClass;
+  if (!failureClass || before.result.healthVerified || before.result.booted || !verifySignature(before)) {
+    throw new Error("AI repair requires a signature-valid classified failed attestation.");
+  }
+  if (action.source !== "ai_suggested" || action.deterministic) {
+    throw new Error("AI repair execution requires an ai_suggested action.");
+  }
+  const validation = validateRepairAction(action);
+  if (!validation.valid) {
+    throw new Error(`AI suggestion was blocked by BootProof safety policy: ${validation.errors.join("; ")}`);
+  }
+
+  cleanPreviousRepairOutputs(repo);
+  const candidate: LifecycleRepairCandidate = {
+    id: `ai-suggested-${failureClass}-${sha256Text(JSON.stringify(action)).slice(0, 12)}`,
+    failureClass,
+    action,
+  };
+  const result = (
+    receipt: RepairReceipt,
+    explanation: string,
+    afterFile: string | null = null,
+    patchFile: string | null = null,
+  ): RepairResult => {
+    const receiptFile = writeLifecycleRepairReceipt(repo, receipt);
+    return {
+      schema: "bootproof/repair-result/v1",
+      repaired: receipt.verified,
+      failureClass,
+      repairId: candidate.id,
+      receiptPath: relativeOutput(repo, receiptFile),
+      patchPath: relativeOutput(repo, patchFile),
+      afterAttestationPath: relativeOutput(repo, afterFile),
+      explanation,
+    };
+  };
+  const receiptFor = (input: Omit<Parameters<typeof buildLifecycleRepairReceipt>[0], "repo" | "before" | "candidate" | "createdAt">) =>
+    buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      ...input,
+    });
+  const provider = options.provider ?? before.plan.provider;
+  const localRerunRequiresAcknowledgement =
+    before.verificationMode !== "external-health" &&
+    provider === "local" &&
+    !options.unsafeLocal;
+
+  if (action.actionType === "instruction") {
+    const approved = options.actionApproved === true;
+    const explanation = approved
+      ? `AI-suggested instruction was approved for manual use but was not executed: ${action.instruction}`
+      : "AI-suggested instruction was not approved. No command or patch was executed.";
+    return result(receiptFor({
+      ...(approved ? { approvedAt: new Date().toISOString() } : {}),
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+      redactionsApplied: [],
+    }), explanation);
+  }
+
+  if (action.actionType === "patch") {
+    const patch = action.patch;
+    if (!patch) throw new Error("validated AI patch suggestion is missing its exact patch");
+    const patchFile = path.join(repo, ".bootproof", `repair-${candidate.id}.patch`);
+    if (localRerunRequiresAcknowledgement) {
+      const explanation = "The AI-suggested patch was not tested because the required BootProof rerun would execute repository code locally; rerun with --unsafe-local after review.";
+      return result(receiptFor({
+        applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+        explanation,
+        redactionsApplied: [],
+      }), explanation);
+    }
+    if (options.actionApproved !== true) {
+      const explanation = "AI-suggested patch was not approved. The working tree was not modified.";
+      return result(receiptFor({
+        applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+        explanation,
+        redactionsApplied: [],
+      }), explanation);
+    }
+
+    const approvedAt = new Date().toISOString();
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true });
+    fs.writeFileSync(patchFile, patch.content);
+    const { root, sandbox, composeProjectName } = copyToSandbox(repo);
+    const sandboxPatch = path.join(root, "ai-suggested.patch");
+    fs.writeFileSync(sandboxPatch, patch.content);
+    let patchResult: StructuredRepairCommandResult = {
+      exitCode: null,
+      evidence: "",
+      redactionsApplied: [],
+    };
+    let after: Attestation | null = null;
+    let outcome: UpOutcome | null = null;
+    let rerunError = "";
+    try {
+      for (const file of patch.files) assertRepairTargetPath(sandbox, file);
+      const check = await runStructuredRepairCommand(
+        createRepairCommand("git", ["apply", "--check", sandboxPatch]),
+        sandbox,
+      );
+      patchResult = check.exitCode === 0
+        ? await runStructuredRepairCommand(createRepairCommand("git", ["apply", sandboxPatch]), sandbox)
+        : check;
+      if (patchResult.exitCode === 0) {
+        const rerun = await rerunAfterAiRepair(sandbox, before, provider, options, composeProjectName);
+        after = rerun.after;
+        outcome = rerun.outcome;
+        rerunError = rerun.error;
+      }
+    } catch (error) {
+      rerunError = error instanceof Error ? error.message : String(error);
+    } finally {
+      await cleanupServices(outcome, buildExecutionEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    const afterFile = writeRepairAfterAttestation(repo, after);
+    const patchApplied = patchResult.exitCode === 0;
+    const progressed = repairProgressed(failureClass, after);
+    const redacted = redactText([patchResult.evidence, rerunError].filter(Boolean).join("\n"));
+    const explanation = verifiedAfterRepair(after)
+      ? `AI-suggested patch was tested in a sandbox and BootProof independently verified health: ${after!.result.healthObservation}.`
+      : progressed
+        ? `AI-suggested patch was tested in a sandbox; BootProof progressed from ${failureClass} to ${after!.result.failureClass}.`
+        : patchApplied
+          ? "AI-suggested patch was tested in a sandbox, but BootProof did not verify boot or reach a different failure class."
+          : `AI-suggested patch was blocked or failed in the sandbox: ${redacted.text || "git apply failed"}.`;
+    return result(receiptFor({
+      approvedAt,
+      ...(patchApplied ? { appliedAt: new Date().toISOString() } : {}),
+      applyResult: {
+        status: patchApplied ? "applied" : "failed",
+        exitCode: patchResult.exitCode,
+        filesChanged: patchApplied ? patch.files : [],
+        evidence: redacted.text || null,
+      },
+      after,
+      explanation,
+      redactionsApplied: [...new Set([...patchResult.redactionsApplied, ...redacted.applied])],
+    }), explanation, afterFile, patchFile);
+  }
+
+  const command = action.command;
+  if (!command) throw new Error("validated AI command suggestion is missing its exact command");
+  if (localRerunRequiresAcknowledgement) {
+    const explanation = "The AI-suggested command was not run because the required BootProof rerun would execute repository code locally; rerun with --unsafe-local after review.";
+    return result(receiptFor({
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+      redactionsApplied: [],
+    }), explanation);
+  }
+  if (options.actionApproved !== true) {
+    const explanation = "AI-suggested command was not approved. No command was executed.";
+    return result(receiptFor({
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+      redactionsApplied: [],
+    }), explanation);
+  }
+
+  const approvedAt = new Date().toISOString();
+  const commandResult = await runStructuredRepairCommand(command, repo);
+  const { root, sandbox, composeProjectName } = copyToSandbox(repo);
+  let after: Attestation | null = null;
+  let outcome: UpOutcome | null = null;
+  let rerunError = "";
+  try {
+    const rerun = await rerunAfterAiRepair(sandbox, before, provider, options, composeProjectName);
+    after = rerun.after;
+    outcome = rerun.outcome;
+    rerunError = rerun.error;
+  } finally {
+    await cleanupServices(outcome, buildExecutionEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  const afterFile = writeRepairAfterAttestation(repo, after);
+  const commandApplied = commandResult.exitCode === 0;
+  const progressed = repairProgressed(failureClass, after);
+  const redacted = redactText([commandResult.evidence, rerunError].filter(Boolean).join("\n"));
+  const explanation = verifiedAfterRepair(after)
+    ? commandApplied
+      ? `AI-suggested command completed and BootProof independently verified health: ${after!.result.healthObservation}.`
+      : `AI-suggested command failed with exit ${commandResult.exitCode ?? "unknown"}, but BootProof independently verified health: ${after!.result.healthObservation}.`
+    : progressed
+      ? `AI-suggested command ${commandApplied ? "completed" : "failed"}; BootProof progressed from ${failureClass} to ${after!.result.failureClass}.`
+      : commandApplied
+        ? "AI-suggested command completed, but BootProof did not verify boot or reach a different failure class."
+        : `AI-suggested command failed with exit ${commandResult.exitCode ?? "unknown"}; BootProof did not verify boot or reach a different failure class.`;
+  return result(receiptFor({
+    approvedAt,
+    ...(commandApplied ? { appliedAt: new Date().toISOString() } : {}),
+    applyResult: {
+      status: commandApplied ? "applied" : "failed",
+      exitCode: commandResult.exitCode,
+      filesChanged: [],
+      evidence: redacted.text || null,
+    },
+    after,
+    explanation,
+    redactionsApplied: [...new Set([...commandResult.redactionsApplied, ...redacted.applied])],
+  }), explanation, afterFile);
 }
 
 async function cleanupServices(outcome: UpOutcome | null, env: NodeJS.ProcessEnv): Promise<void> {

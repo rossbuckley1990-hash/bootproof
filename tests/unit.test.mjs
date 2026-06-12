@@ -51,6 +51,7 @@ import {
   ACTION_MUTATION_SCOPES,
   ACTION_RISK_LEVELS,
   assessActionRisk,
+  buildAiSuggestedRepairAction,
   buildRepairAction,
   buildRepairReceiptBase,
   createRepairCommand,
@@ -58,6 +59,13 @@ import {
   validateRepairAction,
   validateRepairCommand,
 } from "../dist/repair-safety.js";
+import {
+  AI_KEY_REQUIRED_MESSAGE,
+  buildAiRepairContext,
+  requestAiRepairSuggestion,
+  resolveAiProvider,
+  validateAiRepairSuggestion,
+} from "../dist/ai-repair.js";
 
 const FIX = path.resolve("fixtures");
 
@@ -1405,8 +1413,9 @@ test("repair receipt safety base serializes with lifecycle fields", () => {
 test("repair safety JSON schemas are strict machine interfaces", () => {
   const actionSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "repair-action-v1.schema.json"), "utf8"));
   const receiptSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "repair-receipt-v1.schema.json"), "utf8"));
+  const aiSchema = JSON.parse(fs.readFileSync(path.join("docs", "schemas", "ai-repair-suggestion-v1.schema.json"), "utf8"));
   assert.equal(actionSchema.additionalProperties, false);
-  assert.equal(actionSchema.properties.source.const, "deterministic_playbook");
+  assert.deepEqual(actionSchema.properties.source.enum, ["deterministic_playbook", "ai_suggested"]);
   assert.ok(actionSchema.required.includes("requiresApproval"));
   assert.ok(actionSchema.required.includes("approvalPrompt"));
   assert.ok(actionSchema.required.includes("blockedReason"));
@@ -1416,7 +1425,161 @@ test("repair safety JSON schemas are strict machine interfaces", () => {
   assert.equal(receiptSchema.additionalProperties, false);
   assert.equal(receiptSchema.properties.schema.const, "bootproof/repair-receipt/v1");
   assert.ok(receiptSchema.required.includes("proposedAction"));
+  assert.ok(receiptSchema.required.includes("source"));
   assert.ok(receiptSchema.required.includes("userApprovalRequired"));
+  assert.equal(aiSchema.additionalProperties, false);
+  assert.equal(aiSchema.properties.schema.const, "bootproof/ai-repair-suggestion/v1");
+  assert.equal(aiSchema.properties.requires_human_approval.const, true);
+});
+
+function aiSuggestion(overrides = {}) {
+  return {
+    schema: "bootproof/ai-repair-suggestion/v1",
+    confidence: 0.7,
+    failure_class: "unknown_failure",
+    suggested_action_type: "command",
+    suggested_command: createRepairCommand("custom-repair-tool", ["repair"]),
+    suggested_patch: null,
+    explanation_for_user: "Run one local repair step, then let BootProof verify the result.",
+    risk_level: "low",
+    requires_human_approval: true,
+    why_this_is_safe: "The action is local, explicit, and independently validated.",
+    what_to_check_after: "Rerun BootProof and require observed health evidence.",
+    ...overrides,
+  };
+}
+
+function failedAiAttestation(evidence) {
+  return buildAttestation({
+    repo: path.join(FIX, "library-only"),
+    plan: {
+      provider: "local",
+      steps: [],
+      healthUrl: "http://localhost:3000/",
+      healthCandidates: ["http://localhost:3000/"],
+      generatedFiles: [],
+    },
+    observed: [{
+      id: "start-app",
+      kind: "start-app",
+      command: "node server.js",
+      startedAt: "2026-06-12T10:00:00.000Z",
+      finishedAt: "2026-06-12T10:00:01.000Z",
+      exitCode: 1,
+      ok: false,
+      observation: evidence,
+      evidenceHead: evidence,
+      evidenceTail: evidence,
+    }],
+    startedAt: "2026-06-12T10:00:00.000Z",
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    failureClass: "unknown_failure",
+    failureEvidence: evidence,
+    explanation: evidence,
+  });
+}
+
+test("optional BYOK AI repair fails gracefully without a provider key", () => {
+  assert.throws(
+    () => resolveAiProvider({}),
+    error => error instanceof Error && error.message === AI_KEY_REQUIRED_MESSAGE,
+  );
+  assert.equal(
+    resolveAiProvider({ ANTHROPIC_API_KEY: "test-key" }).provider,
+    "anthropic",
+  );
+  assert.equal(
+    resolveAiProvider({
+      OPENAI_API_KEY: "openai-key",
+      ANTHROPIC_API_KEY: "anthropic-key",
+      BOOTPROOF_AI_PROVIDER: "anthropic",
+    }).provider,
+    "anthropic",
+  );
+});
+
+test("AI repair sends only redacted structured evidence and accepts strict JSON", async () => {
+  const secret = "super-secret-value";
+  const attestation = failedAiAttestation(
+    `API_SECRET=${secret} failed in /Users/alice/private/repo`,
+  );
+  const context = buildAiRepairContext(attestation);
+  assert.equal(JSON.stringify(context).includes(secret), false);
+  assert.match(JSON.stringify(context), /\[redacted\]/);
+  assert.equal("repo" in context, false);
+  let requestBody = "";
+  const requested = await requestAiRepairSuggestion(attestation, {
+    env: { OPENAI_API_KEY: "test-key" },
+    fetchImpl: async (_url, init) => {
+      requestBody = String(init.body);
+      return new Response(JSON.stringify({
+        output_text: JSON.stringify(aiSuggestion()),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  assert.equal(requestBody.includes(secret), false);
+  assert.equal(requestBody.includes("/Users/alice"), false);
+  assert.match(requestBody, /bootproof\/ai-repair-context\/v1/);
+  assert.equal(requested.action.source, "ai_suggested");
+  assert.equal(requested.action.deterministic, false);
+  assert.equal(requested.action.riskLevel, "medium", "unknown commands cannot be downgraded");
+  assert.equal(requested.action.requiresApproval, true);
+});
+
+test("AI repair rejects invalid JSON and dangerous suggestions through shared safety", async () => {
+  const attestation = failedAiAttestation("unclassified startup failure");
+  await assert.rejects(
+    requestAiRepairSuggestion(attestation, {
+      env: { OPENAI_API_KEY: "test-key" },
+      fetchImpl: async () => new Response(
+        JSON.stringify({ output_text: "not-json" }),
+        { status: 200 },
+      ),
+    }),
+    /Invalid AI repair JSON/,
+  );
+
+  for (const command of [
+    createRepairCommand("sudo", ["brew", "install", "cmake"]),
+    createRepairCommand("rm", ["-rf", "/"]),
+    createRepairCommand("tee", [".env"]),
+  ]) {
+    await assert.rejects(
+      requestAiRepairSuggestion(attestation, {
+        env: { OPENAI_API_KEY: "test-key" },
+        fetchImpl: async () => new Response(JSON.stringify({
+          output_text: JSON.stringify(aiSuggestion({ suggested_command: command })),
+        }), { status: 200 }),
+      }),
+      /blocked by BootProof safety policy/,
+      command.display,
+    );
+  }
+});
+
+test("AI repair suggestion schema rejects extra fields and mismatched action payloads", () => {
+  assert.throws(
+    () => validateAiRepairSuggestion({ ...aiSuggestion(), extra: true }, "unknown_failure"),
+    /unsupported field: extra/,
+  );
+  assert.throws(
+    () => validateAiRepairSuggestion(aiSuggestion({
+      suggested_action_type: "instruction",
+    }), "unknown_failure"),
+    /instruction suggestions cannot contain a command/,
+  );
+  const action = buildAiSuggestedRepairAction({
+    actionType: "instruction",
+    mutationScope: "none",
+    riskLevel: "low",
+    instruction: "Review the preserved evidence and make one local change.",
+    explanation: "Planning advice only.",
+    evidenceRefs: [".bootproof/attestation.json"],
+  });
+  assert.equal(action.source, "ai_suggested");
+  assert.equal(action.requiresApproval, true);
 });
 
 test("repair registry exposes only deterministic v0.3 remediations", () => {

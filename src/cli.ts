@@ -37,14 +37,22 @@ import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
 import { cloneRemoteTarget, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
 import {
   applyVerifiedRepair,
+  executeAiSuggestedRepair,
   latestDeterministicRepairCandidate,
+  latestFailedAttestation,
   repairRepo,
+  registeredRemediationsFor,
   verifyRepairReceipt,
   type RepairApplyResult,
   type RepairAction,
   type RepairReceipt,
   type RepairResult,
 } from "./repair.js";
+import {
+  requestAiRepairSuggestion,
+  resolveAiProvider,
+  type RequestedAiRepair,
+} from "./ai-repair.js";
 import type { Attestation } from "./types.js";
 
 let GREEN = "\x1b[32m", YELLOW = "\x1b[33m", RED = "\x1b[31m", DIM = "\x1b[2m", BOLD = "\x1b[1m", RESET = "\x1b[0m";
@@ -62,7 +70,7 @@ const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
   "plan-agent": new Set(["json", "ci"]),
   "explain-run": new Set(["ci"]),
   "apply-repair": new Set(["receipt", "dry-run", "json", "ci"]),
-  fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci"]),
+  fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci", "ai"]),
   up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command", "external-health"]),
   "verify-url": new Set(["timeout", "json", "ci"]),
   verify: new Set(["ci"]),
@@ -100,6 +108,7 @@ Usage:
   bootproof up <path|git-url> [options]                     execute the plan, verify localhost, write signed proof
   bootproof verify-url <url> [--timeout ms]                 verify an externally managed HTTP service
   bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
+  bootproof fix <path|git-url> --ai                         optionally request a BYOK AI suggestion after deterministic refusal
   bootproof apply-repair <path> [--receipt proof.json]      explicitly apply a signature-valid verified file change
   bootproof verify <path|proof.json>                        validate an attestation or repair-receipt signature
   bootproof explain <proof.json>                            explain an attestation or repair receipt
@@ -127,11 +136,14 @@ Options for fix:
   --unsafe-local            required acknowledgement for local sandbox execution
   --port <n>                override inferred application port
   --timeout <ms>            before/after health timeout (default 60000)
+  --ai                      optional BYOK suggestion after no deterministic repair is known
   --dry-run                 execute nothing, write nothing, produce no repair proof
   --json                    one bootproof/repair-result/v1 object on stdout
 
 Command repairs show the exact command and require the literal response Y before execution.
 JSON and CI modes never prompt and never approve a command.
+AI uses OPENAI_API_KEY or ANTHROPIC_API_KEY directly with native fetch. It sends only
+redacted structured failure evidence after explicit consent and never runs inside bootproof up.
 
 Honesty contract: no green check without an observed event; dry runs say "would";
 .env/.env.local are never written; secrets are never invented.
@@ -344,6 +356,37 @@ async function patchRepairApproval(action: RepairAction): Promise<boolean> {
   } finally {
     prompt.close();
   }
+}
+
+function printAiRepairCandidate(requested: RequestedAiRepair): void {
+  const action = requested.action;
+  console.log(`${BOLD}AI-suggested unverified repair${RESET}`);
+  console.log(`Provider: ${requested.provider} (${requested.model})`);
+  console.log(`Failure: ${requested.suggestion.failure_class}`);
+  console.log(`Confidence reported by provider: ${requested.suggestion.confidence}`);
+  console.log(`Explanation: ${requested.suggestion.explanation_for_user}`);
+  console.log(`Provider safety rationale (unverified): ${requested.suggestion.why_this_is_safe}`);
+  if (action.command) console.log(`Command: ${action.command.display}`);
+  if (action.instruction) console.log(`Instruction: ${action.instruction}`);
+  if (action.patch) console.log(`Patch preview:\n${action.patch.content}`);
+  console.log(`Mutation scope: ${action.mutationScope}`);
+  console.log(`Risk: ${action.riskLevel}`);
+  console.log(`Approval: ${action.approvalPrompt}`);
+  console.log(`Verify after action: ${action.verificationStep}`);
+  console.log("Source: ai_suggested_unverified. AI has not proved this repair.");
+}
+
+async function aiRepairApproval(
+  action: RepairAction,
+  prompt: readline.Interface,
+): Promise<boolean> {
+  if (action.actionType === "command") {
+    return await prompt.question("Run this AI-suggested command? Type Y to approve: ") === "Y";
+  }
+  if (action.actionType === "patch") {
+    return await prompt.question("Test this AI-suggested patch in the repair sandbox? Type Y to approve: ") === "Y";
+  }
+  return await prompt.question("Approve recording this AI-suggested instruction? Type Y to approve: ") === "Y";
 }
 
 function printRepairCandidate(candidate: ReturnType<typeof latestDeterministicRepairCandidate>): void {
@@ -636,6 +679,62 @@ async function main() {
       target,
       provider as "docker" | "local" | undefined,
     );
+    const latestFailure = latestFailedAttestation(
+      target,
+      provider as "docker" | "local" | undefined,
+    );
+    const hasRegisteredDeterministicRepair = Boolean(
+      latestFailure?.result.failureClass &&
+      registeredRemediationsFor(latestFailure.result.failureClass).length,
+    );
+    if (!latestCandidate && !hasRegisteredDeterministicRepair && flags.ai) {
+      resolveAiProvider();
+      const before = latestFailure;
+      if (!before) {
+        throw new Error("AI-assisted repair requires a signature-valid failed attestation. Run bootproof up first.");
+      }
+      if (flags.json || flags.ci) {
+        throw new Error("AI-assisted repair requires interactive consent and approval; --json and --ci never prompt or approve actions.");
+      }
+      const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const requestApproved = await prompt.question(
+          "No verified deterministic remediation is known. Request an AI suggestion using your BYOK provider? Type Y to approve: ",
+        ) === "Y";
+        if (!requestApproved) {
+          const result: RepairResult = {
+            schema: "bootproof/repair-result/v1",
+            repaired: false,
+            failureClass: before.result.failureClass,
+            repairId: null,
+            receiptPath: null,
+            patchPath: null,
+            afterAttestationPath: null,
+            explanation: "AI suggestion request was declined. No AI provider request, command, or patch occurred.",
+          };
+          printRepairResult(result);
+          process.exitCode = 1;
+          return;
+        }
+        const requested = await requestAiRepairSuggestion(before, { timeoutMs });
+        printAiRepairCandidate(requested);
+        const actionApproved = await aiRepairApproval(requested.action, prompt);
+        const repairResult = await executeAiSuggestedRepair(target, before, requested.action, {
+          provider: provider as "docker" | "local" | undefined,
+          unsafeLocal: Boolean(flags["unsafe-local"]),
+          timeoutMs,
+          port,
+          remoteSource: remoteSource ?? undefined,
+          actionApproved,
+        });
+        const result = remote ? rebaseRemoteRepairPaths(repairResult, target) : repairResult;
+        printRepairResult(result);
+        process.exitCode = result.repaired ? 0 : 1;
+        return;
+      } finally {
+        prompt.close();
+      }
+    }
     let actionApproved = false;
     if (latestCandidate && !flags.json) {
       printRepairCandidate(latestCandidate);

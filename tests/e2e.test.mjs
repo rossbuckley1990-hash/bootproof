@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -9,6 +9,7 @@ import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
 import { buildAttestation, writeAttestation } from "../dist/proof.js";
+import { createRepairCommand } from "../dist/repair-safety.js";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
@@ -51,6 +52,38 @@ const runAsync = (args, env = {}, cwd = process.cwd()) => new Promise(resolve =>
       out: `${stdout ?? ""}${stderr ?? ""}`,
       code: typeof error?.code === "number" ? error.code : error ? 1 : 0,
     });
+  });
+});
+
+const runWithPromptResponses = (args, responses, env = {}, cwd = process.cwd()) => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [CLI, ...args], {
+    env: mergeEnv(env),
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let out = "";
+  let responseIndex = 0;
+  const timer = setTimeout(() => {
+    child.kill();
+    reject(new Error(`interactive command timed out:\n${out}`));
+  }, 10_000);
+  const capture = chunk => {
+    out += String(chunk);
+    const response = responses[responseIndex];
+    if (response && out.includes(response.prompt)) {
+      child.stdin.write(`${response.answer}\n`);
+      responseIndex += 1;
+    }
+  };
+  child.stdout.on("data", capture);
+  child.stderr.on("data", capture);
+  child.on("error", error => {
+    clearTimeout(timer);
+    reject(error);
+  });
+  child.on("close", code => {
+    clearTimeout(timer);
+    resolve({ out, code: code ?? 1 });
   });
 });
 
@@ -162,6 +195,20 @@ if (process.env.BOOTPROOF_REPAIR_MARKER) {
   fs.writeFileSync(process.env.BOOTPROOF_REPAIR_MARKER, args + "\\n");
 }
 `);
+}
+
+function writeAiFetchShim(repo, suggestion, marker) {
+  const shim = path.join(repo, "ai-fetch-shim.mjs");
+  fs.writeFileSync(shim, `
+import fs from "node:fs";
+globalThis.fetch = async (_url, options) => {
+  fs.writeFileSync(${JSON.stringify(marker)}, String(options?.body ?? ""));
+  return new Response(JSON.stringify({
+    output_text: ${JSON.stringify(JSON.stringify(suggestion))}
+  }), { status: 200, headers: { "content-type": "application/json" } });
+};
+`);
+  return shim;
 }
 
 function writePackageRepairTools(bin) {
@@ -1210,6 +1257,141 @@ test("fix MVP refuses unknown signed failures without guessing", () => {
   );
   assert.equal(result.receiptPath, null);
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+});
+
+test("fix --ai is optional and fails gracefully without a BYOK provider key", () => {
+  const repo = freshCopy("library-only");
+  writeFailedAttestation(repo, "unknown_failure", "unclassified fixture failure");
+  const { out, code } = run(
+    ["fix", repo, "--ai"],
+    true,
+    { OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", BOOTPROOF_AI_PROVIDER: "" },
+  );
+  assert.equal(code, 1);
+  assert.match(
+    out,
+    /AI-assisted repair is optional and requires your own OPENAI_API_KEY or ANTHROPIC_API_KEY/,
+  );
+  assert.match(out, /deterministic fix work without AI/);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+
+  const deterministicRepo = freshCopy("library-only");
+  writeFailedAttestation(
+    deterministicRepo,
+    "missing_build_tool",
+    "ERROR: CMake is required to build Rugged",
+  );
+  const deterministic = run(
+    ["fix", deterministicRepo, "--ai", "--provider", "local", "--unsafe-local", "--json"],
+    true,
+    { OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "" },
+  );
+  assert.equal(deterministic.code, 1);
+  assert.equal(JSON.parse(deterministic.out).repairId, "install-cmake-with-homebrew");
+  const receipt = JSON.parse(fs.readFileSync(
+    path.join(deterministicRepo, ".bootproof", "repair-receipt.json"),
+    "utf8",
+  ));
+  assert.equal(receipt.source, "deterministic_playbook");
+});
+
+test("fix --ai requires two uppercase approvals, reruns BootProof, and records ai_suggested", async () => {
+  const repo = freshCopy("library-only");
+  const commandMarker = path.join(repo, "ai-command-ran.txt");
+  const fetchMarker = path.join(repo, "ai-request.json");
+  const protectedEnv = path.join(repo, ".env");
+  const command = createRepairCommand(process.execPath, [
+    "-e",
+    'require("node:fs").writeFileSync(process.argv[1],"ran")',
+    path.basename(commandMarker),
+  ]);
+  const suggestion = {
+    schema: "bootproof/ai-repair-suggestion/v1",
+    confidence: 0.6,
+    failure_class: "unknown_failure",
+    suggested_action_type: "command",
+    suggested_command: command,
+    suggested_patch: null,
+    explanation_for_user: "Run one local fixture repair step, then let BootProof verify.",
+    risk_level: "low",
+    requires_human_approval: true,
+    why_this_is_safe: "The exact command is visible and BootProof applies the shared validator.",
+    what_to_check_after: "Rerun BootProof and require observed health evidence.",
+  };
+  const shim = writeAiFetchShim(repo, suggestion, fetchMarker);
+  fs.writeFileSync(protectedEnv, "REAL_SECRET=preserve\n");
+  writeFailedAttestation(
+    repo,
+    "unknown_failure",
+    "API_SECRET=should-not-leave-machine unclassified fixture failure",
+  );
+  const env = {
+    OPENAI_API_KEY: "fixture-key",
+    ANTHROPIC_API_KEY: "",
+    NODE_OPTIONS: `--import=${pathToFileURL(shim).href}`,
+  };
+
+  const declined = await runWithPromptResponses(
+    ["fix", repo, "--ai", "--provider", "local", "--unsafe-local", "--timeout", "1000"],
+    [
+      { prompt: "Request an AI suggestion using your BYOK provider? Type Y to approve:", answer: "Y" },
+      { prompt: "Run this AI-suggested command? Type Y to approve:", answer: "n" },
+    ],
+    env,
+  );
+  assert.equal(declined.code, 1, declined.out);
+  assert.match(declined.out, /AI-suggested unverified repair/);
+  assert.match(declined.out, /Risk: medium/, "shared risk model must upgrade an unknown command");
+  assert.equal(fs.existsSync(fetchMarker), true, "the user approved the provider request");
+  assert.equal(fs.readFileSync(fetchMarker, "utf8").includes("should-not-leave-machine"), false);
+  assert.equal(fs.existsSync(commandMarker), false, "lowercase approval must not execute");
+  let receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.source, "ai_suggested");
+  assert.equal(receipt.proposedAction.source, "ai_suggested");
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(receipt.approvedAt, undefined);
+  assert.equal(fs.readFileSync(protectedEnv, "utf8"), "REAL_SECRET=preserve\n");
+
+  fs.rmSync(fetchMarker, { force: true });
+  const approved = await runWithPromptResponses(
+    ["fix", repo, "--ai", "--provider", "local", "--unsafe-local", "--timeout", "1000"],
+    [
+      { prompt: "Request an AI suggestion using your BYOK provider? Type Y to approve:", answer: "Y" },
+      { prompt: "Run this AI-suggested command? Type Y to approve:", answer: "Y" },
+    ],
+    env,
+  );
+  assert.equal(approved.code, 1, approved.out);
+  assert.equal(fs.readFileSync(commandMarker, "utf8"), "ran");
+  receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.source, "ai_suggested");
+  assert.equal(receipt.applyResult.status, "applied");
+  assert.ok(receipt.approvedAt);
+  assert.ok(receipt.appliedAt);
+  assert.equal(receipt.afterFailureClass, "not_an_application");
+  assert.equal(receipt.progressed, true);
+  assert.equal(receipt.verified, false);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-after-attestation.json")), true);
+  assert.equal(fs.readFileSync(protectedEnv, "utf8"), "REAL_SECRET=preserve\n");
+  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature valid/);
+});
+
+test("bootproof up remains zero-AI even when a provider key and fetch shim exist", () => {
+  const repo = freshCopy("library-only");
+  const fetchMarker = path.join(repo, "unexpected-ai-request.txt");
+  const shim = writeAiFetchShim(repo, {
+    schema: "bootproof/ai-repair-suggestion/v1",
+  }, fetchMarker);
+  const { code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local"],
+    true,
+    {
+      OPENAI_API_KEY: "fixture-key",
+      NODE_OPTIONS: `--import=${pathToFileURL(shim).href}`,
+    },
+  );
+  assert.equal(code, 1);
+  assert.equal(fs.existsSync(fetchMarker), false, "bootproof up must never call an AI provider");
 });
 
 test("expanded fix previews repository patches and never overwrites without approval", () => {

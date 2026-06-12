@@ -2,6 +2,7 @@ import path from "node:path";
 import type { FailureClass } from "./types.js";
 
 export type RepairActionType = "command" | "patch" | "instruction";
+export type RepairActionSource = "deterministic_playbook" | "ai_suggested";
 export const ACTION_MUTATION_SCOPES = [
   "none",
   "repo_only",
@@ -45,8 +46,8 @@ export interface RepairAction {
   instruction: string | null;
   explanation: string;
   evidenceRefs: string[];
-  deterministic: true;
-  source: "deterministic_playbook";
+  deterministic: boolean;
+  source: RepairActionSource;
 }
 
 export interface RepairActionInput {
@@ -77,6 +78,7 @@ export interface RepairReceiptBase {
   repairId: string;
   createdAt: string;
   bootproofVersion: string;
+  source: RepairActionSource;
   beforeFailureClass: FailureClass;
   beforeEvidenceHash: string;
   proposedAction: RepairAction;
@@ -164,6 +166,7 @@ const RECEIPT_KEYS = new Set([
   "repairId",
   "createdAt",
   "bootproofVersion",
+  "source",
   "beforeFailureClass",
   "beforeEvidenceHash",
   "proposedAction",
@@ -603,10 +606,20 @@ export function validateRepairAction(value: unknown): RepairSafetyValidation {
   if (!nonEmptyString(action.verificationStep)) errors.push("verificationStep must be a non-empty string");
   if (!nonEmptyString(action.explanation)) errors.push("explanation must be a non-empty string");
   if (!stringArray(action.evidenceRefs)) errors.push("evidenceRefs must be a string array");
-  if (action.deterministic !== true) errors.push("deterministic must be true");
-  if (action.source !== "deterministic_playbook") errors.push("source must be deterministic_playbook");
+  if (typeof action.deterministic !== "boolean") errors.push("deterministic must be boolean");
+  if (!["deterministic_playbook", "ai_suggested"].includes(String(action.source))) {
+    errors.push("invalid repair action source");
+  }
+  if (action.source === "deterministic_playbook" && action.deterministic !== true) {
+    errors.push("deterministic playbook actions must set deterministic=true");
+  }
+  if (action.source === "ai_suggested" && action.deterministic !== false) {
+    errors.push("AI-suggested actions must set deterministic=false");
+  }
   if (action.riskLevel === "blocked") errors.push("blocked repair actions cannot be accepted");
-  if (action.blockedReason !== "") errors.push("non-blocked repair actions must use an empty blockedReason");
+  if (action.riskLevel !== "blocked" && action.blockedReason !== "") {
+    errors.push("non-blocked repair actions must use an empty blockedReason");
+  }
   if (
     ["medium", "high"].includes(String(action.riskLevel)) &&
     action.requiresApproval !== true
@@ -682,6 +695,38 @@ export function buildRepairAction(input: RepairActionInput): RepairAction {
 
 export const createRepairAction = buildRepairAction;
 
+export function buildAiSuggestedRepairAction(input: RepairActionInput): RepairAction {
+  const assessment = assessActionRisk({
+    actionType: input.actionType,
+    command: input.command,
+    mutationScope: input.mutationScope,
+    riskLevel: input.riskLevel,
+    requiresApproval: true,
+    blockedReason: input.blockedReason,
+    verificationStep: input.verificationStep,
+  });
+  const action: RepairAction = {
+    schema: "bootproof/repair-action/v1",
+    actionType: input.actionType,
+    mutationScope: assessment.mutationScope,
+    riskLevel: assessment.riskLevel,
+    requiresApproval: true,
+    approvalPrompt: assessment.approvalPrompt,
+    blockedReason: assessment.blockedReason,
+    verificationStep: assessment.verificationStep,
+    command: input.command ?? null,
+    patch: input.patch ?? null,
+    instruction: input.instruction ?? null,
+    explanation: input.explanation,
+    evidenceRefs: [...input.evidenceRefs],
+    deterministic: false,
+    source: "ai_suggested",
+  };
+  const result = validateRepairAction(action);
+  if (!result.valid) throw new Error(`AI suggestion was blocked by BootProof safety policy: ${result.errors.join("; ")}`);
+  return action;
+}
+
 function validateApplyResult(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["applyResult must be an object"];
   const result = value as Partial<RepairApplyResultRecord>;
@@ -703,11 +748,15 @@ export function validateRepairReceiptBase(value: unknown): RepairSafetyValidatio
   for (const key of ["repairId", "bootproofVersion", "beforeFailureClass", "explanation"] as const) {
     if (!nonEmptyString(receipt[key])) errors.push(`${key} must be a non-empty string`);
   }
+  if (!["deterministic_playbook", "ai_suggested"].includes(String(receipt.source))) {
+    errors.push("invalid repair receipt source");
+  }
   if (!isoDate(receipt.createdAt)) errors.push("createdAt must be an ISO date");
   if (!/^[0-9a-f]{64}$/i.test(String(receipt.beforeEvidenceHash))) {
     errors.push("beforeEvidenceHash must be a SHA-256 hex digest");
   }
   errors.push(...validateRepairAction(receipt.proposedAction).errors);
+  if (receipt.source !== receipt.proposedAction?.source) errors.push("source must match proposedAction");
   if (receipt.actionType !== receipt.proposedAction?.actionType) errors.push("actionType must match proposedAction");
   if (receipt.mutationScope !== receipt.proposedAction?.mutationScope) errors.push("mutationScope must match proposedAction");
   if (receipt.riskLevel !== receipt.proposedAction?.riskLevel) errors.push("riskLevel must match proposedAction");
@@ -739,6 +788,7 @@ export function buildRepairReceiptBase(input: RepairReceiptBaseInput): RepairRec
     repairId: input.repairId,
     createdAt: input.createdAt,
     bootproofVersion: input.bootproofVersion,
+    source: input.proposedAction.source,
     beforeFailureClass: input.beforeFailureClass,
     beforeEvidenceHash: input.beforeEvidenceHash,
     proposedAction: input.proposedAction,
