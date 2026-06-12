@@ -13,9 +13,11 @@ import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, repoComposeRep
 import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
 import {
   buildExecutionEnv,
+  detectHealthCandidatePortMismatch,
   extractHealthCandidates,
   extractLeadingEnvironmentAssignments,
   extractProcessEvidence,
+  healthCandidatePortMismatchEvidence,
   pollHealth,
   superviseApp,
 } from "../dist/exec.js";
@@ -414,6 +416,73 @@ test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybr
   assert.ok(inf.workspaces.every(candidate => !candidate.dir.includes("\\")), "workspace paths must be platform-neutral");
   assert.ok(root.score > productionPackage.score);
   assert.ok(productionPackage.score > testPlugin.score, "test plugin must rank below production candidates");
+});
+
+test("Laravel/Vite repositories keep the Laravel app command separate from the asset server", () => {
+  const inf = inferRepo(path.join(FIX, "php-laravel-vite-like"));
+  assert.equal(inf.isApplication, true);
+  assert.deepEqual(inf.stack, [
+    "php-backend",
+    "laravel",
+    "node-frontend",
+    "vite",
+    "docker-compose",
+  ]);
+  assert.ok(inf.backendMarkers.includes("artisan"));
+  assert.ok(inf.backendMarkers.includes("composer.json"));
+  assert.ok(inf.frontendMarkers.includes("package.json"));
+  assert.ok(inf.frontendMarkers.includes("vite.config.js"));
+  assert.equal(inf.backendCommand, "php artisan serve --host=127.0.0.1 --port=8000");
+  assert.equal(inf.appCommand, "php artisan serve --host=127.0.0.1 --port=8000");
+  assert.equal(inf.appCommandSource, "Laravel entrypoint: artisan");
+  assert.equal(inf.frontendCommand, "yarn dev");
+  assert.equal(inf.asset_dev_server_command, "yarn dev");
+  assert.notEqual(inf.appCommand, inf.asset_dev_server_command);
+  assert.match(inf.commandScope, /Vite is an asset development server only/);
+  assert.deepEqual(
+    inf.preparationCommands.map(command => command.command),
+    ["composer install"],
+  );
+  assert.deepEqual(inf.healthCandidates, ["http://localhost:8000/"]);
+
+  const dockerPlan = buildPlan(inf, "docker");
+  assert.equal(
+    dockerPlan.steps.find(step => step.kind === "service")?.command,
+    "docker compose -f docker-compose.yml up -d",
+  );
+  assert.deepEqual(
+    dockerPlan.steps.filter(step => step.kind === "start-app"),
+    [],
+    "source-built Laravel Compose is preferred to host commands",
+  );
+
+  const localPlan = buildPlan(inf, "local");
+  assert.equal(
+    localPlan.steps.find(step => step.kind === "start-app")?.command,
+    "php artisan serve --host=127.0.0.1 --port=8000",
+  );
+  assert.equal(
+    localPlan.steps.some(step => step.command === "yarn dev"),
+    false,
+    "the Vite asset server must not become the Laravel app server",
+  );
+});
+
+test("Laravel Sail is preferred when the repository contains its executable", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-laravel-sail-"));
+  try {
+    fs.writeFileSync(path.join(repo, "artisan"), "#!/usr/bin/env php\n");
+    fs.writeFileSync(path.join(repo, "composer.json"), "{}\n");
+    fs.mkdirSync(path.join(repo, "vendor", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "vendor", "bin", "sail"), "#!/bin/sh\n");
+    const inf = inferRepo(repo);
+    assert.equal(inf.appCommand, "./vendor/bin/sail up");
+    assert.equal(inf.appCommandSource, "Laravel Sail entrypoint: vendor/bin/sail");
+    assert.equal(inf.commandScope, "Laravel application through Sail");
+    assert.deepEqual(inf.healthCandidates, ["http://localhost:80/"]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("Memos-like repository is an application that requires unsupported orchestration", () => {
@@ -1776,9 +1845,43 @@ test("package manager version preflight compares only exact declarations conserv
 
 test("health candidates are extracted from common application log formats", () => {
   assert.deepEqual(
-    extractHealthCandidates("Local: http://127.0.0.1:5173/\nserver listening on port 8088\nserver listening on 9090"),
-    ["http://127.0.0.1:5173/", "http://localhost:8088/", "http://localhost:9090/"],
+    extractHealthCandidates("Local: https://localhost:5173/\nLocal: http://localhost:4173/\nserver listening on port 8088\nserver listening on 9090"),
+    ["https://localhost:5173/", "http://localhost:4173/", "http://localhost:8088/", "http://localhost:9090/"],
   );
+});
+
+test("Laravel Vite CI-HMR failures and advertised port mismatches classify precisely", () => {
+  const hmrEvidence = fs.readFileSync(
+    path.join(FIX, "php-laravel-vite-like", "evidence.txt"),
+    "utf8",
+  );
+  const hmr = classifyFailure(hmrEvidence);
+  assert.equal(hmr.class, "laravel_vite_ci_hmr_blocked");
+  assert.deepEqual(hmr.metadata, {
+    tool: "laravel-vite-plugin",
+    mode: "ci-hmr",
+  });
+  assert.match(hmr.safeNextStep, /LARAVEL_BYPASS_ENV_CHECK=1/);
+  assert.match(hmr.safeNextStep, /production asset build/);
+  assert.match(hmr.safeNextStep, /Laravel app server/);
+
+  const mismatch = detectHealthCandidatePortMismatch(
+    "http://localhost:8000/",
+    ["https://localhost:5173/"],
+    "npm run dev",
+  );
+  assert.deepEqual(mismatch, {
+    inferredHealthUrl: "http://localhost:8000/",
+    advertisedHealthUrl: "https://localhost:5173/",
+    advertisedPort: "5173",
+    selectedCommand: "npm run dev",
+  });
+  const classified = classifyFailure(healthCandidatePortMismatchEvidence(mismatch));
+  assert.equal(classified.class, "health_candidate_port_mismatch");
+  assert.deepEqual(classified.metadata, mismatch);
+  assert.match(classified.safeNextStep, /Laravel app server/);
+  assert.equal(classifyFailure("laravel-vite-plugin loaded successfully").class, "unknown_failure");
+  assert.equal(classifyFailure("/bin/sh: php: command not found").class, "missing_runtime_tool");
 });
 
 test("execution environment preserves parent variables and applies explicit overrides", () => {

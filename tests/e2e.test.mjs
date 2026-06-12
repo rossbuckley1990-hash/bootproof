@@ -2135,6 +2135,41 @@ http.createServer((_req, res) => { res.statusCode = 200; res.end("ok"); }).liste
   assert.match(explained.out, new RegExp(`127\\.0\\.0\\.1:${actualPort}/ready`));
 });
 
+test("advertised Vite port mismatch is preserved as a precise failed attestation", async () => {
+  const repo = freshCopy("hello-app");
+  const inferredPort = await getFreePort();
+  let advertisedPort = await getFreePort();
+  while (advertisedPort === inferredPort) advertisedPort = await getFreePort();
+  fs.writeFileSync(path.join(repo, "server.js"), `
+console.log("Local: https://localhost:${advertisedPort}/");
+setInterval(() => {}, 1000);
+`);
+  const { code } = run(
+    [
+      "up",
+      repo,
+      "--provider",
+      "local",
+      "--unsafe-local",
+      "--port",
+      String(inferredPort),
+      "--timeout",
+      "500",
+      "--ci",
+    ],
+    true,
+  );
+  assert.equal(code, 1);
+  const att = JSON.parse(
+    fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"),
+  );
+  assert.equal(att.result.failureClass, "health_candidate_port_mismatch");
+  assert.ok(att.result.observedHealthCandidates.includes(`https://localhost:${advertisedPort}/`));
+  assert.match(att.result.failureEvidence, new RegExp(`inferredHealthUrl: http://localhost:${inferredPort}/`));
+  assert.match(att.result.failureEvidence, new RegExp(`advertisedHealthUrl: https://localhost:${advertisedPort}/`));
+  assert.match(att.result.failureEvidence, /selectedCommand: npm run start/);
+});
+
 test("honesty: failed boot writes failed attestation with classified evidence", () => {
   const repo = freshCopy("hello-app");
   fs.writeFileSync(path.join(repo, "server.js"), "console.error('Error: listen EADDRINUSE: address already in use :::3000'); process.exit(1);");

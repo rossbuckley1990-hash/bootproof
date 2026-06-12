@@ -48,6 +48,12 @@ const REPO_COMPOSE_FILES = [
   "docker/docker-compose.yml",
   "docker/docker-compose.yaml",
 ];
+const VITE_CONFIG_FILES = [
+  "vite.config.js",
+  "vite.config.ts",
+  "vite.config.mjs",
+  "vite.config.cjs",
+];
 
 function detectRepoComposeFile(repo: string): string | null {
   return REPO_COMPOSE_FILES.find(file => exists(repo, file)) ?? null;
@@ -244,13 +250,14 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const setupPy = readText(repo, "setup.py");
   const requirements = readText(repo, "requirements.txt");
   const compose = repoComposeFile ? readText(repo, repoComposeFile) : "";
+  const composer = readJson(path.join(repo, "composer.json"));
   const rootDeps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
   const nestedDeps = { ...(nestedFrontend?.pkg?.dependencies ?? {}), ...(nestedFrontend?.pkg?.devDependencies ?? {}) };
 
-  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "requirements.txt", "manage.py", "go.mod", "go.work", "Gemfile", "config/database.yml", "Makefile", "superset/app.py", "superset/config.py"]);
+  const backendMarkers = present(repo, ["pyproject.toml", "setup.py", "requirements.txt", "manage.py", "go.mod", "go.work", "Gemfile", "config/database.yml", "Makefile", "superset/app.py", "superset/config.py", "artisan", "composer.json"]);
   if (isDirectory(repo, "pkg")) backendMarkers.push("pkg/");
 
-  const frontendMarkers = present(repo, ["package.json", "yarn.lock", "pnpm-lock.yaml", "nx.json"]);
+  const frontendMarkers = present(repo, ["package.json", "yarn.lock", "pnpm-lock.yaml", "nx.json", ...VITE_CONFIG_FILES]);
   if (isDirectory(repo, "public")) frontendMarkers.push("public/");
   if (isDirectory(repo, "packages")) frontendMarkers.push("packages/");
   if (nestedFrontend) frontendMarkers.push(`${nestedFrontend.dir}/package.json`);
@@ -264,11 +271,15 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const hasPythonBackend = hasFlaskBackend || hasDjango;
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
   const hasRubyBackend = exists(repo, "Gemfile");
+  const hasLaravel = exists(repo, "artisan") && Boolean(composer);
+  const hasPhpBackend = hasLaravel;
+  const viteConfig = VITE_CONFIG_FILES.find(file => exists(repo, file)) ?? null;
+  const hasLaravelViteFrontend = hasLaravel && Boolean(pkg) && Boolean(viteConfig);
   const makeCommand = detectMakeCommand(repo, makefile);
   const goEntrypoint = detectGoEntrypoint(repo);
   const rubyCommand = detectRubyCommand(repo);
   const hasMakeDrivenBackend = Boolean(makefile && /^[A-Za-z0-9_.-]+:\s*(?:[^=]|$)/m.test(makefile));
-  const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend);
+  const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend || hasLaravelViteFrontend);
   const hasReact = Boolean(rootDeps.react || nestedDeps.react);
   const hasReactFrontend = Boolean(nestedFrontend && hasReact);
   const hasCelery = /\bcelery\b/i.test(pyproject + setupPy + makefile + compose);
@@ -280,12 +291,14 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (hasDjango) stack.push("django");
   if (hasGoBackend) stack.push("go-backend");
   if (hasRubyBackend) stack.push("ruby-backend");
-  if (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend) stack.push("make-driven");
+  if (hasPhpBackend) stack.push("php-backend");
+  if (hasLaravel) stack.push("laravel");
+  if (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend && !hasPhpBackend) stack.push("make-driven");
   if (hasNodeFrontend) stack.push("node-frontend");
   if (hasReactFrontend) stack.push("react-frontend");
   if (hasReact && !hasReactFrontend) stack.push("react");
   if (rootDeps.next) stack.push("nextjs");
-  if (rootDeps.vite) stack.push("vite");
+  if (rootDeps.vite || viteConfig) stack.push("vite");
   if (rootDeps.express) stack.push("express");
   if (rootDeps.fastify) stack.push("fastify");
   if (rootDeps["@nestjs/core"]) stack.push("nestjs");
@@ -317,13 +330,26 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     hasDjango,
     hasGoBackend,
     hasRubyBackend,
+    hasPhpBackend,
+    hasLaravel,
+    hasLaravelViteFrontend,
+    sailCommand: hasLaravel && exists(repo, "vendor/bin/sail") ? "./vendor/bin/sail up" : null,
     hasMakeDrivenBackend,
     hasNodeFrontend,
   };
 }
 
-function detectPort(pkg: any, repo: string, commands: Array<string | null>): { port: number; evidence: string } {
-  const sources = [JSON.stringify(pkg?.scripts ?? {}), readText(repo, "Makefile"), ...commands.filter((v): v is string => Boolean(v))].join("\n");
+function detectPort(
+  pkg: any,
+  repo: string,
+  commands: Array<string | null>,
+  options: { ignorePackageScripts?: boolean; defaultPort?: number } = {},
+): { port: number; evidence: string } {
+  const sources = [
+    options.ignorePackageScripts ? "" : JSON.stringify(pkg?.scripts ?? {}),
+    readText(repo, "Makefile"),
+    ...commands.filter((v): v is string => Boolean(v)),
+  ].join("\n");
   const m = sources.match(/(?:-p|--port)(?:=|\s+|[\\"]+)(\d{2,5})/);
   if (m) return { port: Number(m[1]), evidence: `port flag in command evidence: ${m[0].replace(/\\"/g, "").trim()}` };
   const goDefault = sources.match(/(?:SetDefault\(\s*["']port["']\s*,|(?:Int|IntVar)\(\s*["']port["']\s*,)\s*(\d{2,5})/);
@@ -331,9 +357,10 @@ function detectPort(pkg: any, repo: string, commands: Array<string | null>): { p
   const listen = sources.match(/ListenAndServe\(\s*["']:(\d{2,5})["']/);
   if (listen) return { port: Number(listen[1]), evidence: "HTTP listen address in source" };
   const envEx = readText(repo, ".env.example");
-  const pm = envEx.match(/^PORT=(\d{2,5})/m);
-  if (pm) return { port: Number(pm[1]), evidence: "PORT in .env.example" };
-  return { port: 3000, evidence: "default assumption (3000); not evidence-based" };
+  const pm = envEx.match(/^(?:APP_)?PORT=(\d{2,5})/m);
+  if (pm) return { port: Number(pm[1]), evidence: `${pm[0].split("=")[0]} in .env.example` };
+  const defaultPort = options.defaultPort ?? 3000;
+  return { port: defaultPort, evidence: `default assumption (${defaultPort}); not evidence-based` };
 }
 
 function detectServices(pkg: any, repo: string, repoComposeFile: string | null): ServiceNeed[] {
@@ -476,14 +503,22 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const architecture = detectArchitecture(repo, pkg, nestedFrontend, repoComposeFile);
   const pm = detectPackageManager(repo, pkg, nestedFrontend?.dir ?? null);
   const rootApp = pickAppCommand(pkg, pm.pm);
+  const rootScriptText = rootApp.script ? String(pkg?.scripts?.[rootApp.script] ?? "") : "";
+  const assetDevServerCommand = architecture.hasLaravelViteFrontend && /\bvite\b/i.test(rootScriptText)
+    ? rootApp.command
+    : null;
 
   const commandEvidence = [
     architecture.flaskCommand,
     architecture.makeCommand?.command ?? null,
     architecture.goEntrypoint?.sourceText ?? null,
     architecture.rubyCommand?.commandBase ?? null,
+    architecture.sailCommand,
   ];
-  const { port, evidence: portEvidence } = detectPort(pkg, repo, commandEvidence);
+  const { port, evidence: portEvidence } = detectPort(pkg, repo, commandEvidence, {
+    ignorePackageScripts: architecture.hasLaravel,
+    defaultPort: architecture.sailCommand ? 80 : architecture.hasLaravel ? 8000 : 3000,
+  });
   const goCommand = architecture.goEntrypoint
     ? [
         architecture.goEntrypoint.commandBase,
@@ -493,12 +528,16 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     : null;
   const rubyCommand = architecture.rubyCommand ? `${architecture.rubyCommand.commandBase} -p ${port}` : null;
   const djangoCommand = architecture.hasDjango ? `python manage.py runserver 127.0.0.1:${port}` : null;
+  const laravelCommand = architecture.hasLaravel
+    ? architecture.sailCommand ?? `php artisan serve --host=127.0.0.1 --port=${port}`
+    : null;
   const repositoryBackendCommand = architecture.makeCommand?.command ?? goCommand ?? rubyCommand;
-  const backendCommand = architecture.flaskCommand ?? djangoCommand ?? repositoryBackendCommand;
+  const backendCommand = architecture.flaskCommand ?? djangoCommand ?? laravelCommand ?? repositoryBackendCommand;
   const nestedFrontendCommand = architecture.frontendMakeCommand;
   const frontendCommand = nestedFrontendCommand ?? rootApp.command;
   const appCommand = architecture.flaskCommand
     ?? djangoCommand
+    ?? laravelCommand
     ?? (architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command ? rootApp.command : null)
     ?? repositoryBackendCommand
     ?? rootApp.command;
@@ -506,6 +545,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ? `Makefile Flask command: ${architecture.flaskCommand}`
     : djangoCommand && appCommand === djangoCommand
       ? "Django entrypoint: manage.py"
+    : laravelCommand && appCommand === laravelCommand
+      ? architecture.sailCommand
+        ? "Laravel Sail entrypoint: vendor/bin/sail"
+        : "Laravel entrypoint: artisan"
     : architecture.makeCommand && appCommand === architecture.makeCommand.command
       ? architecture.makeCommand.source
       : goCommand && appCommand === goCommand
@@ -517,6 +560,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     architecture.hasPythonBackend ||
     architecture.hasGoBackend ||
     architecture.hasRubyBackend ||
+    architecture.hasPhpBackend ||
     architecture.hasMakeDrivenBackend ||
     composeApplicationServices.some(service => service.source === "build");
   const workspaces = opts.workspace ? [] : rankWorkspaces(rootRepo, rootPkg);
@@ -527,6 +571,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const preparationCommands: PreparationCommand[] = [];
   const nodePreparationRequired = Boolean(
     rootApp.command &&
+    !architecture.hasLaravel &&
     (Object.keys(rootDeps).length > 0 || exists(repo, "yarn.lock") || exists(repo, "pnpm-lock.yaml") || exists(repo, "package-lock.json") || exists(repo, "nx.json")),
   );
   if (nodePreparationRequired) {
@@ -539,6 +584,9 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   if (rubyCommand && appCommand === rubyCommand) {
     preparationCommands.push({ id: "bundle-install", kind: "install", command: "bundle install", description: "install declared Ruby gems", source: "Gemfile and bin/rails present" });
   }
+  if (laravelCommand && appCommand === laravelCommand) {
+    preparationCommands.push({ id: "composer-install", kind: "install", command: "composer install", description: "install declared PHP dependencies", source: "composer.json and artisan present" });
+  }
   const dependencyInstallRequired = preparationCommands.length > 0;
   const incompleteAppCommand = Boolean(architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command);
   const multiAppCommand = Boolean(rootApp.command && /\b(?:turbo|nx)\s+run\s+dev\b[^\n]*--parallel\b/i.test(rootApp.source));
@@ -550,6 +598,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
       ? "Python/Flask backend command; React frontend and worker require separate orchestration"
     : djangoCommand && appCommand === djangoCommand
       ? "Django application command"
+    : laravelCommand && appCommand === laravelCommand
+      ? architecture.sailCommand
+        ? "Laravel application through Sail"
+        : "Laravel application command; Vite is an asset development server only"
     : goCommand && appCommand === goCommand && nestedFrontend
         ? "Go application command serving repository-embedded frontend assets"
         : rubyCommand && appCommand === rubyCommand
@@ -599,6 +651,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     appCommandSource,
     backendCommand,
     frontendCommand,
+    asset_dev_server_command: assetDevServerCommand,
     workerCommand: architecture.workerCommand,
     commandScope,
     incompleteAppCommand,
