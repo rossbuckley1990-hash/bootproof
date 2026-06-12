@@ -17,7 +17,7 @@ authorize autonomous execution and does not change runtime behavior.
 | Engineering constitution | Exists | `AGENTS.md` contains the complete agent-loop principles, approval boundary, one-step rule, verification rule, receipt rule, honest-stop rule, and OSS/Cloud boundary. |
 | External health verification | Exists | `verify-url` and `up --external-health` record external-health attestations with explicit non-orchestration ownership and honest auth/unreachable classifications. |
 | Agent planning | Planning-only foundation exists | `bootproof plan-agent` writes a strict local agent plan with evidence, risk-classified candidate actions, approvals, verification steps, and stop conditions. It executes no candidate action. |
-| Shared action risk model | Partial | Deterministic repair has strict action, risk, approval, blocklist, and receipt models. The model is fixed to deterministic playbooks and lacks `blockedReason`, `verificationStep`, and unknown-command risk classification. |
+| Shared action risk model | Exists | Deterministic repair and `plan-agent` use one strict action-risk classifier with canonical mutation scopes, approval prompts, blocked reasons, verification steps, a hard blocklist, and at-least-medium risk for unknown commands. |
 | Airbyte runbook recognition | Partial generic foundation | Planning recognizes documented `abctl`, kind, Helm, Kubernetes, Gradle, credential, and local health markers. It does not yet identify Airbyte specifically or emit Airbyte-specific classifications/runbooks. |
 | Local agent receipt chain | Partial primitives only | Signed attestations and signed repair receipts contain before/after hashes and lifecycle state. There is no run directory, chained action/verification receipts, final summary, or `explain-run`. |
 
@@ -115,18 +115,18 @@ It is not an agent plan because it does not contain:
 
 ### Shared Risk Model
 
-The deterministic repair model is the correct foundation, but it is not yet a
-general agent-action contract:
+The deterministic repair safety module is the shared action-risk contract used
+by deterministic repair and `plan-agent`. It provides:
 
-- `deterministic` is fixed to `true`;
-- `source` is fixed to `deterministic_playbook`;
-- `blockedReason` is absent;
-- `verificationStep` is absent;
-- callers supply the risk level;
-- unknown commands are not independently classified as at least medium risk.
+- canonical action type, mutation scope, risk, and approval fields;
+- generated approval prompts, blocked reasons, and verification steps;
+- deterministic high-risk classification for host installs, Kubernetes
+  mutations, database migrations, and credential generation;
+- at-least-medium classification for unknown commands;
+- one hard blocklist before any command can become executable.
 
-Unsafe commands are rejected by the hard blocklist. Unknown failures also stop
-without a guessed repair.
+Deterministic repair actions remain sourced from `deterministic_playbook`.
+`plan-agent` consumes the same classifier but remains planning-only.
 
 ### Receipt History
 
@@ -170,22 +170,17 @@ The following do not exist:
 
 ## Recommended Next Prompt Order
 
-1. **Generalize the action planning contract, without execution.**
-   Add a strict agent-action schema that reuses the repair safety validator and
-   adds `blockedReason`, `verificationStep`, secret sensitivity, action source,
-   and deterministic risk classification. Unknown commands must be at least
-   medium risk; blocked commands remain non-executable.
-2. **Add deterministic Airbyte recognition and a planning-only runbook.**
+1. **Add deterministic Airbyte recognition and a planning-only runbook.**
    Detect the repository and orchestration traits, classify the managed/external
    orchestrator path, propose `abctl local install --port 8001` as high risk,
    mark credentials secret-sensitive, and use the external health endpoint as
    the final verification step. Do not execute the plan.
-3. **Add the local agent-run receipt chain.**
+2. **Add the local agent-run receipt chain.**
    Introduce the run directory, initial attestation, plan snapshot,
    hash-chained action and verification receipts, final summary, and
    `explain-run`. Keep all output local, redacted, signed where appropriate,
    and append-only within a run.
-4. **Only after the preceding contracts are stable, add a human-driven
+3. **Only after the preceding contracts are stable, add a human-driven
    single-step runner.**
    Execute exactly one approved local action, verify it, write the chained
    receipts, and stop for a new explicit approval. Do not add autonomous

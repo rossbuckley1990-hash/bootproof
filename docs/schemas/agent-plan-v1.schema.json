@@ -66,6 +66,8 @@
         "riskLevel",
         "mutationScope",
         "requiresApproval",
+        "approvalPrompt",
+        "blockedReason",
         "verificationStep",
         "stopCondition"
       ],
@@ -87,9 +89,11 @@
           "uniqueItems": true,
           "items": { "type": "string" }
         },
-        "riskLevel": { "enum": ["low", "medium", "high", "blocked"] },
-        "mutationScope": { "enum": ["repo", "host", "service", "database", "none"] },
-        "requiresApproval": { "const": true },
+        "riskLevel": { "enum": ["none", "low", "medium", "high", "blocked"] },
+        "mutationScope": { "enum": ["none", "repo_only", "project_cache", "container_runtime", "host_tool_install", "host_network", "kubernetes_cluster", "database", "service", "credentials", "unknown"] },
+        "requiresApproval": { "type": "boolean" },
+        "approvalPrompt": { "type": "string", "minLength": 1 },
+        "blockedReason": { "type": "string" },
         "verificationStep": { "type": "string", "minLength": 1 },
         "stopCondition": { "type": "string", "minLength": 1 }
       },
@@ -101,6 +105,19 @@
         {
           "if": { "properties": { "actionType": { "const": "instruction" } } },
           "then": { "properties": { "command": { "const": "" } } }
+        },
+        {
+          "if": { "properties": { "riskLevel": { "enum": ["medium", "high"] } } },
+          "then": { "properties": { "requiresApproval": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "riskLevel": { "const": "blocked" } } },
+          "then": {
+            "properties": {
+              "requiresApproval": { "const": false },
+              "blockedReason": { "type": "string", "minLength": 1 }
+            }
+          }
         }
       ]
     }

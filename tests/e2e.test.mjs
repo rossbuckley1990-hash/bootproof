@@ -646,7 +646,18 @@ test("plan-agent writes a local plan and executes no repository command", () => 
   assert.equal(plan.mode, "agent-plan");
   assert.equal(plan.canBootProofOrchestrateDirectly, false);
   assert.equal(plan.canBootProofVerifyExternally, true);
-  assert.ok(plan.candidateNextActions.every(candidate => candidate.requiresApproval === true));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.command === "abctl local install --port 8001" &&
+    candidate.riskLevel === "high" &&
+    candidate.mutationScope === "kubernetes_cluster" &&
+    candidate.requiresApproval === true
+  ));
+  assert.ok(plan.candidateNextActions.some(candidate =>
+    candidate.command === "bootproof verify-url http://localhost:8001/api/v1/health" &&
+    candidate.riskLevel === "low" &&
+    candidate.mutationScope === "none" &&
+    candidate.requiresApproval === false
+  ));
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "attestation.json")), false);
 });
 
@@ -1019,9 +1030,10 @@ test("fix MVP requires uppercase Y, writes receipts, and records changed-failure
     env,
   );
   assert.equal(declined.code, 1);
-  assert.match(declined.out, /This repair may modify your local machine or services\./);
+  assert.match(declined.out, /may install or change tools on your local machine/);
   assert.match(declined.out, /Command: brew install cmake/);
-  assert.match(declined.out, /Risk: medium/);
+  assert.match(declined.out, /Mutation scope: host_tool_install/);
+  assert.match(declined.out, /Risk: high/);
   assert.match(declined.out, /Run this command\? Type Y to approve:/);
   assert.equal(fs.existsSync(marker), false, "lowercase y must not approve");
   receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
@@ -1207,7 +1219,7 @@ test("repair: conflicting repository Compose port produces signed verified recei
     assert.equal(receipt.schema, "bootproof/repair-receipt/v1");
     assert.equal(receipt.repairId, "remap-conflicting-service-port");
     assert.equal(receipt.actionType, "patch");
-    assert.equal(receipt.mutationScope, "repo");
+    assert.equal(receipt.mutationScope, "repo_only");
     assert.equal(receipt.riskLevel, "low");
     assert.equal(receipt.userApprovalRequired, true);
     assert.equal(receipt.applyResult.status, "applied");
@@ -1327,7 +1339,7 @@ test("repair: declared package manager activation is verified end to end", async
 
   const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
   assert.equal(receipt.actionType, "command");
-  assert.equal(receipt.mutationScope, "host");
+  assert.equal(receipt.mutationScope, "project_cache");
   assert.equal(receipt.riskLevel, "medium");
   assert.equal(receipt.userApprovalRequired, true);
   assert.equal(receipt.proposedAction.command.display, "corepack prepare pnpm@10.24.0 --activate");

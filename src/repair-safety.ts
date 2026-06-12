@@ -2,8 +2,22 @@ import path from "node:path";
 import type { FailureClass } from "./types.js";
 
 export type RepairActionType = "command" | "patch" | "instruction";
-export type RepairMutationScope = "repo" | "host" | "service" | "database" | "none";
-export type RepairRiskLevel = "low" | "medium" | "high" | "blocked";
+export const ACTION_MUTATION_SCOPES = [
+  "none",
+  "repo_only",
+  "project_cache",
+  "container_runtime",
+  "host_tool_install",
+  "host_network",
+  "kubernetes_cluster",
+  "database",
+  "service",
+  "credentials",
+  "unknown",
+] as const;
+export const ACTION_RISK_LEVELS = ["none", "low", "medium", "high", "blocked"] as const;
+export type RepairMutationScope = typeof ACTION_MUTATION_SCOPES[number];
+export type RepairRiskLevel = typeof ACTION_RISK_LEVELS[number];
 
 export interface RepairCommand {
   executable: string;
@@ -23,6 +37,9 @@ export interface RepairAction {
   mutationScope: RepairMutationScope;
   riskLevel: RepairRiskLevel;
   requiresApproval: boolean;
+  approvalPrompt: string;
+  blockedReason: string;
+  verificationStep: string;
   command: RepairCommand | null;
   patch: RepairPatch | null;
   instruction: string | null;
@@ -37,6 +54,8 @@ export interface RepairActionInput {
   mutationScope: RepairMutationScope;
   riskLevel: RepairRiskLevel;
   requiresApproval?: boolean;
+  blockedReason?: string;
+  verificationStep?: string;
   command?: RepairCommand | null;
   patch?: RepairPatch | null;
   instruction?: string | null;
@@ -97,15 +116,39 @@ export interface RepairSafetyValidation {
   errors: string[];
 }
 
+export interface ActionRiskAssessment {
+  actionType: RepairActionType;
+  command: string;
+  riskLevel: RepairRiskLevel;
+  mutationScope: RepairMutationScope;
+  requiresApproval: boolean;
+  approvalPrompt: string;
+  blockedReason: string;
+  verificationStep: string;
+}
+
+export interface ActionRiskInput {
+  actionType: RepairActionType;
+  command?: RepairCommand | null;
+  mutationScope?: RepairMutationScope;
+  riskLevel?: RepairRiskLevel;
+  requiresApproval?: boolean;
+  blockedReason?: string;
+  verificationStep?: string;
+}
+
 const ACTION_TYPES = new Set<RepairActionType>(["command", "patch", "instruction"]);
-const MUTATION_SCOPES = new Set<RepairMutationScope>(["repo", "host", "service", "database", "none"]);
-const RISK_LEVELS = new Set<RepairRiskLevel>(["low", "medium", "high", "blocked"]);
+const MUTATION_SCOPES = new Set<RepairMutationScope>(ACTION_MUTATION_SCOPES);
+const RISK_LEVELS = new Set<RepairRiskLevel>(ACTION_RISK_LEVELS);
 const ACTION_KEYS = new Set([
   "schema",
   "actionType",
   "mutationScope",
   "riskLevel",
   "requiresApproval",
+  "approvalPrompt",
+  "blockedReason",
+  "verificationStep",
   "command",
   "patch",
   "instruction",
@@ -153,6 +196,14 @@ const SHELL_EXECUTABLE = /^(?:ba|z|k|c|fi)?sh$|^(?:cmd|powershell|pwsh)(?:\.exe)
 const NETWORK_EXECUTABLE = /^(?:curl|wget|nc|ncat|netcat|scp|sftp|ftp|rsync)$/i;
 const MUTATING_EXECUTABLE = /^(?:cp|mv|install|touch|truncate|tee|sed|perl|ruby|python(?:3)?|node)$/i;
 const SENSITIVE_PATH = /(?:^|\/)(?:\.ssh|\.aws|\.gnupg)(?:\/|$)|(?:^|\/)(?:id_rsa|id_ed25519|credentials)(?:$|\/)|private[_-]?key/i;
+const ATTESTATION_PATH = /(?:^|\/)(?:\.bootproof\/)?attestation(?:\.[A-Za-z0-9_-]+)?\.json$/i;
+const RISK_WEIGHT: Record<RepairRiskLevel, number> = {
+  none: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  blocked: 4,
+};
 
 function validation(errors: string[]): RepairSafetyValidation {
   return { valid: errors.length === 0, errors };
@@ -227,6 +278,205 @@ function commandText(command: RepairCommand): string {
   return [command.executable, ...command.args, command.display].join(" ");
 }
 
+function higherRisk(left: RepairRiskLevel, right: RepairRiskLevel): RepairRiskLevel {
+  return RISK_WEIGHT[left] >= RISK_WEIGHT[right] ? left : right;
+}
+
+function defaultVerificationStep(actionType: RepairActionType): string {
+  if (actionType === "patch") {
+    return "Review the applied files, rerun BootProof, and require observed health evidence.";
+  }
+  if (actionType === "instruction") {
+    return "Complete the instruction, then rerun BootProof and require observed health evidence.";
+  }
+  return "Rerun BootProof and require observed health evidence before marking progress.";
+}
+
+function approvalPromptFor(
+  actionType: RepairActionType,
+  scope: RepairMutationScope,
+  requiresApproval: boolean,
+  blockedReason: string,
+): string {
+  if (blockedReason) return `Blocked by BootProof safety policy: ${blockedReason}`;
+  if (!requiresApproval) return "No approval is required because this action is non-mutating or read-only.";
+  if (actionType === "patch") return "This action will modify repository files. Review the exact patch before approving it.";
+  switch (scope) {
+    case "host_tool_install":
+      return "This action may install or change tools on your local machine. Review the exact command before approving it.";
+    case "host_network":
+      return "This action will access the network from your local machine. Review the destination and exact command before approving it.";
+    case "container_runtime":
+      return "This action may change local container runtime state. Review the exact command before approving it.";
+    case "kubernetes_cluster":
+      return "This action may create or modify a local Kubernetes cluster. Review the exact command before approving it.";
+    case "database":
+      return "This action may change local database state. Review the exact command before approving it.";
+    case "service":
+      return "This action may start or modify a local service. Review the exact command before approving it.";
+    case "credentials":
+      return "This action may create or change credentials. Do not proceed unless the credential destination and handling are understood.";
+    case "project_cache":
+      return "This action may change project-local tool configuration or caches. Review the exact command before approving it.";
+    case "repo_only":
+      return "This action may change repository files. Review the exact command before approving it.";
+    case "none":
+      return "This non-mutating action is configured to require explicit acknowledgement before it is recorded as approved.";
+    default:
+      return "This action has unknown mutation scope. Review the exact command and its effects before approving it.";
+  }
+}
+
+function inferredCommandRisk(command: RepairCommand): {
+  riskLevel: RepairRiskLevel;
+  mutationScope: RepairMutationScope;
+} {
+  const executable = path.basename(command.executable).toLowerCase();
+  const args = command.args.map(arg => arg.toLowerCase());
+  const text = [executable, ...args].join(" ");
+
+  if (
+    (executable === "brew" && args[0] === "install") ||
+    (executable === "rbenv" && args[0] === "install") ||
+    (["apt", "apt-get", "dnf", "yum", "pacman", "zypper"].includes(executable) && args.includes("install")) ||
+    (executable === "npm" && args.includes("--global")) ||
+    (executable === "gem" && args[0] === "install")
+  ) {
+    return { riskLevel: "high", mutationScope: "host_tool_install" };
+  }
+  if (executable === "docker" && args[0] === "system" && args[1] === "prune") {
+    return { riskLevel: "high", mutationScope: "container_runtime" };
+  }
+  if (
+    (executable === "kind" && args[0] === "create" && args[1] === "cluster") ||
+    (executable === "helm" && args[0] === "install") ||
+    (executable === "kubectl" && args[0] === "apply") ||
+    (executable === "abctl" && args[0] === "local" && args[1] === "install")
+  ) {
+    return { riskLevel: "high", mutationScope: "kubernetes_cluster" };
+  }
+  if (
+    /\b(?:db:migrate|db:setup|migrate(?::latest)?|migrate\s+deploy|db\s+push)\b/i.test(text) ||
+    (executable === "python" && args.some(arg => /manage\.py$/i.test(arg)) && args.includes("migrate"))
+  ) {
+    return { riskLevel: "high", mutationScope: "database" };
+  }
+  if (
+    executable === "ssh-keygen" ||
+    executable === "htpasswd" ||
+    (executable === "openssl" && ["rand", "genpkey", "genrsa", "req"].includes(args[0] ?? ""))
+  ) {
+    return { riskLevel: "high", mutationScope: "credentials" };
+  }
+  if (executable === "bootproof" && args[0] === "verify-url") {
+    return { riskLevel: "low", mutationScope: "none" };
+  }
+  if (
+    args.includes("--version") ||
+    args[0] === "version" ||
+    args[0] === "status" ||
+    executable === "pg_isready" ||
+    (executable === "kubectl" && args[0] === "cluster-info")
+  ) {
+    return { riskLevel: "low", mutationScope: "none" };
+  }
+  if (executable === "brew" && args[0] === "services") {
+    return { riskLevel: "medium", mutationScope: "service" };
+  }
+  if (executable === "bundle" && args[0] === "config") {
+    return { riskLevel: "medium", mutationScope: "project_cache" };
+  }
+  if (executable === "corepack" && args[0] === "prepare") {
+    return { riskLevel: "medium", mutationScope: "project_cache" };
+  }
+  if (executable === "createuser") {
+    return { riskLevel: "medium", mutationScope: "database" };
+  }
+  if (["docker", "podman"].includes(executable)) {
+    return { riskLevel: "medium", mutationScope: "container_runtime" };
+  }
+  if (["kind", "helm", "kubectl", "abctl"].includes(executable)) {
+    return { riskLevel: "medium", mutationScope: "kubernetes_cluster" };
+  }
+  if (NETWORK_EXECUTABLE.test(executable)) {
+    return { riskLevel: "medium", mutationScope: "host_network" };
+  }
+  return { riskLevel: "medium", mutationScope: "unknown" };
+}
+
+export function assessActionRisk(input: ActionRiskInput): ActionRiskAssessment {
+  let riskLevel = input.riskLevel ?? (input.actionType === "command" ? "medium" : "none");
+  let mutationScope = input.mutationScope ?? (input.actionType === "patch" ? "repo_only" : "none");
+  let blockedReason = input.blockedReason?.trim() ?? "";
+
+  if (input.actionType === "command") {
+    const commandValidation = validateRepairCommand(input.command);
+    if (!commandValidation.valid) {
+      riskLevel = "blocked";
+      mutationScope = mutationScope === "none" ? "unknown" : mutationScope;
+      blockedReason = commandValidation.errors.join("; ");
+    } else {
+      const inferred = inferredCommandRisk(input.command!);
+      riskLevel = higherRisk(riskLevel, inferred.riskLevel);
+      if (inferred.mutationScope !== "unknown") mutationScope = inferred.mutationScope;
+      else if (mutationScope === "none") mutationScope = "unknown";
+    }
+  } else if (input.actionType === "patch") {
+    mutationScope = "repo_only";
+    riskLevel = higherRisk(riskLevel, "low");
+  }
+
+  if (riskLevel === "blocked" && !blockedReason) {
+    blockedReason = "The action is unknown or blocked by BootProof's safety policy.";
+  }
+  if (riskLevel !== "blocked") blockedReason = "";
+  const requiresApproval = riskLevel === "blocked"
+    ? false
+    : input.requiresApproval === true || input.actionType === "patch" || ["medium", "high"].includes(riskLevel);
+
+  return {
+    actionType: input.actionType,
+    command: input.command?.display ?? "",
+    riskLevel,
+    mutationScope,
+    requiresApproval,
+    approvalPrompt: approvalPromptFor(
+      input.actionType,
+      mutationScope,
+      requiresApproval,
+      blockedReason,
+    ),
+    blockedReason,
+    verificationStep: input.verificationStep?.trim() || defaultVerificationStep(input.actionType),
+  };
+}
+
+export function validateActionRiskAssessment(value: unknown): RepairSafetyValidation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return validation(["action risk assessment must be an object"]);
+  }
+  const assessment = value as Partial<ActionRiskAssessment>;
+  const errors: string[] = [];
+  if (!ACTION_TYPES.has(assessment.actionType as RepairActionType)) errors.push("unknown action type");
+  if (typeof assessment.command !== "string") errors.push("command must be a string");
+  if (!RISK_LEVELS.has(assessment.riskLevel as RepairRiskLevel)) errors.push("invalid risk level");
+  if (!MUTATION_SCOPES.has(assessment.mutationScope as RepairMutationScope)) errors.push("invalid mutation scope");
+  if (typeof assessment.requiresApproval !== "boolean") errors.push("requiresApproval must be boolean");
+  if (!nonEmptyString(assessment.approvalPrompt)) errors.push("approvalPrompt must be a non-empty string");
+  if (typeof assessment.blockedReason !== "string") errors.push("blockedReason must be a string");
+  if (!nonEmptyString(assessment.verificationStep)) errors.push("verificationStep must be a non-empty string");
+  if (assessment.riskLevel === "blocked") {
+    if (assessment.requiresApproval !== false) errors.push("blocked actions must not be executable");
+    if (!nonEmptyString(assessment.blockedReason)) errors.push("blocked actions require blockedReason");
+  } else {
+    if (assessment.blockedReason !== "") errors.push("non-blocked actions must use an empty blockedReason");
+    if (["medium", "high"].includes(String(assessment.riskLevel)) && assessment.requiresApproval !== true) {
+      errors.push("medium and high risk actions require approval");
+    }
+  }
+  return validation([...new Set(errors)]);
+}
+
 export function validateRepairCommand(command: unknown): RepairSafetyValidation {
   if (!command || typeof command !== "object" || Array.isArray(command)) {
     return validation(["command must be an object"]);
@@ -275,6 +525,9 @@ export function validateRepairCommand(command: unknown): RepairSafetyValidation 
   if (executableName === "dropdb" || /\bDROP\s+DATABASE\b/i.test(normalized)) {
     errors.push("destructive database drops are blocked");
   }
+  if (executableName === "printenv" || executableName === "env") {
+    errors.push("commands that print environment values are blocked");
+  }
 
   const referencedPaths = args.filter(arg => /[./\\]/.test(arg));
   if (
@@ -290,7 +543,8 @@ export function validateRepairCommand(command: unknown): RepairSafetyValidation 
     NETWORK_EXECUTABLE.test(executableName) &&
     (
       args.some(arg => isProtectedEnvPath(arg.replace(/^@/, "")) || SENSITIVE_PATH.test(arg)) ||
-      args.some(arg => /^(?:-F|--form|--data-binary|--upload-file|--post-file)$/i.test(arg))
+      args.some(arg => ATTESTATION_PATH.test(arg.replace(/^@/, ""))) ||
+      args.some(arg => /^(?:-F|--form|--data-binary|--upload-file|--post-file|-T)$/i.test(arg))
     )
   ) {
     errors.push("secret upload or exfiltration patterns are blocked");
@@ -343,38 +597,75 @@ export function validateRepairAction(value: unknown): RepairSafetyValidation {
   if (!MUTATION_SCOPES.has(action.mutationScope as RepairMutationScope)) errors.push("invalid mutation scope");
   if (!RISK_LEVELS.has(action.riskLevel as RepairRiskLevel)) errors.push("invalid risk level");
   if (typeof action.requiresApproval !== "boolean") errors.push("requiresApproval must be boolean");
+  if (!nonEmptyString(action.approvalPrompt)) errors.push("approvalPrompt must be a non-empty string");
+  if (typeof action.blockedReason !== "string") errors.push("blockedReason must be a string");
+  if (!nonEmptyString(action.verificationStep)) errors.push("verificationStep must be a non-empty string");
   if (!nonEmptyString(action.explanation)) errors.push("explanation must be a non-empty string");
   if (!stringArray(action.evidenceRefs)) errors.push("evidenceRefs must be a string array");
   if (action.deterministic !== true) errors.push("deterministic must be true");
   if (action.source !== "deterministic_playbook") errors.push("source must be deterministic_playbook");
   if (action.riskLevel === "blocked") errors.push("blocked repair actions cannot be accepted");
+  if (action.blockedReason !== "") errors.push("non-blocked repair actions must use an empty blockedReason");
+  if (
+    ["medium", "high"].includes(String(action.riskLevel)) &&
+    action.requiresApproval !== true
+  ) {
+    errors.push("medium and high risk actions always require approval");
+  }
 
   if (action.actionType === "command") {
     if (action.patch !== null || action.instruction !== null) errors.push("command actions may only contain command");
     errors.push(...validateRepairCommand(action.command).errors);
-    if (action.mutationScope === "none") errors.push("command actions require a mutation scope");
-    if (action.requiresApproval !== true) errors.push("command actions always require approval");
+    if (action.mutationScope === "none" && action.riskLevel !== "none" && action.riskLevel !== "low") {
+      errors.push("mutating command actions require a mutation scope");
+    }
+    if (action.command && validateRepairCommand(action.command).valid) {
+      const minimum = assessActionRisk({
+        actionType: "command",
+        command: action.command,
+        mutationScope: action.mutationScope,
+        riskLevel: "none",
+        verificationStep: action.verificationStep,
+      });
+      if (RISK_WEIGHT[action.riskLevel as RepairRiskLevel] < RISK_WEIGHT[minimum.riskLevel]) {
+        errors.push(`command risk cannot be lower than ${minimum.riskLevel}`);
+      }
+      if (minimum.mutationScope !== "unknown" && action.mutationScope !== minimum.mutationScope) {
+        errors.push(`command mutation scope must be ${minimum.mutationScope}`);
+      }
+    }
   } else if (action.actionType === "patch") {
     if (action.command !== null || action.instruction !== null) errors.push("patch actions may only contain patch");
     errors.push(...validateRepairPatch(action.patch).errors);
-    if (action.mutationScope !== "repo") errors.push("patch actions must use repo mutation scope");
+    if (action.mutationScope !== "repo_only") errors.push("patch actions must use repo_only mutation scope");
     if (action.requiresApproval !== true) errors.push("patch actions always require approval");
   } else if (action.actionType === "instruction") {
     if (action.command !== null || action.patch !== null) errors.push("instruction actions may only contain instruction");
     if (!nonEmptyString(action.instruction)) errors.push("instruction must be a non-empty string");
-    if (action.mutationScope !== "none") errors.push("instruction actions must use none mutation scope");
   }
 
   return validation([...new Set(errors)]);
 }
 
 export function buildRepairAction(input: RepairActionInput): RepairAction {
-  const action: RepairAction = {
-    schema: "bootproof/repair-action/v1",
+  const assessment = assessActionRisk({
     actionType: input.actionType,
+    command: input.command,
     mutationScope: input.mutationScope,
     riskLevel: input.riskLevel,
     requiresApproval: input.requiresApproval ?? true,
+    blockedReason: input.blockedReason,
+    verificationStep: input.verificationStep,
+  });
+  const action: RepairAction = {
+    schema: "bootproof/repair-action/v1",
+    actionType: input.actionType,
+    mutationScope: assessment.mutationScope,
+    riskLevel: assessment.riskLevel,
+    requiresApproval: assessment.requiresApproval,
+    approvalPrompt: assessment.approvalPrompt,
+    blockedReason: assessment.blockedReason,
+    verificationStep: assessment.verificationStep,
     command: input.command ?? null,
     patch: input.patch ?? null,
     instruction: input.instruction ?? null,
