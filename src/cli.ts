@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import * as readline from "node:readline/promises";
 import { inferRepo } from "./infer.js";
 import { buildPlan, composeFileFor, envExampleFor } from "./plan.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
@@ -21,6 +22,7 @@ import { diagnoseFailure, type FailureDiagnosis } from "./diagnosis.js";
 import { cloneRemoteTarget, isRemoteTarget, managedRemoteSource, type RemoteClone } from "./remote.js";
 import {
   applyVerifiedRepair,
+  latestDeterministicRepairCandidate,
   repairRepo,
   verifyRepairReceipt,
   type RepairApplyResult,
@@ -104,6 +106,9 @@ Options for fix:
   --timeout <ms>            before/after health timeout (default 60000)
   --dry-run                 execute nothing, write nothing, produce no repair proof
   --json                    one bootproof/repair-result/v1 object on stdout
+
+Command repairs show the exact command and require the literal response Y before execution.
+JSON and CI modes never prompt and never approve a command.
 
 Honesty contract: no green check without an observed event; dry runs say "would";
 .env/.env.local are never written; secrets are never invented.
@@ -220,6 +225,44 @@ function printRepairResult(result: RepairResult): void {
   }
   bad(`${BOLD}NO VERIFIED REPAIR${RESET}${RED}${result.failureClass ? ` — ${result.failureClass}` : ""}`);
   console.log(result.explanation);
+  if (result.receiptPath) console.log(`Receipt: ${result.receiptPath}`);
+}
+
+async function commandRepairApproval(command: string, riskLevel: string): Promise<boolean> {
+  console.log("This repair may modify your local machine or services.");
+  console.log(`Command: ${command}`);
+  console.log(`Risk: ${riskLevel}`);
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await prompt.question("Run this command? Type Y to approve: ") === "Y";
+  } finally {
+    prompt.close();
+  }
+}
+
+async function patchRepairApproval(): Promise<boolean> {
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await prompt.question("Test this patch in the repair sandbox? Type Y to approve: ") === "Y";
+  } finally {
+    prompt.close();
+  }
+}
+
+function printRepairCandidate(candidate: ReturnType<typeof latestDeterministicRepairCandidate>): void {
+  if (!candidate) return;
+  const action = candidate.candidate.action;
+  console.log(`${BOLD}Deterministic repair candidate${RESET}`);
+  console.log(`Failure: ${candidate.candidate.failureClass}`);
+  if (action.command) console.log(`Command: ${action.command.display}`);
+  if (action.instruction) console.log(`Instruction: ${action.instruction}`);
+  if (action.patch) console.log(`Patch preview:\n${action.patch.content}`);
+  console.log(`Mutation scope: ${action.mutationScope}`);
+  console.log(`Risk: ${action.riskLevel}`);
+  for (const followUp of candidate.candidate.followUpActions ?? []) {
+    if (followUp.command) console.log(`Later separately approved command: ${followUp.command.display}`);
+    if (followUp.instruction) console.log(`Follow-up instruction: ${followUp.instruction}`);
+  }
 }
 
 function printRepairApplyResult(result: RepairApplyResult): void {
@@ -402,12 +445,37 @@ async function main() {
       process.exitCode = 1;
       return;
     }
+    const latestCandidate = latestDeterministicRepairCandidate(
+      target,
+      provider as "docker" | "local" | undefined,
+    );
+    let actionApproved = false;
+    if (latestCandidate && !flags.json) {
+      printRepairCandidate(latestCandidate);
+    }
+    if (
+      latestCandidate &&
+      latestCandidate.candidate.action.actionType !== "instruction" &&
+      !flags.json &&
+      !flags.ci
+    ) {
+      const effectiveProvider = provider ?? latestCandidate.attestation.plan.provider;
+      if (effectiveProvider !== "local" || flags["unsafe-local"]) {
+        actionApproved = latestCandidate.candidate.action.actionType === "command"
+          ? await commandRepairApproval(
+              latestCandidate.candidate.action.command!.display,
+              latestCandidate.candidate.action.riskLevel,
+            )
+          : await patchRepairApproval();
+      }
+    }
     const repairResult = await repairRepo(target, {
       provider: provider as "docker" | "local" | undefined,
       unsafeLocal: Boolean(flags["unsafe-local"]),
       timeoutMs,
       port,
       remoteSource: remoteSource ?? undefined,
+      actionApproved,
     });
     const result = remote ? rebaseRemoteRepairPaths(repairResult, target) : repairResult;
     if (flags.json) console.log(JSON.stringify(result));
@@ -497,7 +565,10 @@ async function main() {
     if (isRepairReceipt(proof)) {
       const valid = verifyRepairReceipt(proof);
       (valid ? ok : bad)(`repair receipt signature ${valid ? "valid" : "INVALID"} (ed25519, trust-on-first-use)`);
-      console.log(`${DIM}failure=${proof.verification.before.failureClass} repair=${proof.repair.id} after=${proof.verification.after.healthObservation}${RESET}`);
+      const summary = proof.verification && proof.repair
+        ? `failure=${proof.verification.before.failureClass} repair=${proof.repair.id} after=${proof.verification.after.healthObservation}`
+        : `failure=${proof.beforeFailureClass} repair=${proof.repairId} applied=${proof.applyResult.status} progressed=${proof.progressed} verified=${proof.verified}`;
+      console.log(`${DIM}${summary}${RESET}`);
       if (!valid) process.exitCode = 1;
       return;
     }
@@ -607,13 +678,18 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log(`Before: NOT VERIFIED — ${proof.verification.before.failureClass}.`);
-      console.log(`Repair: ${proof.repair.id} (${proof.repair.kind}).`);
-      console.log(`After: BOOTED — ${proof.verification.after.healthObservation}.`);
-      console.log(`Description: ${proof.repair.description}`);
-      if (proof.repair.filesChanged.length) console.log(`Files changed in sandbox: ${proof.repair.filesChanged.join(", ")}`);
-      if (proof.repair.planDelta) console.log(`Plan delta: ${proof.repair.planDelta}`);
-      if (proof.repair.envDelta) console.log(`Environment delta: ${proof.repair.envDelta}`);
+      console.log(`Before: NOT VERIFIED — ${proof.beforeFailureClass}.`);
+      console.log(`Repair: ${proof.repairId} (${proof.actionType}; scope=${proof.mutationScope}; risk=${proof.riskLevel}).`);
+      if (proof.proposedAction.command) console.log(`Command: ${proof.proposedAction.command.display}`);
+      if (proof.proposedAction.instruction) console.log(`Instruction: ${proof.proposedAction.instruction}`);
+      console.log(`Applied: ${proof.applyResult.status}. Progressed: ${proof.progressed}. Verified: ${proof.verified}.`);
+      if (proof.afterFailureClass) console.log(`After failure: ${proof.afterFailureClass}.`);
+      console.log(`Description: ${proof.explanation}`);
+      if (proof.repair) {
+        if (proof.repair.filesChanged.length) console.log(`Files changed in sandbox: ${proof.repair.filesChanged.join(", ")}`);
+        if (proof.repair.planDelta) console.log(`Plan delta: ${proof.repair.planDelta}`);
+        if (proof.repair.envDelta) console.log(`Environment delta: ${proof.repair.envDelta}`);
+      }
       return;
     }
     const att = proof as Attestation;

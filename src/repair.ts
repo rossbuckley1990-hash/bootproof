@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -6,6 +7,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 import { buildExecutionEnv, runToCompletion } from "./exec.js";
 import { REPAIRED_GENERATED_COMPOSE_MARKER, repoComposeRepairFile } from "./plan.js";
+import { redactText } from "./redact.js";
 import {
   attestationPath,
   buildAttestation,
@@ -22,23 +24,30 @@ import {
   buildRepairAction,
   buildRepairReceiptBase,
   createRepairCommand,
+  validateRepairAction,
   type RepairCommand,
   type RepairMutationScope,
   type RepairReceiptBase,
   type RepairRiskLevel,
 } from "./repair-safety.js";
+import {
+  deterministicRepairCandidateFor,
+  repairProgressed,
+  type DeterministicRepairCandidate,
+} from "./repair-playbooks.js";
 import type { Attestation, FailureClass, PackageManager, PreparationCommand } from "./types.js";
 
 export * from "./repair-safety.js";
+export * from "./repair-playbooks.js";
 
 export type RepairKind = "repo-diff" | "plan-step" | "environment";
 
 export interface RepairReceipt extends RepairReceiptBase {
-  tool: string;
-  repo: { remote: string | null; commit: string | null; dirty: boolean | null };
-  environment: { os: string; arch: string; node: string };
-  failure: { class: FailureClass; beforeAttestationSha256: string };
-  repair: {
+  tool?: string;
+  repo?: { remote: string | null; commit: string | null; dirty: boolean | null };
+  environment?: { os: string; arch: string; node: string };
+  failure?: { class: FailureClass; beforeAttestationSha256: string };
+  repair?: {
     id: string;
     kind: RepairKind;
     description: string;
@@ -49,12 +58,12 @@ export interface RepairReceipt extends RepairReceiptBase {
     planDelta: string | null;
     envDelta: string | null;
   };
-  verification: {
+  verification?: {
     before: { booted: false; failureClass: FailureClass; attestationSha256: string };
     after: { booted: true; healthObservation: string; attestationSha256: string };
   };
-  startedAt: string;
-  finishedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
   signer: { publicKey: string; algorithm: "ed25519" } | null;
   signature: string | null;
 }
@@ -84,6 +93,13 @@ export interface RepairOptions {
   timeoutMs: number;
   port?: number;
   remoteSource?: string;
+  commandApproved?: boolean;
+  actionApproved?: boolean;
+}
+
+export interface LatestRepairCandidate {
+  attestation: Attestation;
+  candidate: DeterministicRepairCandidate;
 }
 
 export interface RepairFileChange {
@@ -174,6 +190,8 @@ export function assertRepairScope(changes: RepairFileChange[]): void {
     const base = path.posix.basename(file);
     const allowed =
       file === "package.json" ||
+      file === "config/database.yml" ||
+      file === "config/gitlab.yml" ||
       LOCKFILE.test(base) ||
       BOOTPROOF_FILE.test(file) ||
       ENV_EXAMPLE.test(base) ||
@@ -840,6 +858,392 @@ function signedFailedAttestation(repo: string, requestedProvider?: "docker" | "l
   }
 }
 
+export function latestDeterministicRepairCandidate(
+  repoPath: string,
+  requestedProvider?: "docker" | "local",
+): LatestRepairCandidate | null {
+  const repo = path.resolve(repoPath);
+  const attestation = signedFailedAttestation(repo, requestedProvider);
+  if (!attestation) return null;
+  const candidate = deterministicRepairCandidateFor(attestation, { repoPath: repo });
+  return candidate ? { attestation, candidate } : null;
+}
+
+interface StructuredRepairCommandResult {
+  exitCode: number | null;
+  evidence: string;
+  redactionsApplied: string[];
+}
+
+async function runStructuredRepairCommand(
+  command: RepairCommand,
+  cwd: string,
+  timeoutMs = 600_000,
+): Promise<StructuredRepairCommandResult> {
+  return await new Promise(resolve => {
+    const child = spawn(command.executable, command.args, {
+      cwd,
+      shell: false,
+      env: buildExecutionEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let settled = false;
+    const finish = (exitCode: number | null, extra = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const redacted = redactText(`${output}${extra}`.slice(-4000));
+      resolve({
+        exitCode,
+        evidence: redacted.text,
+        redactionsApplied: redacted.applied,
+      });
+    };
+    const capture = (chunk: unknown) => {
+      output = `${output}${String(chunk)}`.slice(-4000);
+    };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+    child.on("close", code => finish(code));
+    child.on("error", error => finish(null, `\n${error.message}`));
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(null, "\nrepair command timed out");
+    }, timeoutMs);
+  });
+}
+
+function buildLifecycleRepairReceipt(input: {
+  repo: string;
+  before: Attestation;
+  candidate: DeterministicRepairCandidate;
+  createdAt: string;
+  approvedAt?: string;
+  appliedAt?: string;
+  applyResult: RepairReceiptBase["applyResult"];
+  after?: Attestation | null;
+  explanation: string;
+  redactionsApplied?: string[];
+}): RepairReceipt {
+  const after = input.after ?? null;
+  const verified = Boolean(after?.result.booted && after.result.healthVerified);
+  const progressed = repairProgressed(input.candidate.failureClass, after);
+  const info = gitInfo(input.repo);
+  const redactedRemote = redactText(info.remote ?? "");
+  const redactionsApplied = [...new Set([
+    ...(input.redactionsApplied ?? []),
+    ...redactedRemote.applied,
+  ])];
+  const base = buildRepairReceiptBase({
+    repairId: input.candidate.id,
+    createdAt: input.createdAt,
+    bootproofVersion: TOOL_ID.replace(/^bootproof@/, ""),
+    beforeFailureClass: input.candidate.failureClass,
+    beforeEvidenceHash: sha256Text(input.before.result.failureEvidence ?? ""),
+    proposedAction: input.candidate.action,
+    ...(input.approvedAt ? { approvedAt: input.approvedAt } : {}),
+    ...(input.appliedAt ? { appliedAt: input.appliedAt } : {}),
+    applyResult: input.applyResult,
+    ...(after?.result.failureClass ? { afterFailureClass: after.result.failureClass } : {}),
+    progressed,
+    verified,
+    explanation: input.explanation,
+    redactionsApplied,
+  });
+  const receipt: RepairReceipt = {
+    ...base,
+    tool: TOOL_ID,
+    repo: {
+      remote: info.remote === null ? null : redactedRemote.text,
+      commit: info.commit,
+      dirty: info.dirty,
+    },
+    environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
+    failure: {
+      class: input.candidate.failureClass,
+      beforeAttestationSha256: sha256Attestation(input.before),
+    },
+    startedAt: input.createdAt,
+    finishedAt: new Date().toISOString(),
+    ...(verified && after?.result.healthObservation
+      ? {
+          verification: {
+            before: {
+              booted: false,
+              failureClass: input.candidate.failureClass,
+              attestationSha256: sha256Attestation(input.before),
+            },
+            after: {
+              booted: true,
+              healthObservation: after.result.healthObservation,
+              attestationSha256: sha256Attestation(after),
+            },
+          },
+        }
+      : {}),
+    signer: null,
+    signature: null,
+  };
+  const signed = signDetached(canonicalReceipt(receipt));
+  receipt.signature = signed.signature;
+  receipt.signer = { publicKey: signed.publicKeyPem, algorithm: "ed25519" };
+  return receipt;
+}
+
+function writeLifecycleRepairReceipt(repo: string, receipt: RepairReceipt): string {
+  const file = receiptPath(repo);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(receipt, null, 2) + "\n");
+  return file;
+}
+
+async function executeDeterministicRepairCandidate(
+  repo: string,
+  before: Attestation,
+  candidate: DeterministicRepairCandidate,
+  options: RepairOptions,
+): Promise<RepairResult> {
+  const startedAt = new Date().toISOString();
+  cleanPreviousRepairOutputs(repo);
+  const result = (
+    receipt: RepairReceipt,
+    explanation: string,
+    afterFile: string | null = null,
+    patchFile: string | null = null,
+  ): RepairResult => {
+    const receiptFile = writeLifecycleRepairReceipt(repo, receipt);
+    return {
+      schema: "bootproof/repair-result/v1",
+      repaired: receipt.verified,
+      failureClass: candidate.failureClass,
+      repairId: candidate.id,
+      receiptPath: relativeOutput(repo, receiptFile),
+      patchPath: relativeOutput(repo, patchFile),
+      afterAttestationPath: relativeOutput(repo, afterFile),
+      explanation,
+    };
+  };
+
+  const safetyErrors = [candidate.action, ...(candidate.followUpActions ?? [])]
+    .flatMap(action => validateRepairAction(action).errors);
+  if (safetyErrors.length) {
+    const explanation = `Deterministic repair candidate was blocked by the safety validator: ${[...new Set(safetyErrors)].join("; ")}`;
+    return result(buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      applyResult: { status: "failed", exitCode: null, filesChanged: [], evidence: explanation },
+      explanation,
+    }), explanation);
+  }
+
+  const provider = options.provider ?? before.plan.provider;
+  if (candidate.action.actionType === "instruction") {
+    const explanation = `Deterministic instruction recorded: ${candidate.action.instruction}`;
+    return result(buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+    }), explanation);
+  }
+
+  if (candidate.action.actionType === "patch") {
+    const patch = candidate.action.patch;
+    if (!patch || !candidate.fileChanges?.length) {
+      throw new Error("validated patch repair is missing its exact file changes");
+    }
+    const patchFile = path.join(repo, ".bootproof", `repair-${candidate.id}.patch`);
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true });
+    fs.writeFileSync(patchFile, patch.content);
+    if (provider === "local" && !options.unsafeLocal) {
+      const explanation = "The repair patch was not tested because the required BootProof rerun would execute repository code locally; rerun with --unsafe-local after review.";
+      return result(buildLifecycleRepairReceipt({
+        repo,
+        before,
+        candidate,
+        createdAt: startedAt,
+        applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+        explanation,
+      }), explanation, null, patchFile);
+    }
+    if (options.actionApproved !== true) {
+      const explanation = "Repair patch was not approved. The working tree was not modified.";
+      return result(buildLifecycleRepairReceipt({
+        repo,
+        before,
+        candidate,
+        createdAt: startedAt,
+        applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+        explanation,
+      }), explanation, null, patchFile);
+    }
+
+    const approvedAt = new Date().toISOString();
+    const { root, sandbox, composeProjectName } = copyToSandbox(repo);
+    let patchApplied = false;
+    let afterOutcome: UpOutcome | null = null;
+    let rerunError = "";
+    try {
+      for (const change of candidate.fileChanges) {
+        const target = path.join(sandbox, normalizedRelative(change.path));
+        const current = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : null;
+        if (current !== change.before) {
+          throw new Error(`repair patch preimage changed for ${change.path}`);
+        }
+      }
+      writeChanges(sandbox, candidate.fileChanges);
+      patchApplied = true;
+      afterOutcome = await up(sandbox, {
+        provider,
+        unsafeLocal: options.unsafeLocal,
+        dryRun: false,
+        timeoutMs: options.timeoutMs,
+        install: true,
+        port: options.port,
+        remoteSource: options.remoteSource,
+        environment: { COMPOSE_PROJECT_NAME: composeProjectName },
+      });
+    } catch (error) {
+      rerunError = error instanceof Error ? error.message : String(error);
+    } finally {
+      await cleanupServices(afterOutcome, buildExecutionEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+
+    const after = afterOutcome?.attestation ?? null;
+    let afterFile: string | null = null;
+    if (after) {
+      afterFile = afterAttestationPath(repo);
+      fs.mkdirSync(path.dirname(afterFile), { recursive: true });
+      fs.writeFileSync(afterFile, JSON.stringify(after, null, 2) + "\n");
+    }
+    const verified = Boolean(after?.result.booted && after.result.healthVerified);
+    const progressed = repairProgressed(candidate.failureClass, after);
+    const redactedError = redactText(rerunError);
+    const explanation = !patchApplied
+      ? `Repair patch could not be applied in the sandbox: ${redactedError.text || "unknown failure"}.`
+      : verified
+        ? `Repair patch was tested in the sandbox and BootProof observed verified health: ${after!.result.healthObservation}.`
+        : progressed
+          ? `Repair patch was tested in the sandbox; BootProof progressed from ${candidate.failureClass} to ${after!.result.failureClass}.`
+          : "Repair patch was tested in the sandbox, but the BootProof rerun did not verify boot or reach a different failure class.";
+    return result(buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      approvedAt,
+      ...(patchApplied ? { appliedAt: new Date().toISOString() } : {}),
+      applyResult: {
+        status: patchApplied ? "applied" : "failed",
+        exitCode: patchApplied ? 0 : null,
+        filesChanged: patchApplied ? candidate.fileChanges.map(change => change.path) : [],
+        evidence: redactedError.text || null,
+      },
+      after,
+      explanation,
+      redactionsApplied: redactedError.applied,
+    }), explanation, afterFile, patchFile);
+  }
+
+  const command = candidate.action.command;
+  if (!command) throw new Error("validated command repair is missing its exact command");
+  if (provider === "local" && !options.unsafeLocal) {
+    const explanation = "The repair command was not run because the required BootProof rerun would execute repository code locally; rerun with --unsafe-local after review.";
+    return result(buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+    }), explanation);
+  }
+  if (options.actionApproved !== true && options.commandApproved !== true) {
+    const explanation = "Repair command was not approved. No command was executed.";
+    return result(buildLifecycleRepairReceipt({
+      repo,
+      before,
+      candidate,
+      createdAt: startedAt,
+      applyResult: { status: "not_applied", exitCode: null, filesChanged: [], evidence: null },
+      explanation,
+    }), explanation);
+  }
+
+  const approvedAt = new Date().toISOString();
+  const commandResult = await runStructuredRepairCommand(command, repo);
+  const { root, sandbox, composeProjectName } = copyToSandbox(repo);
+  let afterOutcome: UpOutcome | null = null;
+  let rerunError = "";
+  try {
+    afterOutcome = await up(sandbox, {
+      provider,
+      unsafeLocal: options.unsafeLocal,
+      dryRun: false,
+      timeoutMs: options.timeoutMs,
+      install: true,
+      port: options.port,
+      remoteSource: options.remoteSource,
+      environment: { COMPOSE_PROJECT_NAME: composeProjectName },
+    });
+  } catch (error) {
+    rerunError = error instanceof Error ? error.message : String(error);
+  } finally {
+    await cleanupServices(afterOutcome, buildExecutionEnv({ COMPOSE_PROJECT_NAME: composeProjectName }));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  const after = afterOutcome?.attestation ?? null;
+  let afterFile: string | null = null;
+  if (after) {
+    afterFile = afterAttestationPath(repo);
+    fs.mkdirSync(path.dirname(afterFile), { recursive: true });
+    fs.writeFileSync(afterFile, JSON.stringify(after, null, 2) + "\n");
+  }
+  const commandApplied = commandResult.exitCode === 0;
+  const verified = Boolean(after?.result.booted && after.result.healthVerified);
+  const progressed = repairProgressed(candidate.failureClass, after);
+  const redactedEvidence = redactText([commandResult.evidence, rerunError].filter(Boolean).join("\n"));
+  const explanation = verified
+    ? commandApplied
+      ? `Repair command applied and BootProof observed verified health: ${after!.result.healthObservation}.`
+      : `Repair command failed with exit ${commandResult.exitCode ?? "unknown"}, but the BootProof rerun observed verified health: ${after!.result.healthObservation}.`
+    : progressed
+      ? commandApplied
+        ? `Repair command applied; BootProof progressed from ${candidate.failureClass} to ${after!.result.failureClass}.`
+        : `Repair command failed with exit ${commandResult.exitCode ?? "unknown"}, but BootProof progressed from ${candidate.failureClass} to ${after!.result.failureClass}.`
+      : commandApplied
+        ? "Repair command completed, but the BootProof rerun did not verify boot or reach a different failure class."
+        : `Repair command failed with exit ${commandResult.exitCode ?? "unknown"}; the BootProof rerun did not verify boot or reach a different failure class.`;
+  const receipt = buildLifecycleRepairReceipt({
+    repo,
+    before,
+    candidate,
+    createdAt: startedAt,
+    approvedAt,
+    ...(commandApplied ? { appliedAt: new Date().toISOString() } : {}),
+    applyResult: {
+      status: commandApplied ? "applied" : "failed",
+      exitCode: commandResult.exitCode,
+      filesChanged: [],
+      evidence: redactedEvidence.text || null,
+    },
+    after,
+    explanation,
+    redactionsApplied: [...new Set([
+      ...commandResult.redactionsApplied,
+      ...redactedEvidence.applied,
+    ])],
+  });
+  return result(receipt, explanation, afterFile);
+}
+
 async function cleanupServices(outcome: UpOutcome | null, env: NodeJS.ProcessEnv): Promise<void> {
   if (!outcome) return;
   const service = outcome?.plan.steps.find(step => step.kind === "service" && step.command?.includes("docker compose"));
@@ -877,6 +1281,12 @@ export function applyVerifiedRepair(
   }
   if (receipt.schema !== "bootproof/repair-receipt/v1" || !verifyRepairReceipt(receipt)) {
     return fail("repair receipt signature is invalid; no files were written");
+  }
+  if (!receipt.verified) {
+    return fail("repair receipt is not verified; no repository files were written");
+  }
+  if (!receipt.repair) {
+    return fail("repair receipt contains no verified repository file changes to apply");
   }
   const changes = receipt.repair.fileChanges;
   if (!Array.isArray(changes) || changes.length === 0) {
@@ -981,6 +1391,25 @@ export async function repairRepo(repoPath: string, options: RepairOptions): Prom
   const existingBefore = signedFailedAttestation(repo, options.provider);
   const freshBefore = freshFailedAttestation(repo, options.provider);
   const provider = options.provider ?? existingBefore?.plan.provider ?? "docker";
+  if (existingBefore) {
+    const candidate = deterministicRepairCandidateFor(existingBefore, { repoPath: repo });
+    if (candidate) {
+      return await executeDeterministicRepairCandidate(repo, existingBefore, candidate, options);
+    }
+    if (!(REGISTRY[existingBefore.result.failureClass!] ?? []).length) {
+      const failureClass = existingBefore.result.failureClass!;
+      return {
+        schema: "bootproof/repair-result/v1",
+        repaired: false,
+        failureClass,
+        repairId: null,
+        receiptPath: null,
+        patchPath: null,
+        afterAttestationPath: null,
+        explanation: `No verified deterministic remediation is known for ${failureClass} yet.`,
+      };
+    }
+  }
   if (provider === "local" && !options.unsafeLocal) {
     return {
       schema: "bootproof/repair-result/v1",
@@ -1045,7 +1474,7 @@ export async function repairRepo(repoPath: string, options: RepairOptions): Prom
         receiptPath: null,
         patchPath: null,
         afterAttestationPath: null,
-        explanation: `no verified remediation is known for ${failureClass} yet`,
+        explanation: `No verified deterministic remediation is known for ${failureClass} yet.`,
       };
     }
 

@@ -1,13 +1,20 @@
 # Repair Receipts
 
-`bootproof fix` treats the normal BootProof verdict as an oracle. A signature-valid failed attestation is reused only when it identifies the exact current clean Git commit. Otherwise BootProof reproduces the failed run in a temporary copy. It applies one deterministic registered remediation there and reruns full verification.
+`bootproof fix` treats the normal BootProof verdict as the oracle. The deterministic MVP reads
+the latest signature-valid classified failure and maps only exact known evidence to a repair
+action. It never uses AI.
 
-No receipt is emitted unless both statements are signed evidence:
+Receipts preserve the complete lifecycle:
 
-- before: the sandbox run failed with a classified failure
-- after: the remediated sandbox run observed successful HTTP health
+- suggested
+- approved or declined
+- applied or failed
+- progressed or unchanged
+- verified or unverified
 
-`bootproof fix` does not edit the original repository. A human may review the patch written under `.bootproof/` and explicitly invoke `bootproof apply-repair`.
+Declined and failed attempts are valuable evidence, so they also produce signed receipts.
+Only observed healthy HTTP sets `verified: true`. Progress without verification requires a
+different after failure class.
 
 ## Schema
 
@@ -109,7 +116,8 @@ emits exactly one:
 bootproof/repair-result/v1
 ```
 
-Exit `0` means a signed repair receipt was produced after observed HTTP health. Every unknown, inapplicable, failed, or unverified remediation exits `1`.
+Exit `0` means the rerun observed healthy HTTP. A declined, failed, progressed-but-unverified,
+unknown, or inapplicable remediation exits `1`, even when a signed receipt was written.
 
 `bootproof fix . --dry-run` executes nothing, writes nothing, and produces no proof.
 
@@ -126,6 +134,17 @@ bootproof fix https://github.com/user/repo --provider local --unsafe-local
 ```
 
 Cloning is not execution consent. The existing local execution acknowledgement remains mandatory.
+
+Human command repairs show:
+
+```text
+This repair may modify your local machine or services.
+Command: <exact command>
+Risk: medium
+Run this command? Type Y to approve:
+```
+
+Only uppercase `Y` approves. JSON and CI modes never prompt and never execute a repair command.
 
 ## Explicit Application
 
@@ -150,6 +169,18 @@ Application exits `0` only after all signed file changes are written and re-hash
 
 | Failure class | Deterministic remediation |
 |---|---|
+| `missing_ruby_version` | Propose `rbenv install <requiredVersion>` as a medium-risk host mutation. |
+| `missing_build_tool` with exact CMake evidence | Propose `brew install cmake` as a host mutation requiring approval. |
+| `native_extension_compile_failed` for `idn-ruby` | Propose Homebrew native dependencies, then a separately approved static-prefix Bundler configuration action. |
+| `missing_database_config` | Preview a patch copying the repository PostgreSQL/example config when the destination is absent and the content is safe to persist. |
+| `missing_required_config` for `config/gitlab.yml` | Preview a patch copying `config/gitlab.yml.example` when the destination is absent. |
+| `postgres_unavailable` | Start only a detected local Homebrew PostgreSQL package and show `pg_isready`; otherwise emit an instruction. |
+| `postgres_role_missing` | Propose `createuser -s <role>` only for an exact shell-safe role from evidence. |
+| `database_schema_missing` | Propose high-risk `bundle exec rails db:migrate`. |
+| `unsupported_database_version` | Propose separate high-risk install and service-start actions for the exact PostgreSQL major without changing PATH. |
+| `unsupported_database_config` | Preview removal of only exact `geo`/`embedding` top-level sections when the patch contains no secrets. |
+| `redis_unavailable` | Propose `brew services start redis` when Homebrew is detectable; otherwise emit a generic instruction. |
+| `missing_env_var` for only `RAILS_ENV` | Emit `RAILS_ENV=development bootproof up . --provider local --unsafe-local --install` as a non-executed instruction. |
 | `service_port_allocated` | Remap a BootProof-generated Compose host port, or create a complete BootProof-owned repaired Compose copy beside the repository file without editing it. |
 | `package_manager_version_mismatch` | Run the exact declared `corepack prepare <manager>@<version> --activate` command in the sandbox. |
 | `migrations_missing` | Select one exact migration framework from repository markers plus preserved evidence: Prisma, Django, Rails, Knex, or Drizzle. Ambiguous matches refuse instead of guessing. |
@@ -160,7 +191,7 @@ Local host execution still requires `--unsafe-local`, and `fix` never auto-appli
 
 ## Files
 
-Successful repair output is kept in the original repository's BootProof output directory:
+Repair output is kept in the original repository's BootProof output directory:
 
 ```text
 .bootproof/attestation.json
@@ -171,7 +202,8 @@ Successful repair output is kept in the original repository's BootProof output d
 
 The patch is present only when the repair produced a repository or repaired-Compose file change. Plan-only and environment-only repairs may have no patch.
 
-The after attestation is retained so its signature and receipt hash can be inspected independently. Sandbox paths in that attestation describe where verification actually occurred.
+The after attestation exists only when an approved command triggered a rerun. It is retained so
+progress and verification can be inspected independently.
 
 ## Allowed Scope
 

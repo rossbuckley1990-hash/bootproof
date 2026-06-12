@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
+import { buildAttestation, writeAttestation } from "../dist/proof.js";
 
 const CLI = path.resolve("dist/cli.js");
 const FIX = path.resolve("fixtures");
@@ -26,10 +27,46 @@ const run = (args, allowFail = false, env = {}, cwd = process.cwd()) => {
   catch (e) { if (!allowFail) throw e; return { out: (e.stdout ?? "") + (e.stderr ?? ""), code: e.status ?? 1 }; }
 };
 
+const runWithInput = (args, input, env = {}, cwd = process.cwd()) => {
+  const result = spawnSync(process.execPath, [CLI, ...args], {
+    encoding: "utf8",
+    env: mergeEnv(env),
+    cwd,
+    input,
+  });
+  return {
+    out: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+    code: result.status ?? 1,
+  };
+};
+
 function freshCopy(name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bp-e2e-"));
   fs.cpSync(path.join(FIX, name), tmp, { recursive: true });
   return tmp;
+}
+
+function writeFailedAttestation(repo, failureClass, failureEvidence, provider = "local") {
+  const attestation = buildAttestation({
+    repo,
+    plan: {
+      provider,
+      steps: [],
+      healthUrl: "http://localhost:3000/",
+      healthCandidates: ["http://localhost:3000/"],
+      generatedFiles: [],
+    },
+    observed: [],
+    startedAt: new Date().toISOString(),
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    failureClass,
+    failureEvidence,
+    explanation: failureEvidence,
+  });
+  writeAttestation(repo, attestation);
+  return attestation;
 }
 
 async function getFreePort() {
@@ -84,6 +121,18 @@ function writeNodeTool(bin, name, source) {
   const executable = path.join(bin, name);
   fs.writeFileSync(executable, `#!/bin/sh\nexec node "$(dirname "$0")/${name}-tool.cjs" "$@"\n`);
   fs.chmodSync(executable, 0o755);
+}
+
+function writeRepairBrew(bin) {
+  fs.mkdirSync(bin, { recursive: true });
+  writeNodeTool(bin, "brew", `
+const fs = require("node:fs");
+const args = process.argv.slice(2).join(" ");
+if (!["install cmake", "services start redis"].includes(args)) process.exit(2);
+if (process.env.BOOTPROOF_REPAIR_MARKER) {
+  fs.writeFileSync(process.env.BOOTPROOF_REPAIR_MARKER, args + "\\n");
+}
+`);
 }
 
 function writePackageRepairTools(bin) {
@@ -819,6 +868,180 @@ test("multiple source-built Compose HTTP services refuse before Docker executes"
   assert.deepEqual(att.observed, [], "Docker must not execute for an ambiguous Compose application");
 });
 
+test("fix MVP requires uppercase Y, writes receipts, and records changed-failure progress", () => {
+  const repo = freshCopy("library-only");
+  const bin = path.join(repo, "bin-tools");
+  const marker = path.join(repo, "brew-ran.txt");
+  const protectedEnv = path.join(repo, ".env");
+  writeRepairBrew(bin);
+  fs.writeFileSync(protectedEnv, "REAL_SECRET=preserve\n");
+  writeFailedAttestation(repo, "missing_build_tool", "ERROR: CMake is required to build Rugged");
+  const env = {
+    PATH: pathWith(bin),
+    BOOTPROOF_REPAIR_MARKER: marker,
+  };
+
+  const nonInteractive = run(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--json"],
+    true,
+    env,
+  );
+  assert.equal(nonInteractive.code, 1);
+  assert.equal(fs.existsSync(marker), false, "JSON mode must not approve host mutation");
+  let receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(receipt.approvedAt, undefined);
+
+  const declined = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local"],
+    "y\n",
+    env,
+  );
+  assert.equal(declined.code, 1);
+  assert.match(declined.out, /This repair may modify your local machine or services\./);
+  assert.match(declined.out, /Command: brew install cmake/);
+  assert.match(declined.out, /Risk: medium/);
+  assert.match(declined.out, /Run this command\? Type Y to approve:/);
+  assert.equal(fs.existsSync(marker), false, "lowercase y must not approve");
+  receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(receipt.progressed, false);
+
+  const approved = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--timeout", "1000"],
+    "Y\n",
+    env,
+  );
+  assert.equal(approved.code, 1, approved.out);
+  receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.ok(receipt.approvedAt);
+  if (process.platform === "win32") {
+    assert.equal(fs.existsSync(marker), false, "the shell-free runner must not execute a .cmd shim");
+    assert.equal(receipt.applyResult.status, "failed");
+    assert.equal(receipt.appliedAt, undefined);
+  } else {
+    assert.equal(fs.readFileSync(marker, "utf8"), "install cmake\n");
+    assert.equal(receipt.applyResult.status, "applied");
+    assert.ok(receipt.appliedAt);
+  }
+  assert.equal(receipt.afterFailureClass, "not_an_application");
+  assert.equal(receipt.progressed, true);
+  assert.equal(receipt.verified, false);
+  assert.equal(fs.readFileSync(protectedEnv, "utf8"), "REAL_SECRET=preserve\n");
+  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature valid/);
+});
+
+test("fix MVP records the safe RAILS_ENV instruction without mutating protected env files", () => {
+  const repo = freshCopy("library-only");
+  const protectedEnv = path.join(repo, ".env");
+  const embeddedPassword = "embedded-password";
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", [
+    "remote",
+    "add",
+    "origin",
+    `https://fixture-user:${embeddedPassword}@example.com/bootproof/fixture.git`,
+  ], { cwd: repo });
+  execFileSync("git", [
+    "-c",
+    "user.name=BootProof Test",
+    "-c",
+    "user.email=bootproof@example.invalid",
+    "commit",
+    "--allow-empty",
+    "-q",
+    "-m",
+    "fixture",
+  ], { cwd: repo });
+  fs.writeFileSync(protectedEnv, "DATABASE_PASSWORD=preserve\n");
+  writeFailedAttestation(repo, "missing_env_var", "The RAILS_ENV environment variable is not set.");
+
+  const { out, code } = run(["fix", repo, "--json"], true);
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.equal(result.repairId, "rerun-with-rails-development");
+  assert.equal(result.receiptPath, ".bootproof/repair-receipt.json");
+  const receipt = JSON.parse(fs.readFileSync(path.join(repo, result.receiptPath), "utf8"));
+  assert.equal(receipt.actionType, "instruction");
+  assert.equal(receipt.mutationScope, "none");
+  assert.equal(receipt.riskLevel, "low");
+  assert.equal(receipt.userApprovalRequired, false);
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(
+    receipt.proposedAction.instruction,
+    "RAILS_ENV=development bootproof up . --provider local --unsafe-local --install",
+  );
+  assert.equal(
+    receipt.repo.remote,
+    "https://[redacted]:[redacted]@example.com/bootproof/fixture.git",
+  );
+  assert.equal(JSON.stringify(receipt).includes(embeddedPassword), false);
+  assert.ok(receipt.redactionsApplied.includes("url credentials"));
+  assert.equal(fs.readFileSync(protectedEnv, "utf8"), "DATABASE_PASSWORD=preserve\n");
+});
+
+test("fix MVP refuses unknown signed failures without guessing", () => {
+  const repo = freshCopy("library-only");
+  writeFailedAttestation(repo, "unknown_failure", "unclassified fixture failure");
+  const { out, code } = run(["fix", repo, "--json"], true);
+  assert.equal(code, 1);
+  const result = JSON.parse(out);
+  assert.equal(
+    result.explanation,
+    "No verified deterministic remediation is known for unknown_failure yet.",
+  );
+  assert.equal(result.receiptPath, null);
+  assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
+});
+
+test("expanded fix previews repository patches and never overwrites without approval", () => {
+  const repo = freshCopy("library-only");
+  const config = path.join(repo, "config");
+  const destination = path.join(config, "database.yml");
+  fs.mkdirSync(config);
+  fs.writeFileSync(
+    path.join(config, "database.yml.example"),
+    "development:\n  adapter: postgresql\n",
+  );
+  writeFailedAttestation(repo, "missing_database_config", "Could not load database configuration");
+
+  const declined = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local"],
+    "y\n",
+  );
+  assert.equal(declined.code, 1);
+  assert.match(declined.out, /Patch preview:/);
+  assert.match(declined.out, /\+\+\+ b\/config\/database\.yml/);
+  assert.match(declined.out, /Test this patch in the repair sandbox\? Type Y to approve:/);
+  assert.equal(fs.existsSync(destination), false, "lowercase y must not apply or test the patch");
+  let receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.actionType, "patch");
+  assert.equal(receipt.applyResult.status, "not_applied");
+  assert.equal(receipt.userApprovalRequired, true);
+
+  const approved = runWithInput(
+    ["fix", repo, "--provider", "local", "--unsafe-local", "--timeout", "1000"],
+    "Y\n",
+  );
+  assert.equal(approved.code, 1, approved.out);
+  assert.equal(fs.existsSync(destination), false, "approved fix must test the patch only in its sandbox");
+  receipt = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "repair-receipt.json"), "utf8"));
+  assert.equal(receipt.applyResult.status, "applied");
+  assert.deepEqual(receipt.applyResult.filesChanged, ["config/database.yml"]);
+  assert.equal(receipt.afterFailureClass, "not_an_application");
+  assert.equal(receipt.progressed, true);
+  assert.equal(receipt.verified, false);
+  assert.ok(fs.existsSync(path.join(repo, ".bootproof", "repair-copy-database-config-example.patch")));
+
+  const apply = run(
+    ["apply-repair", repo, "--receipt", path.join(repo, ".bootproof", "repair-receipt.json"), "--json"],
+    true,
+  );
+  assert.equal(apply.code, 1);
+  assert.match(apply.out, /repair receipt is not verified/);
+  assert.equal(fs.existsSync(destination), false);
+});
+
 test("repair: conflicting repository Compose port produces signed verified receipt without touching the working tree", async () => {
   const repo = freshCopy("repair-service-port-conflict");
   for (const [name, contents] of Object.entries({
@@ -1224,7 +1447,10 @@ test("repair: unregistered failure exits honestly without a receipt", () => {
   assert.equal(result.failureClass, "not_an_application");
   assert.equal(result.receiptPath, null);
   assert.equal(result.patchPath, null);
-  assert.equal(result.explanation, "no verified remediation is known for not_an_application yet");
+  assert.equal(
+    result.explanation,
+    "No verified deterministic remediation is known for not_an_application yet.",
+  );
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-receipt.json")), false);
   const attestation = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(attestation.result.failureClass, "not_an_application");
