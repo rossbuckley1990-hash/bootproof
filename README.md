@@ -38,6 +38,16 @@ It does not turn every repository green. That would defeat the point.
 No proof, no green check.
 ```
 
+**Works on my machine is dead.**
+
+**Predictable failure is a feature.**
+
+BootProof turns AI repo onboarding from a hallucinated shell loop into a
+verified execution loop. AI or a human may propose the next step; BootProof
+classifies risk, requires approval where appropriate, records what happened,
+and relies on observed verification rather than confidence or command
+completion.
+
 ## One engine. Two interfaces.
 
 Humans run:
@@ -58,32 +68,75 @@ They get a signed verdict and a deterministic exit code.
 
 The same engine powers both.
 
-## Planning-Only Agent Loop
+## Agent-In-The-Loop Architecture
 
-Inspect repository evidence and write a deterministic, risk-classified plan:
+The intended safety loop is:
+
+```text
+Diagnose → Classify → Plan → Risk-Classify → Approve
+→ Execute One Step → Verify → Receipt → Repeat
+```
+
+The complete autonomous loop is not implemented. Today BootProof exposes four
+honest modes:
+
+### 1. Direct Orchestration
+
+```bash
+bootproof up .
+```
+
+BootProof infers a supported local run path, executes it within the selected
+safety boundary, observes health, and writes an attestation. Unsupported or
+ambiguous orchestration is refused.
+
+### 2. External Verification
+
+```bash
+bootproof verify-url http://localhost:8001/api/v1/health
+```
+
+BootProof observes a service started outside BootProof. Successful evidence is
+classified as externally verified and never claims BootProof started the
+application.
+
+### 3. Agent Planning
 
 ```bash
 bootproof plan-agent .
 ```
 
-The command writes `.bootproof/agent-plan.json` and starts a redacted,
-hash-chained local run under `.bootproof/agent-runs/<run-id>/`. It may describe
-exact candidate commands, mutation scope, risk, required approval, verification
-steps, and stop conditions, but it never executes a candidate action and never
-claims the application booted.
+BootProof writes a deterministic, risk-classified plan and a redacted local
+receipt chain. It does not execute candidate actions and planning never counts
+as success.
 
-Explain and verify a local run from the repository root:
+### 4. Deterministic Repair
 
 ```bash
-bootproof explain-run <run-id>
+bootproof fix
 ```
 
-For Airbyte repositories, planning recognizes the abctl-managed Docker, kind,
-Kubernetes, and Helm runbook. It can describe the approved
-`abctl local install --port 8001` step and external health checks, but it does
-not run abctl, Kubernetes, or credential commands.
+BootProof maps exact known failures to deterministic repair actions. Mutating
+commands and patches require explicit approval; verification decides whether
+the failure progressed or the application booted.
 
-See [docs/AGENT_RUN_RECEIPTS.md](docs/AGENT_RUN_RECEIPTS.md).
+See [docs/AGENT_IN_THE_LOOP.md](docs/AGENT_IN_THE_LOOP.md) and
+[docs/AGENT_RUN_RECEIPTS.md](docs/AGENT_RUN_RECEIPTS.md).
+
+## Airbyte Case Study
+
+Airbyte correctly exceeded BootProof's direct orchestration boundary. BootProof
+refused instead of pretending a normal Gradle, Make, or Compose command was
+enough. The documented local path required `abctl`, `kind`, and `helm`; a human
+followed that runbook and booted the application. BootProof could then verify
+the external health endpoint without claiming ownership of the startup.
+External verification proved that the documented endpoint responded
+successfully; it did not prove BootProof orchestrated Airbyte.
+
+That refusal plus external proof is a successful outcome: the verdict matches
+what BootProof actually observed.
+
+**Airbyte validates the design of the loop, not full autonomous execution yet.**
 
 ## Verified Repairs
 
@@ -243,6 +296,36 @@ BootProof is constrained on purpose:
 - no telemetry or hidden evidence upload
 
 See [docs/HONESTY_CONTRACT.md](docs/HONESTY_CONTRACT.md).
+
+## Open-Source Boundary
+
+This repository contains the local trust layer:
+
+- local diagnosis
+- local planning
+- local receipts
+- local approvals
+- optional BYOK AI suggestions belong in this boundary if implemented, subject
+  to the same safety model and kept outside `bootproof up`
+- no telemetry or automatic upload
+
+The OSS engine works offline and does not require BootProof Cloud.
+
+## Cloud Boundary
+
+BootProof Cloud belongs in a separate private repository. Its boundary includes:
+
+- hosted AI
+- shared registry
+- team approval workflows
+- GitHub App
+- SSO/RBAC
+- policy
+- fleet dashboards
+- audit retention
+
+These are product boundaries, not claims that those services are implemented
+in this public repository. No Cloud/SaaS code is included here.
 
 ## Current Capabilities
 
