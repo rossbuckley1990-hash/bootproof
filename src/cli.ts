@@ -9,6 +9,12 @@ import { verifySignature, attestationPath, writeAttestation, TOOL_ID } from "./p
 import { pollHealth } from "./exec.js";
 import { buildExternalHealthAttestation } from "./external-health.js";
 import {
+  agentPlanPath,
+  buildAgentPlan,
+  writeAgentPlan,
+  type AgentPlan,
+} from "./agent-plan.js";
+import {
   buildFederatedReceipt,
   buildRegistryEntry,
   currentGitBranch,
@@ -40,10 +46,11 @@ const bad = (s: string) => console.log(`${RED}\u2717 ${s}${RESET}`);
 const disableColor = () => { GREEN = ""; YELLOW = ""; RED = ""; DIM = ""; BOLD = ""; RESET = ""; };
 const portableRelative = (from: string, to: string) => path.relative(from, to).replace(/\\/g, "/");
 
-const COMMANDS = ["up", "verify-url", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
+const COMMANDS = ["up", "verify-url", "plan-agent", "fix", "apply-repair", "analyze", "plan", "verify", "explain", "attest", "registry", "help", "version", "--help", "-h", "--version"];
 const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
   analyze: new Set(["workspace", "json", "ci"]),
   plan: new Set(["workspace", "provider", "ci"]),
+  "plan-agent": new Set(["json", "ci"]),
   "apply-repair": new Set(["receipt", "dry-run", "json", "ci"]),
   fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci"]),
   up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command", "external-health"]),
@@ -78,6 +85,7 @@ Usage:
   bootproof analyze <path|git-url> [--workspace dir] [--json]
                                                             inspect a repo, show evidence-based inference
   bootproof plan <path|git-url> [--workspace dir]           show the run plan and files that WOULD be generated
+  bootproof plan-agent <path|git-url> [--json]              write a risk-classified plan; execute nothing
   bootproof up <path|git-url> [options]                     execute the plan, verify localhost, write signed proof
   bootproof verify-url <url> [--timeout ms]                 verify an externally managed HTTP service
   bootproof fix <path|git-url> [options]                    test a deterministic repair in a sandbox
@@ -219,6 +227,34 @@ function printExternalHealthResult(attestation: Attestation, evidencePath: strin
   }
   console.log("Ownership: externally managed (bootproofOrchestrated=false).");
   if (evidencePath) console.log(`Evidence: ${evidencePath}`);
+}
+
+function printAgentPlan(plan: AgentPlan, outputPath: string): void {
+  console.log(`${BOLD}Agent plan (planning only)${RESET}`);
+  console.log(`Current failure class: ${plan.currentFailureClass || "none established"}`);
+  console.log(`Suspected stack: ${plan.suspectedStack.length ? plan.suspectedStack.join(", ") : "none established"}`);
+  console.log(`BootProof direct orchestration: ${plan.canBootProofOrchestrateDirectly ? "available" : "not established"}`);
+  console.log(`External health verification: ${plan.canBootProofVerifyExternally ? "available" : "not established"}`);
+  if (plan.missingTools.length) console.log(`Missing tools: ${plan.missingTools.join(", ")}`);
+  if (plan.observedEvidence.length) {
+    console.log("Observed evidence:");
+    for (const evidence of plan.observedEvidence) console.log(`  - ${evidence}`);
+  }
+  if (plan.candidateNextActions.length) {
+    console.log("Candidate next actions:");
+    for (const [index, candidate] of plan.candidateNextActions.entries()) {
+      console.log(`  ${index + 1}. ${candidate.classification}`);
+      if (candidate.command) console.log(`     Command: ${candidate.command}`);
+      console.log(`     Reason: ${candidate.reason}`);
+      console.log(`     Risk: ${candidate.riskLevel}`);
+      console.log(`     Mutation scope: ${candidate.mutationScope}`);
+      console.log(`     Approval required: yes`);
+      console.log(`     Verify after action: ${candidate.verificationStep}`);
+      console.log(`     Stop condition: ${candidate.stopCondition}`);
+    }
+  }
+  console.log(`Plan: ${outputPath}`);
+  console.log("No candidate action was executed. Verification remains pending.");
 }
 
 function printFailure(failureClass: NonNullable<Attestation["result"]["failureClass"]>, diagnosis: FailureDiagnosis, evidencePath: string) {
@@ -410,7 +446,7 @@ async function main() {
   let target = path.resolve(targetInput);
   let remote: RemoteClone | null = null;
   let remoteSource: string | null = null;
-  if (["analyze", "plan", "up", "fix"].includes(cmd) && isRemoteTarget(targetInput)) {
+  if (["analyze", "plan", "plan-agent", "up", "fix"].includes(cmd) && isRemoteTarget(targetInput)) {
     if (flags["dry-run"]) {
       const explanation = "Remote dry runs are refused because cloning would write files, while BootProof dry runs promise to write nothing.";
       if (flags.json) console.log(JSON.stringify(machineFailure(explanation)));
@@ -434,7 +470,7 @@ async function main() {
       return;
     }
   }
-  if (!remote && ["analyze", "plan", "up", "fix"].includes(cmd)) {
+  if (!remote && ["analyze", "plan", "plan-agent", "up", "fix"].includes(cmd)) {
     remoteSource = managedRemoteSource(target);
     if (remoteSource && !flags.json) {
       console.log(`${DIM}Managed remote source: ${remoteSource}${RESET}`);
@@ -459,6 +495,17 @@ async function main() {
     for (const f of plan.generatedFiles) would(`generate ${f.path} (${f.purpose})`);
     if (composeFileFor(inf)) console.log(`\n${DIM}--- docker-compose.bootproof.yml (preview) ---\n${composeFileFor(inf)}${RESET}`);
     if (envExampleFor(inf)) console.log(`${DIM}--- .env.bootproof.example (preview) ---\n${envExampleFor(inf)}${RESET}`);
+    return;
+  }
+
+  if (cmd === "plan-agent") {
+    const plan = buildAgentPlan(target);
+    const output = writeAgentPlan(target, plan);
+    const displayedOutput = remote
+      ? portableRelative(process.cwd(), output)
+      : portableRelative(process.cwd(), agentPlanPath(target));
+    if (flags.json) console.log(JSON.stringify(plan));
+    else printAgentPlan(plan, displayedOutput);
     return;
   }
 

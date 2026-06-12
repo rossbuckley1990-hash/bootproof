@@ -15,10 +15,10 @@ authorize autonomous execution and does not change runtime behavior.
 | Capability | Status | Current repository state |
 |---|---|---|
 | Engineering constitution | Exists | `AGENTS.md` contains the complete agent-loop principles, approval boundary, one-step rule, verification rule, receipt rule, honest-stop rule, and OSS/Cloud boundary. |
-| External health verification | Missing, with reusable primitives | HTTP polling and health evidence exist, including accepted application redirects. There is no `verify-url`, `--external-health`, external attestation mode, or external-health taxonomy. |
-| Agent planning | Missing, with a simpler run-plan precedent | `bootproof plan` previews the inferred boot plan without execution or writes. There is no `plan-agent`, agent-plan schema/file, or risk-classified candidate-action plan. |
+| External health verification | Exists | `verify-url` and `up --external-health` record external-health attestations with explicit non-orchestration ownership and honest auth/unreachable classifications. |
+| Agent planning | Planning-only foundation exists | `bootproof plan-agent` writes a strict local agent plan with evidence, risk-classified candidate actions, approvals, verification steps, and stop conditions. It executes no candidate action. |
 | Shared action risk model | Partial | Deterministic repair has strict action, risk, approval, blocklist, and receipt models. The model is fixed to deterministic playbooks and lacks `blockedReason`, `verificationStep`, and unknown-command risk classification. |
-| Airbyte runbook recognition | Missing | No Airbyte, `abctl`, kind, Helm, Kubernetes, or Gradle-specific recognition, taxonomy, plan, health endpoint, or credential-sensitive step exists. |
+| Airbyte runbook recognition | Partial generic foundation | Planning recognizes documented `abctl`, kind, Helm, Kubernetes, Gradle, credential, and local health markers. It does not yet identify Airbyte specifically or emit Airbyte-specific classifications/runbooks. |
 | Local agent receipt chain | Partial primitives only | Signed attestations and signed repair receipts contain before/after hashes and lifecycle state. There is no run directory, chained action/verification receipts, final summary, or `explain-run`. |
 
 ## Existing Capabilities
@@ -142,34 +142,18 @@ explain a complete agent run.
 
 ## Missing Capabilities
 
-### Agent Planning
-
-The following do not exist:
-
-- `bootproof plan-agent <path-or-url>`;
-- `.bootproof/agent-plan.json`;
-- an agent-plan schema;
-- persisted candidate actions with risk, mutation, approval, verification, and
-  blocked fields.
-
 ### Airbyte Recognition and Runbook
 
-The repository has no special handling for:
+The repository has no Airbyte-specific handling for:
 
 - `airbytehq/airbyte`;
-- `abctl`;
-- kind;
-- Helm;
-- Kubernetes;
-- Gradle traits;
 - `airbyte_abctl_managed`;
 - `external_orchestrator_required`;
-- `abctl local install --port 8001`;
-- `http://localhost:8001/api/v1/health`;
-- a secret-sensitive credentials step.
+- repository-identity-backed selection of the Airbyte runbook.
 
-The generic `orchestration_not_supported` class is conceptually related but
-does not encode Airbyte or external-orchestrator semantics.
+Generic planning can preserve documented commands, health endpoints, and
+credential sensitivity, but `orchestration_not_supported` still does not
+encode Airbyte or external-orchestrator semantics.
 
 ### Agent Run Receipts
 
@@ -191,21 +175,17 @@ The following do not exist:
    adds `blockedReason`, `verificationStep`, secret sensitivity, action source,
    and deterministic risk classification. Unknown commands must be at least
    medium risk; blocked commands remain non-executable.
-2. **Add planning-only `plan-agent`.**
-   Persist `.bootproof/agent-plan.json` with strict schemas and risk-classified
-   candidate actions. It must perform no action execution, approval prompting,
-   telemetry, or upload.
-3. **Add deterministic Airbyte recognition and a planning-only runbook.**
+2. **Add deterministic Airbyte recognition and a planning-only runbook.**
    Detect the repository and orchestration traits, classify the managed/external
    orchestrator path, propose `abctl local install --port 8001` as high risk,
    mark credentials secret-sensitive, and use the external health endpoint as
    the final verification step. Do not execute the plan.
-4. **Add the local agent-run receipt chain.**
+3. **Add the local agent-run receipt chain.**
    Introduce the run directory, initial attestation, plan snapshot,
    hash-chained action and verification receipts, final summary, and
    `explain-run`. Keep all output local, redacted, signed where appropriate,
    and append-only within a run.
-5. **Only after the preceding contracts are stable, add a human-driven
+4. **Only after the preceding contracts are stable, add a human-driven
    single-step runner.**
    Execute exactly one approved local action, verify it, write the chained
    receipts, and stop for a new explicit approval. Do not add autonomous
