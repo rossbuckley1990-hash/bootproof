@@ -1,4 +1,13 @@
-import type { Inference, RunPlan, ObservedStep, FailureClass, Attestation, PreparationCommand, HealthEvidence } from "./types.js";
+import type {
+  Inference,
+  RunPlan,
+  ObservedStep,
+  FailureClass,
+  Attestation,
+  PreparationCommand,
+  HealthEvidence,
+  HealthCandidateSource,
+} from "./types.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -34,6 +43,34 @@ function healthStatusLabel(evidence: HealthEvidence): string {
 function healthObservationSummary(evidence: HealthEvidence): string {
   if (evidence.redirectLocation) return `${healthStatusLabel(evidence)} at ${evidence.requestedUrl}`;
   return `HTTP ${evidence.statusCode} at ${evidence.requestedUrl}`;
+}
+
+function healthPort(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    return Number.isInteger(port) ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordHealthPort(
+  inference: Inference,
+  plan: RunPlan,
+  url: string,
+  source: HealthCandidateSource,
+): void {
+  const port = healthPort(url);
+  if (port === null) return;
+  inference.observedPort = port;
+  inference.healthCandidateSource = source;
+  plan.observedPort = port;
+  plan.healthCandidateSource = source;
+  if (source === "observed") {
+    inference.port = port;
+    inference.portEvidence = `observed healthy HTTP response at ${url}`;
+  }
 }
 
 
@@ -224,7 +261,10 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   }
   const orchestrationExplanation = unsupportedOrchestrationExplanation(inference);
   if (orchestrationExplanation && !runsSourceComposeApplication) {
-    return refuse("orchestration_not_supported", orchestrationExplanation);
+    const failureClass = inference.stack.includes("go-backend")
+      ? "go_service_orchestration_not_supported"
+      : "orchestration_not_supported";
+    return refuse(failureClass, orchestrationExplanation);
   }
   if (!inference.appCommand && inference.composeHealthCandidates.length > 0 && opts.provider !== "docker") {
     return refuse(
@@ -422,7 +462,8 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const inferredHealthCandidates = new Set(plan.healthCandidates);
       const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs, app.output);
       await new Promise<void>(resolve => setImmediate(resolve));
-      for (const advertisedHealthUrl of extractHealthCandidates(app.output())) {
+      const advertisedHealthUrls = extractHealthCandidates(app.output());
+      for (const advertisedHealthUrl of advertisedHealthUrls) {
         if (!health.candidates.includes(advertisedHealthUrl)) {
           health.candidates.push(advertisedHealthUrl);
         }
@@ -434,6 +475,10 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         }
       }
       plan.healthCandidates = health.candidates;
+      const processOutputHealthUrl = advertisedHealthUrls[0] ?? health.discoveredCandidates[0];
+      if (processOutputHealthUrl) {
+        recordHealthPort(inference, plan, processOutputHealthUrl, "process_output");
+      }
       if (health.url) plan.healthUrl = health.url;
       const portMismatch = detectHealthCandidatePortMismatch(
         inferredHealthUrl,
@@ -453,6 +498,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       observed.push(step(planned.id, "start-app", planned.command, t, null, true, "app process started and was supervised"));
       const ht = new Date().toISOString();
       if (health.evidence?.acceptedAsHealthy) {
+        recordHealthPort(inference, plan, health.evidence.requestedUrl, "observed");
         const healthStep = health.evidence.redirectLocation
           ? healthStatusLabel(health.evidence)
           : `observed HTTP ${health.evidence.statusCode} at ${health.evidence.requestedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`;
@@ -504,6 +550,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       plan.healthCandidates = health.candidates;
       if (health.url) plan.healthUrl = health.url;
       if (health.evidence?.acceptedAsHealthy) {
+        recordHealthPort(inference, plan, health.evidence.requestedUrl, "observed");
         const healthStep = health.evidence.redirectLocation
           ? healthStatusLabel(health.evidence)
           : `observed HTTP ${health.evidence.statusCode} at ${health.evidence.requestedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`;

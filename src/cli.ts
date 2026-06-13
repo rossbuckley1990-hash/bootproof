@@ -179,6 +179,8 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   if (inf.preparationCommands.length) console.log(`  preparation: ${inf.preparationCommands.map(command => command.command).join("; ")}`);
   console.log(`  command scope: ${inf.commandScope}`);
   console.log(`  port: ${inf.port} ${DIM}(${inf.portEvidence})${RESET}`);
+  if (inf.observedPort !== null) console.log(`  observed port: ${inf.observedPort}`);
+  console.log(`  health candidate source: ${inf.healthCandidateSource}`);
   if (inf.healthCandidates.length) console.log(`  health candidates: ${inf.healthCandidates.join(", ")}`);
   if (inf.services.length) console.log(`  services: ${inf.services.map(s => `${s.kind} (${s.evidence})`).join("; ")}`);
   if (inf.envWithoutSafeDefault.length) console.log(`  secrets you must provide: ${inf.envWithoutSafeDefault.join(", ")}`);

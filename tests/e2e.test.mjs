@@ -966,25 +966,55 @@ test("Superset-like app writes a signed python_flask_setup_required refusal", ()
   assert.ok(att.signature);
 });
 
-test("Memos-like app writes a signed orchestration_not_supported diagnosis", () => {
+test("ambiguous Memos-like Go app writes a signed Go orchestration refusal", () => {
   const repo = freshCopy("go-react-memos-like");
   const { out, code } = run(["up", repo, "--provider", "local", "--unsafe-local", "--ci"], true);
   assert.equal(code, 1);
   assert.match(out, /application: yes/);
   assert.match(out, /go-backend, react-frontend/);
-  assert.match(out, /NOT VERIFIED — orchestration_not_supported/);
+  assert.match(out, /NOT VERIFIED — go_service_orchestration_not_supported/);
   assert.match(out, /Detected go-backend \(go\.mod\) with react-frontend \(web\/package\.json\)/);
   assert.match(out, /Diagnosis only — no localhost claim/);
   assert.doesNotMatch(out, /health candidates: http:\/\/localhost/);
 
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
-  assert.equal(att.result.failureClass, "orchestration_not_supported");
+  assert.equal(att.result.failureClass, "go_service_orchestration_not_supported");
   assert.equal(att.result.booted, false);
   assert.equal(att.result.healthVerified, false);
   assert.match(att.result.explanation, /go\.mod/);
   assert.match(att.result.explanation, /web\/package\.json/);
   assert.deepEqual(att.observed, []);
   assert.ok(att.signature);
+});
+
+test("Ollama-like Go service is verified only after observed HTTP health on port 11434", () => {
+  const repo = freshCopy("go-ollama-like");
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeRuntimeShim(bin, "go");
+
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--timeout", "10000", "--ci"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 0);
+  assert.match(out, /selected command: go run \. serve/);
+  assert.match(out, /port: 11434/);
+  assert.match(out, /observed port: 11434/);
+  assert.match(out, /health candidate source: observed/);
+  assert.match(out, /BOOTED — HTTP 200 at http:\/\/127\.0\.0\.1:11434\//);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.booted, true);
+  assert.equal(att.result.healthVerified, true);
+  assert.equal(att.result.healthEvidence.statusCode, 200);
+  assert.equal(att.result.healthEvidence.bodyExcerpt, "Ollama is running");
+  assert.equal(att.result.observedPort, 11434);
+  assert.equal(att.result.healthCandidateSource, "observed");
+  assert.equal(att.plan.observedPort, 11434);
+  assert.equal(att.plan.healthCandidateSource, "observed");
+  assert.ok(att.plan.healthCandidates.includes("http://127.0.0.1:11434/api/tags"));
 });
 
 test("Ruby and custom Make backends refuse as unsupported orchestration, not libraries", () => {
@@ -1051,7 +1081,7 @@ test("Go, Rails, and Make repository entrypoints require observed HTTP health", 
   }
 });
 
-test("an unavailable repository runtime is classified without guessing", () => {
+test("an unavailable Go runtime is classified without guessing", () => {
   const repo = freshCopy("go-react-runnable-like");
   const emptyBin = path.join(repo, "empty-bin");
   fs.mkdirSync(emptyBin);
@@ -1061,9 +1091,9 @@ test("an unavailable repository runtime is classified without guessing", () => {
     { PATH: emptyBin },
   );
   assert.equal(code, 1);
-  assert.match(out, /NOT VERIFIED — missing_runtime_tool/);
+  assert.match(out, /NOT VERIFIED — go_runtime_missing/);
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
-  assert.equal(att.result.failureClass, "missing_runtime_tool");
+  assert.equal(att.result.failureClass, "go_runtime_missing");
   assert.match(att.result.failureEvidence, /go.*not found|go.*not recognized/i);
   assert.equal(att.result.booted, false);
   assert.equal(att.result.healthVerified, false);
@@ -2167,6 +2197,10 @@ setInterval(() => {}, 1000);
   );
   assert.equal(att.result.failureClass, "health_candidate_port_mismatch");
   assert.ok(att.result.observedHealthCandidates.includes(`https://localhost:${advertisedPort}/`));
+  assert.equal(att.result.observedPort, advertisedPort);
+  assert.equal(att.result.healthCandidateSource, "process_output");
+  assert.equal(att.plan.observedPort, advertisedPort);
+  assert.equal(att.plan.healthCandidateSource, "process_output");
   assert.match(att.result.failureEvidence, new RegExp(`inferredHealthUrl: http://localhost:${inferredPort}/`));
   assert.match(att.result.failureEvidence, new RegExp(`advertisedHealthUrl: https://localhost:${advertisedPort}/`));
   assert.match(att.result.failureEvidence, /selectedCommand: node server\.js/);

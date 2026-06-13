@@ -80,6 +80,28 @@ function missingCommand(evidence: string, command: "php" | "composer"): boolean 
   ).test(evidence);
 }
 
+function missingGoRuntime(evidence: string): boolean {
+  return /(?:command not found:\s*go\b|(?:^|\s)go:\s*(?:command )?not found\b|'go' is not recognized as an internal or external command|spawn go ENOENT)/im.test(evidence);
+}
+
+function goBuildFailure(evidence: string): FailureClassification | null {
+  const compileFailure =
+    /(?:^|\n)[^\n:]+\.go:\d+:\d+:\s*(?:undefined:|syntax error:|cannot use |not enough arguments|too many arguments|declared and not used|imported and not used)/im.test(evidence);
+  const packageFailure =
+    /\bpackage\s+\S+\s+is not in std\b/i.test(evidence)
+    || /\bno required module provides package\b/i.test(evidence)
+    || /\bbuild constraints exclude all Go files\b/i.test(evidence);
+  const moduleFailure =
+    /(?:^|\n)go:\s+[^\n]*(?:invalid version|reading \S+\/go\.mod|module lookup disabled|Get "https?:\/\/|dial tcp|no such host|connection refused|unexpected EOF)/im.test(evidence);
+  const explicitBuildFailure = /\bgo(?: run| build)?:[^\n]*build failed\b/i.test(evidence);
+  if (!compileFailure && !packageFailure && !moduleFailure && !explicitBuildFailure) return null;
+  return {
+    class: "go_build_failed",
+    explanation: "The selected Go service command failed during module resolution or compilation.",
+    safeNextStep: "Inspect the preserved Go compiler or module error, use the repository-declared Go version, resolve the reported dependency or source error, then rerun BootProof.",
+  };
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -210,6 +232,18 @@ function classifyRealWorldFailure(evidence: string): FailureClassification | nul
 
   const composerPhpFailure = composerLockPhpFailure(evidence);
   if (composerPhpFailure) return composerPhpFailure;
+
+  if (missingGoRuntime(evidence)) {
+    return {
+      class: "go_runtime_missing",
+      explanation: "The repository requires the Go runtime, but the go executable is not available.",
+      metadata: { runtime: "go" },
+      safeNextStep: "Install a Go version supported by the repository, then rerun BootProof.",
+    };
+  }
+
+  const goBuild = goBuildFailure(evidence);
+  if (goBuild) return goBuild;
 
   if (missingCommand(evidence, "php")) {
     return {
@@ -416,7 +450,7 @@ const RULES: Rule[] = [
     explain: () => "The host Node version does not satisfy the project's engines requirement. Switch Node versions (nvm/fnm/corepack) and retry." },
   { class: "missing_package_manager", pattern: /\b(yarn|pnpm|bun): (command )?not found/i,
     explain: m => `The project needs ${m[1]} and it is not installed. Enable Corepack (corepack enable) or install ${m[1]} directly.` },
-  { class: "missing_runtime_tool", pattern: /(?:(?:^|\s)(go|ruby|bundle|make|python|php|composer): (?:command )?not found\b|'(go|ruby|bundle|make|python|php|composer)' is not recognized as an internal or external command|spawn (go|ruby|bundle|make|python|php|composer) ENOENT)/im,
+  { class: "missing_runtime_tool", pattern: /(?:(?:^|\s)(ruby|bundle|make|python|php|composer): (?:command )?not found\b|'(ruby|bundle|make|python|php|composer)' is not recognized as an internal or external command|spawn (ruby|bundle|make|python|php|composer) ENOENT)/im,
     explain: m => `The repository's explicit run path requires ${m[1] ?? m[2] ?? m[3]}, but that executable is not available in this environment.` },
   { class: "private_registry_or_auth", pattern: /(401 Unauthorized|E401|ENEEDAUTH|authentication token not provided|Permission.*registry)/i,
     explain: () => "Dependency install needs credentials for a private registry. Bootproof will not invent credentials; provide real ones and retry." },
@@ -462,8 +496,9 @@ export function classifyFailure(evidence: string): FailureClassification {
 }
 
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
-  "not_an_application", "orchestration_not_supported", "auth_required", "external_health_unreachable",
+  "not_an_application", "orchestration_not_supported", "go_service_orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
+  "go_runtime_missing", "go_build_failed",
   "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
   "laravel_sqlite_database_missing", "laravel_migrations_required",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",

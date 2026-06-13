@@ -223,7 +223,7 @@ test("classifies a library as not_an_application instead of pretending", () => {
 test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure("error TS: The engine \"node\" is incompatible with this module").class, "runtime_engine_mismatch");
   assert.equal(classifyFailure("sh: yarn: command not found").class, "missing_package_manager");
-  assert.equal(classifyFailure("/bin/sh: go: command not found").class, "missing_runtime_tool");
+  assert.equal(classifyFailure("/bin/sh: go: command not found").class, "go_runtime_missing");
   assert.equal(classifyFailure("npm ERR! code E401 Unauthorized").class, "private_registry_or_auth");
   assert.equal(classifyFailure("Error: connect ECONNREFUSED 127.0.0.1:5432").class, "database_unreachable");
   assert.equal(classifyFailure("Error: listen EADDRINUSE: address already in use :::3000").class, "port_in_use");
@@ -232,6 +232,32 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure(fs.readFileSync(path.join(FIX, "service-port-allocated", "evidence.txt"), "utf8")).class, "service_port_allocated");
   assert.equal(classifyFailure("only HTTP 503 observed at http://localhost:3000/").class, "health_http_error");
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
+});
+
+test("Go runtime and build failures classify precisely without catching unrelated commands", () => {
+  for (const evidence of [
+    "go: command not found",
+    "zsh: command not found: go",
+    "'go' is not recognized as an internal or external command",
+  ]) {
+    const missing = classifyFailure(evidence);
+    assert.equal(missing.class, "go_runtime_missing");
+    assert.deepEqual(missing.metadata, { runtime: "go" });
+    assert.match(missing.safeNextStep, /Install a Go version supported by the repository/);
+  }
+
+  for (const evidence of [
+    "# example.invalid/service\n./main.go:12:4: undefined: startServer",
+    "package example.invalid/private/service is not in std (/usr/local/go/src/example.invalid/private/service)",
+    "go: example.invalid/module@v1.2.3: invalid version: unknown revision v1.2.3",
+  ]) {
+    const failed = classifyFailure(evidence);
+    assert.equal(failed.class, "go_build_failed");
+    assert.match(failed.safeNextStep, /Go compiler or module error/);
+  }
+
+  assert.equal(classifyFailure("zsh: command not found: rustc").class, "unknown_failure");
+  assert.equal(classifyFailure("go: downloading example.invalid/module v1.2.3").class, "unknown_failure");
 });
 
 test("PHP and Composer runtime failures classify precisely with conservative guidance", () => {
@@ -664,6 +690,32 @@ test("Memos-like repository is an application that requires unsupported orchestr
   assert.ok(inf.backendMarkers.includes("go.mod"));
   assert.ok(inf.frontendMarkers.includes("web/package.json"));
   assert.deepEqual(inf.healthCandidates, [], "no runnable command means no localhost candidate");
+});
+
+test("Ollama-like Go service selects its evidenced serve command and known health contract", () => {
+  const inf = inferRepo(path.join(FIX, "go-ollama-like"));
+  assert.equal(inf.isApplication, true);
+  assert.ok(inf.stack.includes("go-backend"));
+  for (const marker of ["go.mod", "main.go", "cmd/", "server/", "OLLAMA_HOST", "port 11434", "/api/tags", "serve command"]) {
+    assert.ok(inf.backendMarkers.includes(marker), `missing marker ${marker}`);
+  }
+  assert.equal(inf.appCommand, "go run . serve");
+  assert.equal(inf.appCommandSource, "Ollama Go service entrypoint: main.go + serve command");
+  assert.equal(inf.port, 11434);
+  assert.match(inf.portEvidence, /known Ollama service port/);
+  assert.equal(inf.observedPort, null);
+  assert.equal(inf.healthCandidateSource, "known_service");
+  assert.deepEqual(inf.healthCandidates, [
+    "http://127.0.0.1:11434/",
+    "http://localhost:11434/",
+    "http://127.0.0.1:11434/api/tags",
+    "http://localhost:11434/api/tags",
+  ]);
+
+  const plan = buildPlan(inf, "local");
+  assert.equal(plan.steps.find(step => step.kind === "start-app")?.command, "go run . serve");
+  assert.equal(plan.observedPort, null);
+  assert.equal(plan.healthCandidateSource, "known_service");
 });
 
 test("Ruby backend markers are detected without claiming orchestration support", () => {
