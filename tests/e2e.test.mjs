@@ -478,11 +478,25 @@ test("honesty: local provider refuses without --unsafe-local", () => {
   const { out, code } = run(["up", repo, "--provider", "local"], true);
   assert.equal(code, 1);
   assert.match(out, /--unsafe-local/);
+  assert.match(out, /boot skeleton fingerprint: sha256:[0-9a-f]{64}/);
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.booted, false);
   assert.equal(att.result.healthVerified, false);
   assert.equal(att.result.failureClass, "unknown_failure");
+  assert.equal(att.bootSkeleton.schema, "bootproof/boot-skeleton/v1");
+  assert.match(att.bootSkeleton.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(att.observed, [], "a refusal must not pretend any step executed");
+
+  const explained = run(["explain", path.join(repo, ".bootproof", "attestation.json")]);
+  assert.match(explained.out, new RegExp(`Boot skeleton fingerprint: ${att.bootSkeleton.fingerprint}`));
+  assert.match(explained.out, /Runtime markers:/);
+  assert.match(explained.out, /Package managers:/);
+  assert.match(explained.out, /Frameworks:/);
+  assert.match(explained.out, /Services:/);
+  assert.match(explained.out, /Environment variable names \(\d+\):/);
+  assert.match(explained.out, /Health candidates:/);
+  assert.match(explained.out, /not proof of bootability/);
+  assert.match(explained.out, /Only observed health evidence can prove boot/);
 });
 
 test("e2e: real boot, observed health, signed attestation that verifies", async () => {
@@ -490,10 +504,13 @@ test("e2e: real boot, observed health, signed attestation that verifies", async 
   const port = await getFreePort();
   const { out } = run(["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "20000"]);
   assert.match(out, /BOOTED/);
+  assert.match(out, /boot skeleton fingerprint: sha256:[0-9a-f]{64}/);
   assert.match(out, new RegExp(`observed HTTP 200 at http://localhost:${port}/`));
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.booted, true);
   assert.equal(att.result.healthVerified, true);
+  assert.equal(att.bootSkeleton.schema, "bootproof/boot-skeleton/v1");
+  assert.match(att.bootSkeleton.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.equal(att.result.healthEvidence.requestedUrl, `http://localhost:${port}/`);
   assert.equal(att.result.healthEvidence.statusCode, 200);
   assert.equal(att.result.healthEvidence.statusText, "OK");
@@ -614,8 +631,8 @@ http.createServer((_request, response) => {
   assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
   assert.equal(att.result.healthEvidence.connectionError, null);
   assert.ok(!Number.isNaN(Date.parse(att.result.healthEvidence.timestamp)));
-  assert.doesNotMatch(JSON.stringify(att.result.healthEvidence), /500|warming up/);
-  assert.doesNotMatch(JSON.stringify(att.observed.filter(step => step.kind === "health")), /500|warming up/);
+  assert.doesNotMatch(JSON.stringify(att.result.healthEvidence), /HTTP 500|warming up/);
+  assert.doesNotMatch(JSON.stringify(att.observed.filter(step => step.kind === "health")), /HTTP 500|warming up/);
 });
 
 test("honesty: early refusal fixture writes signed proof that explains and verifies without touching env", () => {
@@ -813,6 +830,28 @@ test("plan-agent --json emits the same valid plan written to disk", () => {
   const filePlan = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "agent-plan.json"), "utf8"));
   assert.deepEqual(stdoutPlan, filePlan);
   assert.doesNotMatch(out, /"booted":true|"verified":true|"success":true/i);
+});
+
+test("explain-run preserves and safely explains the initial boot skeleton", () => {
+  const repo = freshCopy("hello-app");
+  fs.writeFileSync(path.join(repo, ".env.example"), "API_TOKEN=template-secret-value\n");
+  fs.writeFileSync(path.join(repo, ".env"), "PROTECTED_ONLY=protected-secret-value\n");
+  const attestation = writeFailedAttestation(repo, "unknown_failure", "fixture failure");
+  assert.ok(attestation.bootSkeleton);
+
+  const planned = run(["plan-agent", repo]);
+  assert.equal(planned.code, 0, planned.out);
+  const [runId] = fs.readdirSync(path.join(repo, ".bootproof", "agent-runs"));
+  const explained = run(["explain-run", runId], false, {}, repo);
+
+  assert.match(explained.out, /Receipt chain: valid/);
+  assert.match(explained.out, new RegExp(`Boot skeleton fingerprint: ${attestation.bootSkeleton.fingerprint}`));
+  assert.match(explained.out, /Runtime markers: node/);
+  assert.match(explained.out, /Package managers: npm/);
+  assert.match(explained.out, /Environment variable names \(1\): API_TOKEN/);
+  assert.match(explained.out, /not proof of bootability/);
+  assert.match(explained.out, /Only observed health evidence can prove boot/);
+  assert.doesNotMatch(explained.out, /template-secret-value|protected-secret-value|PROTECTED_ONLY/);
 });
 
 test("plan-agent emits an Airbyte runbook plan and executes no Airbyte command", () => {

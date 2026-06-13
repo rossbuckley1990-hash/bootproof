@@ -13,6 +13,7 @@ import type {
   ExternalVerificationClassification,
 } from "./types.js";
 import { buildExecutionEnv } from "./exec.js";
+import { buildBootSkeleton } from "./boot-skeleton.js";
 
 export const TOOL_ID = "bootproof@0.3.0";
 
@@ -86,6 +87,12 @@ export function buildAttestation(input: {
     repo: gitInfo(input.repo),
     environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
     trust: { level: "local_developer_signed", signer: "local_ed25519", oidc: null },
+    bootSkeleton: buildBootSkeleton(
+      input.repo,
+      input.plan,
+      undefined,
+      input.observedHealthCandidates ?? [],
+    ),
     plan: input.plan,
     observed: input.observed,
     result: {

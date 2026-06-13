@@ -10,7 +10,14 @@ import os, { tmpdir } from "node:os";
 import { inferRepo } from "../dist/infer.js";
 import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue, TAXONOMY_DOC_CLASSES } from "../dist/taxonomy.js";
 import { buildPlan, composeFileFor, envExampleFor, PROTECTED_ENV, repoComposeRepairFile, writePlanFiles } from "../dist/plan.js";
-import { buildAttestation, TOOL_ID, verifySignature } from "../dist/proof.js";
+import { buildAttestation, signDetached, TOOL_ID, verifySignature } from "../dist/proof.js";
+import {
+  bootSkeletonFingerprint,
+  buildBootSkeleton,
+  canonicalBootSkeletonJson,
+  explainBootSkeleton,
+  validateBootSkeleton,
+} from "../dist/boot-skeleton.js";
 import {
   buildExecutionEnv,
   detectHealthCandidatePortMismatch,
@@ -72,6 +79,62 @@ import {
 import { diffRefs, validateDiffResult } from "../dist/diff.js";
 
 const FIX = path.resolve("fixtures");
+
+function createBootSkeletonFixture(label, options = {}) {
+  const port = options.port ?? 4173;
+  const secret = options.secret ?? `${label}-secret`;
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), `bp-skeleton-${label}-`));
+  fs.mkdirSync(path.join(repo, "apps", "web"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+    name: `repository-${label}`,
+    private: true,
+    packageManager: "pnpm@9.12.0",
+    engines: { node: ">=20 <21" },
+    workspaces: ["apps/*"],
+    scripts: {
+      dev: `API_TOKEN=${secret} vite --host 0.0.0.0 --port ${port}`,
+    },
+    dependencies: { vite: "5.4.0" },
+  }, null, 2));
+  fs.writeFileSync(path.join(repo, ".nvmrc"), "20\n");
+  fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  fs.writeFileSync(path.join(repo, "pnpm-workspace.yaml"), "packages:\n  - 'apps/*'\n");
+  fs.writeFileSync(path.join(repo, ".env.example"), [
+    `API_TOKEN=${secret}`,
+    `DATABASE_URL=postgresql://app:${secret}@localhost:5432/app`,
+    `PORT=${port}`,
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(repo, ".env"), `PROTECTED_ONLY=${secret}-protected\n`);
+  fs.writeFileSync(path.join(repo, "Dockerfile"), [
+    "FROM node:20-alpine",
+    "ARG API_TOKEN",
+    "ENV PUBLIC_MODE=development",
+    `EXPOSE ${port}`,
+    `HEALTHCHECK CMD wget -qO- http://localhost:${port}/health`,
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(repo, "docker-compose.yml"), [
+    "services:",
+    `  repository-${label}:`,
+    "    build: .",
+    "    ports:",
+    `      - "${port}:${port}"`,
+    "    environment:",
+    `      API_TOKEN: ${secret}`,
+    `      DATABASE_URL: postgresql://app:${secret}@postgres:5432/app`,
+    "    healthcheck:",
+    `      test: [CMD, wget, -qO-, http://localhost:${port}/health]`,
+    "  postgres:",
+    "    image: postgres:16-alpine",
+    "    environment:",
+    `      POSTGRES_PASSWORD: ${secret}`,
+    "  redis:",
+    "    image: redis:7-alpine",
+    "",
+  ].join("\n"));
+  return repo;
+}
 
 function createInfrastructureDiffRepo() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-diff-unit-"));
@@ -2505,7 +2568,7 @@ test("health verification replaces a transient 500 with a later healthy 302", as
     assert.equal(health.evidence.redirectLocation, "/users/sign_in");
     assert.equal(health.evidence.bodyExcerpt, "ready");
     assert.equal(health.evidence.acceptedAsHealthy, true);
-    assert.doesNotMatch(JSON.stringify(health.evidence), /500|warming up/);
+    assert.doesNotMatch(JSON.stringify(health.evidence), /HTTP 500|warming up/);
   });
 });
 
@@ -2666,12 +2729,181 @@ test("attestation signature verifies and tamper is detected", () => {
   const plan = buildPlan(inf, "local");
   const att = buildAttestation({ repo: inf.repoPath, plan, observed: [], startedAt: new Date().toISOString(), booted: false, healthVerified: false, healthObservation: null, failureClass: "unknown_failure", failureEvidence: "x", explanation: "test" });
   assert.deepEqual(att.trust, { level: "local_developer_signed", signer: "local_ed25519", oidc: null });
+  assert.equal(att.bootSkeleton.schema, "bootproof/boot-skeleton/v1");
+  assert.match(att.bootSkeleton.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.equal(verifySignature(att), true);
+  att.bootSkeleton.components.frameworks.push("fabricated-framework");
+  assert.equal(verifySignature(att), false, "a tampered boot skeleton must fail signature verification");
+  att.bootSkeleton.components.frameworks.pop();
   att.result.booted = true; // tamper: claim it booted
   assert.equal(verifySignature(att), false, "a tampered 'booted' claim must fail signature verification");
   att.result.booted = false;
   att.trust.level = "ci_oidc_signed"; // tamper: upgrade local proof to a stronger trust claim
   assert.equal(verifySignature(att), false, "a tampered trust level must fail signature verification");
+});
+
+test("boot skeleton canonicalization is deterministic, structural, redacted, and path-independent", () => {
+  const firstRepo = createBootSkeletonFixture("first", { secret: "first-private-value" });
+  const secondRepo = createBootSkeletonFixture("second", { secret: "second-private-value" });
+  const firstInference = inferRepo(firstRepo);
+  const secondInference = inferRepo(secondRepo);
+  const first = buildBootSkeleton(firstRepo, buildPlan(firstInference, "local"), firstInference);
+  const repeated = buildBootSkeleton(firstRepo, buildPlan(firstInference, "local"), firstInference);
+  const equivalent = buildBootSkeleton(secondRepo, buildPlan(secondInference, "local"), secondInference);
+  const withAdvertisedHealth = buildBootSkeleton(
+    firstRepo,
+    buildPlan(firstInference, "local"),
+    firstInference,
+    ["https://localhost:5173/advertised-health"],
+  );
+
+  assert.equal(first.schema, "bootproof/boot-skeleton/v1");
+  assert.match(first.fingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(first.fingerprint, repeated.fingerprint);
+  assert.equal(first.fingerprint, equivalent.fingerprint);
+  assert.deepEqual(validateBootSkeleton(first), []);
+  assert.equal(
+    canonicalBootSkeletonJson(first.components),
+    canonicalBootSkeletonJson(repeated.components),
+  );
+
+  const serialized = JSON.stringify(first);
+  assert.match(serialized, /"API_TOKEN"/);
+  assert.match(serialized, /"DATABASE_URL"/);
+  assert.match(serialized, /"PORT"/);
+  assert.doesNotMatch(serialized, /first-private-value/);
+  assert.doesNotMatch(serialized, /PROTECTED_ONLY/);
+  assert.doesNotMatch(serialized, new RegExp(firstRepo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(serialized, /repository-first/);
+  assert.doesNotMatch(serialized, /commit|startedAt|finishedAt/);
+
+  assert.deepEqual(first.components.runtimes, [{ family: "node", major: 20 }]);
+  assert.deepEqual(first.components.packageManagers, [{ family: "pnpm", major: 9 }]);
+  assert.ok(first.components.frameworks.includes("vite"));
+  assert.ok(first.components.lockfiles.includes("pnpm-lock"));
+  assert.ok(first.components.workspaceTopology.includes("pattern:apps/*"));
+  assert.ok(first.components.services.some(service => service.type === "postgres"));
+  assert.ok(first.components.services.some(service => service.type === "redis"));
+  assert.ok(first.components.services.some(service => service.name === "app"));
+  assert.ok(first.components.healthCandidates.some(candidate => candidate.route === "/health"));
+  assert.ok(withAdvertisedHealth.components.healthCandidates.some(candidate =>
+    candidate.protocol === "https"
+    && candidate.port === 5173
+    && candidate.route === "/advertised-health"
+  ));
+  const explanation = explainBootSkeleton(first).join("\n");
+  assert.match(explanation, new RegExp(first.fingerprint));
+  assert.match(explanation, /Runtime markers: node@20/);
+  assert.match(explanation, /Package managers: pnpm@9/);
+  assert.match(explanation, /Frameworks: vite/);
+  assert.match(explanation, /Services:/);
+  assert.match(explanation, /Environment variable names \(\d+\):/);
+  assert.match(explanation, /Health candidates:/);
+  assert.match(explanation, /not proof of bootability/);
+  assert.match(explanation, /Only observed health evidence can prove boot/);
+  assert.doesNotMatch(explanation, /first-private-value|PROTECTED_ONLY/);
+});
+
+test("boot skeleton runtime validator enforces the strict v1 schema", () => {
+  const repo = createBootSkeletonFixture("validator", { secret: "validator-private-value" });
+  const inference = inferRepo(repo);
+  const valid = buildBootSkeleton(repo, buildPlan(inference, "local"), inference);
+  assert.deepEqual(validateBootSkeleton(valid), []);
+
+  const extraRoot = structuredClone(valid);
+  extraRoot.unexpected = true;
+  assert.ok(validateBootSkeleton(extraRoot).some(error => /unsupported field: unexpected/.test(error)));
+
+  const extraComponent = structuredClone(valid);
+  extraComponent.components.healthCandidates[0].secretValue = "must-not-be-accepted";
+  assert.ok(validateBootSkeleton(extraComponent).some(error => /unsupported field: secretValue/.test(error)));
+
+  const malformedFingerprint = structuredClone(valid);
+  malformedFingerprint.fingerprint = "sha256:not-hex";
+  assert.ok(validateBootSkeleton(malformedFingerprint).some(error => /must match sha256/.test(error)));
+
+  const mismatchedFingerprint = structuredClone(valid);
+  mismatchedFingerprint.components.frameworks.push("different-framework");
+  assert.ok(validateBootSkeleton(mismatchedFingerprint).some(error => /does not match its canonical components/.test(error)));
+});
+
+test("boot skeleton fingerprint changes for a structurally different boot setup", () => {
+  const firstRepo = createBootSkeletonFixture("port-4173", { port: 4173 });
+  const secondRepo = createBootSkeletonFixture("port-8080", { port: 8080 });
+  const firstInference = inferRepo(firstRepo);
+  const secondInference = inferRepo(secondRepo);
+  const first = buildBootSkeleton(firstRepo, buildPlan(firstInference, "local"), firstInference);
+  const second = buildBootSkeleton(secondRepo, buildPlan(secondInference, "local"), secondInference);
+  assert.notEqual(first.fingerprint, second.fingerprint);
+});
+
+test("boot skeleton canonicalization normalizes Windows path separators", () => {
+  const components = {
+    runtimes: [{ family: "node", major: 20 }],
+    packageManagers: [{ family: "pnpm", major: 9 }],
+    frameworks: ["vite"],
+    startCommands: [{ source: "apps/web/package.json:scripts.dev", shape: "pnpm dev" }],
+    healthCandidates: [{ protocol: "http", port: 4173, route: "/health" }],
+    services: [],
+    ports: [],
+    envVars: ["PORT"],
+    lockfiles: ["pnpm-lock"],
+    workspaceTopology: ["pnpm-workspaces", "pattern:apps/*"],
+  };
+  const windowsComponents = structuredClone(components);
+  windowsComponents.startCommands[0].source = "apps\\web\\package.json:scripts.dev";
+  windowsComponents.workspaceTopology[1] = "pattern:apps\\*";
+  assert.equal(
+    bootSkeletonFingerprint(components),
+    bootSkeletonFingerprint(windowsComponents),
+  );
+});
+
+test("legacy signed attestations without a boot skeleton remain verifiable", () => {
+  const inf = inferRepo(path.join(FIX, "hello-app"));
+  const plan = buildPlan(inf, "local");
+  const legacy = buildAttestation({
+    repo: inf.repoPath,
+    plan,
+    observed: [],
+    startedAt: new Date().toISOString(),
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    failureClass: "unknown_failure",
+    failureEvidence: "legacy evidence",
+    explanation: "legacy receipt",
+  });
+  delete legacy.bootSkeleton;
+  legacy.signer = null;
+  legacy.signature = null;
+  const { signature: _signature, signer: _signer, ...body } = legacy;
+  const signed = signDetached(Buffer.from(JSON.stringify(body)));
+  legacy.signature = signed.signature;
+  legacy.signer = { publicKey: signed.publicKeyPem, algorithm: "ed25519" };
+  assert.equal(verifySignature(legacy), true);
+});
+
+test("boot skeleton JSON schema is a strict v1 machine interface", () => {
+  const schema = JSON.parse(fs.readFileSync(
+    path.join("docs", "schemas", "boot-skeleton-v1.schema.json"),
+    "utf8",
+  ));
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.schema.const, "bootproof/boot-skeleton/v1");
+  assert.equal(schema.properties.components.additionalProperties, false);
+  assert.ok(schema.required.includes("fingerprint"));
+  assert.match(schema.properties.fingerprint.pattern, /sha256/);
+  assert.equal(schema.properties.components.properties.envVars.items.pattern, "^[A-Z][A-Z0-9_]*$");
+
+  const agentSchema = JSON.parse(fs.readFileSync(
+    path.join("docs", "schemas", "agent-run-receipts-v1.schema.json"),
+    "utf8",
+  ));
+  assert.match(
+    agentSchema.$defs.initialReceipt.properties.attestation.description,
+    /Modern attestations include an optional bootSkeleton/,
+  );
 });
 
 test("redaction masks secrets, urls credentials and home paths", async () => {

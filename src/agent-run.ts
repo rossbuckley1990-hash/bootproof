@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { attestationPath, verifySignature } from "./proof.js";
+import { explainBootSkeleton } from "./boot-skeleton.js";
 import { redactJsonValue, redactText } from "./redact.js";
 import type { AgentPlan, AgentPlanAction } from "./agent-plan.js";
 import type { RepairMutationScope, RepairRiskLevel } from "./repair-safety.js";
@@ -617,6 +618,12 @@ export function appendAgentVerification(
 export function explainAgentRun(repo: string, runId: string): string[] {
   const run = readAgentRun(repo, runId);
   const summary = run.summary;
+  const initial = run.receipts.find(receipt =>
+    (receipt as Partial<AgentRunInitialReceipt>).receiptType === "initial-attestation"
+  ) as AgentRunInitialReceipt | undefined;
+  const skeletonLines = run.chainValid && initial?.attestation?.bootSkeleton
+    ? explainBootSkeleton(initial.attestation.bootSkeleton)
+    : [];
   const ownership = summary.bootproofOrchestrated
     ? "BootProof orchestrated the application and verified health."
     : summary.verifiedExternalHealth
@@ -635,6 +642,7 @@ export function explainAgentRun(repo: string, runId: string): string[] {
     `Stopped for approval: ${summary.stoppedForApproval ? "yes" : "no"}`,
     `Stopped due blocked action: ${summary.stoppedDueBlockedAction ? "yes" : "no"}`,
     `Verified: ${summary.verified ? "yes" : "no"}`,
+    ...skeletonLines,
     summary.explanation,
     ...run.errors.map(error => `Chain error: ${error}`),
   ];

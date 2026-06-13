@@ -45,6 +45,7 @@
         "sourceAttestationHash": { "$ref": "#/$defs/nullableHash" },
         "sourceSignatureValid": { "type": "boolean" },
         "attestation": {
+          "description": "A signature-valid source attestation when available. Modern attestations include an optional bootSkeleton conforming to boot-skeleton-v1.schema.json; legacy attestations without it remain valid.",
           "oneOf": [
             { "type": "object" },
             { "type": "null" }
