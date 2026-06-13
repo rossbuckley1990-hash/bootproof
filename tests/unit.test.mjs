@@ -260,6 +260,37 @@ test("Go runtime and build failures classify precisely without catching unrelate
   assert.equal(classifyFailure("go: downloading example.invalid/module v1.2.3").class, "unknown_failure");
 });
 
+test("missing project CLI failures preserve package script metadata and hybrid guidance", () => {
+  const evidence = [
+    "sh: sentry: command not found",
+    "ELIFECYCLE Command failed.",
+    "Package script context",
+    "scriptName: dev",
+    "scriptCommand: pnpm install --frozen-lockfile && sentry devserver",
+    "packageManager: pnpm",
+    "projectContext: python-node-hybrid",
+  ].join("\n");
+  const missing = classifyFailure(evidence);
+  assert.equal(missing.class, "missing_project_cli");
+  assert.deepEqual(missing.metadata, {
+    missingCommand: "sentry",
+    scriptName: "dev",
+    scriptCommand: "pnpm install --frozen-lockfile && sentry devserver",
+    packageManager: "pnpm",
+  });
+  assert.match(missing.explanation, /project CLI sentry/);
+  assert.match(missing.safeNextStep, /Python development environment|bootstrap\/devservices/);
+  assert.equal(
+    diagnoseFailure(missing.class, evidence, missing.explanation).safeNextStep,
+    missing.safeNextStep,
+  );
+  assert.equal(
+    classifyFailure("sh: sentry: command not found\nELIFECYCLE Command failed.").class,
+    "unknown_failure",
+    "a missing command without selected package-script evidence must not be guessed as a project CLI",
+  );
+});
+
 test("PHP and Composer runtime failures classify precisely with conservative guidance", () => {
   const missingPhpEvidence = "zsh: command not found: php";
   const missingPhp = classifyFailure(missingPhpEvidence);
@@ -589,6 +620,50 @@ test("Superset-like repository is recognized as a setup-heavy Python/Flask appli
   assert.equal(inf.workerCommand, "celery --app=superset.tasks.celery_app:app worker");
   assert.equal(inf.port, 8088);
   assert.deepEqual(inf.healthCandidates, ["http://localhost:8088/"]);
+});
+
+test("Sentry-like repository is a low-confidence Python/Node hybrid with devservices", () => {
+  const inf = inferRepo(path.join(FIX, "python-node-sentry-like"));
+  assert.equal(inf.isApplication, true);
+  for (const stack of [
+    "python-backend",
+    "node-frontend",
+    "make-driven",
+    "large-hybrid-app",
+    "devservices-backed",
+  ]) {
+    assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
+  }
+  for (const marker of ["pyproject.toml", "Makefile", "src/"]) {
+    assert.ok(inf.backendMarkers.includes(marker), `missing backend marker ${marker}`);
+  }
+  assert.ok(inf.frontendMarkers.includes("package.json"));
+  assert.ok(inf.frontendMarkers.includes("pnpm-lock.yaml"));
+  assert.ok(inf.frontendMarkers.includes("static/"));
+  assert.ok(inf.serviceMarkers.includes("devservices/"));
+  assert.equal(inf.packageManager, "pnpm");
+  assert.equal(inf.appCommand, "pnpm dev");
+  assert.equal(inf.selectedPackageScriptName, "dev");
+  assert.equal(inf.selectedPackageScriptCommand, "pnpm install --frozen-lockfile && sentry devserver");
+  assert.equal(inf.projectCliCommand, "sentry");
+  assert.equal(inf.projectCliReady, false);
+  assert.match(inf.appCommandSource, /project CLI sentry readiness not established/);
+  assert.match(inf.commandScope, /large Python\/Node hybrid/);
+  assert.ok(inf.confidence <= 60, `unready project CLI confidence was ${inf.confidence}`);
+});
+
+test("simple React inference remains on the existing Node frontend path", () => {
+  const inf = inferRepo(path.join(FIX, "react-simple-like"));
+  assert.equal(inf.isApplication, true);
+  assert.ok(inf.stack.includes("node-frontend"));
+  assert.ok(inf.stack.includes("react"));
+  assert.ok(inf.stack.includes("vite"));
+  assert.equal(inf.stack.includes("python-backend"), false);
+  assert.equal(inf.stack.includes("large-hybrid-app"), false);
+  assert.equal(inf.stack.includes("devservices-backed"), false);
+  assert.equal(inf.appCommand, "npm run dev");
+  assert.equal(inf.projectCliCommand, null);
+  assert.equal(inf.projectCliReady, null);
 });
 
 test("Grafana-like repository is recognized as a Go/backend + Node/frontend hybrid", () => {

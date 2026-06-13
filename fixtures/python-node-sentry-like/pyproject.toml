@@ -1,0 +1,6 @@
+[project]
+name = "sentry-like"
+version = "0.0.0"
+
+[project.scripts]
+sentry = "sentry.runner:main"

@@ -1,0 +1,11 @@
+{
+  "name": "react-simple-like",
+  "private": true,
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "react": "19.0.0",
+    "vite": "6.0.0"
+  }
+}

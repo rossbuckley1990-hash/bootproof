@@ -1,0 +1,10 @@
+{
+  "name": "sentry-like",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm install --frozen-lockfile && sentry devserver"
+  },
+  "dependencies": {
+    "react": "19.0.0"
+  }
+}

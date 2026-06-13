@@ -351,6 +351,39 @@ function writeFakePnpm(bin, version) {
   fs.chmodSync(fakePnpm, 0o755);
 }
 
+function writeMissingProjectCliPnpmShim(bin) {
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(bin, "pnpm.cmd"),
+      [
+        "@echo off",
+        "if \"%~1\"==\"install\" exit /b 0",
+        "if \"%~1\"==\"dev\" (",
+        "  echo sh: sentry: command not found 1>&2",
+        "  echo ELIFECYCLE Command failed. 1>&2",
+        "  exit /b 127",
+        ")",
+        "exit /b 99",
+        "",
+      ].join("\r\n"),
+    );
+    return;
+  }
+  const fakePnpm = path.join(bin, "pnpm");
+  fs.writeFileSync(fakePnpm, [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"install\" ]; then exit 0; fi",
+    "if [ \"$1\" = \"dev\" ]; then",
+    "  echo 'sh: sentry: command not found' >&2",
+    "  echo 'ELIFECYCLE Command failed.' >&2",
+    "  exit 127",
+    "fi",
+    "exit 99",
+    "",
+  ].join("\n"));
+  fs.chmodSync(fakePnpm, 0o755);
+}
+
 function pathWith(bin) {
   return `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
 }
@@ -964,6 +997,35 @@ test("Superset-like app writes a signed python_flask_setup_required refusal", ()
   assert.doesNotMatch(JSON.stringify(att.plan), /docker-compose\.bootproof\.yml/, "refusal plan must not reference ungenerated scaffolding");
   assert.ok(!fs.existsSync(path.join(repo, "docker-compose.bootproof.yml")));
   assert.ok(att.signature);
+});
+
+test("Sentry-like hybrid preserves missing project CLI evidence instead of generic app exit", () => {
+  const repo = freshCopy("python-node-sentry-like");
+  const bin = path.join(repo, "bin-tools");
+  fs.mkdirSync(bin);
+  writeMissingProjectCliPnpmShim(bin);
+
+  const { out, code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--install", "--timeout", "5000", "--ci"],
+    true,
+    { PATH: pathWith(bin) },
+  );
+  assert.equal(code, 1);
+  assert.match(out, /python-backend, make-driven, node-frontend, react, large-hybrid-app, devservices-backed/);
+  assert.match(out, /selected command: pnpm dev/);
+  assert.match(out, /project CLI sentry readiness not established/);
+  assert.match(out, /NOT VERIFIED — missing_project_cli/);
+  assert.match(out, /Python development environment|bootstrap\/devservices/);
+  assert.doesNotMatch(out, /NOT VERIFIED — app_exited_early/);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.failureClass, "missing_project_cli");
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.match(att.result.failureEvidence, /scriptName: dev/);
+  assert.match(att.result.failureEvidence, /scriptCommand: pnpm install --frozen-lockfile && sentry devserver/);
+  assert.match(att.result.failureEvidence, /packageManager: pnpm/);
+  assert.ok(att.observed.some(step => step.kind === "start-app" && step.ok === false));
 });
 
 test("ambiguous Memos-like Go app writes a signed Go orchestration refusal", () => {
