@@ -13,6 +13,7 @@ import type {
   ExternalVerificationClassification,
 } from "./types.js";
 import { buildExecutionEnv } from "./exec.js";
+import { redactJsonValue } from "./redact.js";
 
 export const TOOL_ID = "bootproof@0.3.0";
 
@@ -72,33 +73,55 @@ export function buildAttestation(input: {
   const bootproofOrchestrated = verificationMode === "external-health"
     ? false
     : input.bootproofOrchestrated ?? true;
+  const redactionsApplied = new Set<string>();
+  const redact = <T>(value: T): T => {
+    const redacted = redactJsonValue(value);
+    for (const rule of redacted.applied) redactionsApplied.add(rule);
+    return redacted.value as T;
+  };
+  const repo = gitInfo(input.repo);
+  const persistedRepo = {
+    ...repo,
+    remote: redact(repo.remote),
+  };
+  const persistedPlan = redact(input.plan);
+  const persistedObserved = redact(input.observed);
+  const persistedHealthObservation = redact(input.healthObservation);
+  const persistedHealthEvidence = redact(input.healthEvidence ?? null);
+  const persistedObservedHealthCandidates = redact(input.observedHealthCandidates ?? []);
+  const persistedFailureEvidence = redact(input.failureEvidence);
+  const persistedExplanation = redact(input.explanation);
+  const persistedExternalHealthUrl = redact(input.externalHealthUrl ?? null);
+  const persistedObservedFinalUrl = redact(input.observedFinalUrl ?? null);
+  const persistedResponseSnippet = redact(input.responseSnippet ?? "");
   const att: Attestation = {
     schema: "bootproof/attestation/v1",
     tool: TOOL_ID,
     verificationMode,
     bootproofOrchestrated,
-    externalHealthUrl: input.externalHealthUrl ?? null,
+    externalHealthUrl: persistedExternalHealthUrl,
     observedStatus: input.observedStatus ?? null,
-    observedFinalUrl: input.observedFinalUrl ?? null,
+    observedFinalUrl: persistedObservedFinalUrl,
     observedAt: input.observedAt ?? null,
-    responseSnippet: input.responseSnippet ?? "",
+    responseSnippet: persistedResponseSnippet,
     classification: input.classification ?? null,
-    repo: gitInfo(input.repo),
+    redactionsApplied: [...redactionsApplied].sort(),
+    repo: persistedRepo,
     environment: { os: `${os.platform()} ${os.release()}`, arch: os.arch(), node: process.version },
     trust: { level: "local_developer_signed", signer: "local_ed25519", oidc: null },
-    plan: input.plan,
-    observed: input.observed,
+    plan: persistedPlan,
+    observed: persistedObserved,
     result: {
       booted: input.booted,
       healthVerified: input.healthVerified,
-      healthObservation: input.healthObservation,
-      healthEvidence: input.healthEvidence ?? null,
-      observedHealthCandidates: input.observedHealthCandidates ?? [],
-      observedPort: input.plan.observedPort ?? null,
-      healthCandidateSource: input.plan.healthCandidateSource ?? "inferred",
+      healthObservation: persistedHealthObservation,
+      healthEvidence: persistedHealthEvidence,
+      observedHealthCandidates: persistedObservedHealthCandidates,
+      observedPort: persistedPlan.observedPort ?? null,
+      healthCandidateSource: persistedPlan.healthCandidateSource ?? "inferred",
       failureClass: input.failureClass,
-      failureEvidence: input.failureEvidence,
-      explanation: input.explanation,
+      failureEvidence: persistedFailureEvidence,
+      explanation: persistedExplanation,
     },
     startedAt: input.startedAt,
     finishedAt: new Date().toISOString(),

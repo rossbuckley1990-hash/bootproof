@@ -201,6 +201,7 @@ export interface Attestation {
   observedAt: string | null;
   responseSnippet: string;
   classification: ExternalVerificationClassification | null;
+  redactionsApplied: string[];
   repo: { path: string; remote: string | null; commit: string | null; dirty: boolean | null };
   environment: { os: string; arch: string; node: string };
   trust: AttestationTrust;

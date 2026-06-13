@@ -2675,11 +2675,105 @@ test("attestation signature verifies and tamper is detected", () => {
 });
 
 test("redaction masks secrets, urls credentials and home paths", async () => {
-  const { redactText } = await import("../dist/redact.js");
-  const r = redactText("DATABASE_URL=postgresql://admin:SuperSecret@db:5432/x STRIPE_SECRET_KEY=sk_live_abc123 in /Users/ross/code");
-  assert.doesNotMatch(r.text, /SuperSecret|sk_live_abc123|\/Users\/ross/);
+  const { redactJsonValue, redactText } = await import("../dist/redact.js");
+  const placeholders = [
+    "stripe_live_key_example_BootProofLive123",
+    "stripe_test_key_example_BootProofTest123",
+    "stripe_restricted_key_example_BootProofRestricted123",
+    "webhook_secret_example_BootProofWebhook123",
+  ];
+  const databaseLocator = "database-connection-example";
+  const assignmentValues = ["merchant-account-example", "session-token-value", "service-key-value", "db-password-value"];
+  const r = redactText(`DATABASE_URL=postgresql://admin:SuperSecret@db:5432/x REPORTING_DATABASE_URL=${databaseLocator} STRIPE_ACCOUNT=${assignmentValues[0]} SESSION_TOKEN=${assignmentValues[1]} SERVICE_API_KEY=${assignmentValues[2]} DB_PASSWORD=${assignmentValues[3]} STRIPE=${placeholders.join(" DEBUG_TOKEN=token_example_BootProofToken123 STRIPE=")} in /Users/ross/code`);
+  assert.doesNotMatch(r.text, new RegExp(`SuperSecret|${databaseLocator}|${assignmentValues.join("|")}|${placeholders.join("|")}|token_example_BootProofToken123|/Users/ross/`));
   assert.match(r.text, /\[redacted\]/);
   assert.ok(r.applied.length >= 2);
+  assert.ok(r.applied.includes("stripe keys"));
+  assert.ok(r.applied.includes("webhook secrets"));
+  assert.ok(r.applied.includes("secret placeholder values"));
+  assert.ok(r.applied.includes("database url values"));
+
+  const commit = "a".repeat(40);
+  const sha256 = "b".repeat(64);
+  const attestationHash = "c".repeat(64);
+  const structured = redactJsonValue({
+    commit,
+    sha256,
+    attestationHash,
+    failureEvidence: "OPENAI=sk-proj-BootProofSecret123456",
+  }).value;
+  assert.deepEqual(structured, {
+    commit,
+    sha256,
+    attestationHash,
+    failureEvidence: "OPENAI=[redacted]",
+  });
+});
+
+test("attestation construction redacts persisted free-text evidence without mutating runtime evidence", () => {
+  const inf = inferRepo(path.join(FIX, "hello-app"));
+  const plan = buildPlan(inf, "local");
+  const observed = [{
+    id: "start-app",
+    kind: "start-app",
+    command: "STRIPE=stripe_live_key_example_BootProofSecret123 node server.js",
+    startedAt: "2026-06-13T00:00:00.000Z",
+    finishedAt: "2026-06-13T00:00:01.000Z",
+    exitCode: 1,
+    ok: false,
+    observation: "OPENAI=sk-proj-BootProofSecret123",
+    evidenceHead: "DATABASE_URL=postgresql://admin:db-password@localhost/app",
+    evidenceTail: "ordinary diagnostic remains readable",
+  }];
+  const healthEvidence = {
+    requestedUrl: "http://localhost:3000/?token=health-secret",
+    statusCode: 500,
+    statusText: "Internal Server Error",
+    headers: { "set-cookie": "session=health-secret" },
+    redirectLocation: null,
+    bodyExcerpt: "STRIPE=stripe_live_key_example_HealthBodySecret123",
+    timestamp: "2026-06-13T00:00:02.000Z",
+    acceptedAsHealthy: false,
+    connectionError: null,
+  };
+  const attestation = buildAttestation({
+    repo: inf.repoPath,
+    plan,
+    observed,
+    startedAt: "2026-06-13T00:00:00.000Z",
+    booted: false,
+    healthVerified: false,
+    healthObservation: null,
+    healthEvidence,
+    failureClass: "app_exited_early",
+    failureEvidence: "OPENAI=sk-proj-FailureSecret123\nordinary diagnostic remains readable",
+    explanation: "DATABASE_URL=postgresql://admin:explanation-password@localhost/app",
+    responseSnippet: "STRIPE=stripe_live_key_example_ResponseSecret123",
+  });
+
+  const persisted = JSON.stringify(attestation);
+  for (const secret of [
+    "stripe_live_key_example_BootProofSecret123",
+    "sk-proj-BootProofSecret123",
+    "db-password",
+    "health-secret",
+    "stripe_live_key_example_HealthBodySecret123",
+    "sk-proj-FailureSecret123",
+    "explanation-password",
+    "stripe_live_key_example_ResponseSecret123",
+  ]) {
+    assert.equal(persisted.includes(secret), false, `${secret} must not be persisted`);
+  }
+  assert.match(attestation.result.failureEvidence, /\[redacted\]/);
+  assert.match(attestation.result.failureEvidence, /ordinary diagnostic remains readable/);
+  assert.match(attestation.observed[0].evidenceTail, /ordinary diagnostic remains readable/);
+  assert.ok(attestation.redactionsApplied.includes("stripe keys"));
+  assert.ok(attestation.redactionsApplied.includes("openai keys"));
+  assert.ok(attestation.redactionsApplied.includes("url credentials"));
+  assert.ok(attestation.redactionsApplied.includes("sensitive field value"));
+
+  assert.match(observed[0].command, /stripe_live_key_example_BootProofSecret123/, "runtime evidence remains available to diagnosis");
+  assert.match(healthEvidence.bodyExcerpt, /stripe_live_key_example_HealthBodySecret123/, "runtime health evidence remains unchanged");
 });
 
 test("registry entry: redacted, re-signed, tamper-detectable", async () => {

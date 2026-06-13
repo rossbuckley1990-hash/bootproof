@@ -2178,6 +2178,52 @@ test("app exited early preserves evidence head, tail, and extracted Rails cause"
   assert.equal(start.detectedCause, "missing config/database.yml");
   assert.ok(start.evidenceTail.length <= 4000, "existing bounded evidenceTail behavior must remain intact");
   assert.match(att.result.failureEvidence, /Detected cause: missing config\/database\.yml/);
+  assert.deepEqual(att.redactionsApplied, [], "ordinary non-secret failure evidence should remain readable without redaction");
+});
+
+test("failed app output is redacted when captured in the attestation", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  const stripeSecret = "stripe_live_key_example_BootProofCrashSecret123456";
+  const openAiSecret = "sk-proj-BootProofCrashSecret123456";
+  const databasePassword = "bootproof-db-password";
+  fs.writeFileSync(path.join(repo, "server.js"), `
+console.error("STRIPE=${stripeSecret}");
+console.log("OPENAI=${openAiSecret}");
+console.error("DATABASE_URL=postgresql://admin:${databasePassword}@localhost/app");
+console.error("ordinary diagnostic: dependency bootstrap failed");
+process.exit(9);
+`);
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "BootProof Test"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "bootproof@example.invalid"], { cwd: repo });
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "secret redaction fixture"], { cwd: repo });
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+
+  const { code } = run(
+    ["up", repo, "--provider", "local", "--unsafe-local", "--port", String(port), "--timeout", "1200", "--ci"],
+    true,
+  );
+  assert.equal(code, 1);
+
+  const attestationPath = path.join(repo, ".bootproof", "attestation.json");
+  const rawAttestation = fs.readFileSync(attestationPath, "utf8");
+  const attestation = JSON.parse(rawAttestation);
+  for (const secret of [stripeSecret, openAiSecret, databasePassword]) {
+    assert.equal(rawAttestation.includes(secret), false, `${secret} must not appear in attestation.json`);
+  }
+  assert.equal(attestation.repo.commit, commit);
+  assert.match(attestation.result.failureEvidence, /STRIPE=\[redacted\]/);
+  assert.match(attestation.result.failureEvidence, /OPENAI=\[redacted\]/);
+  assert.match(attestation.result.failureEvidence, /postgresql:\/\/\[redacted\]:\[redacted\]@localhost\/app/);
+  assert.match(attestation.result.failureEvidence, /ordinary diagnostic: dependency bootstrap failed/);
+  const start = attestation.observed.find(step => step.kind === "start-app");
+  assert.match(`${start.evidenceHead}\n${start.evidenceTail}`, /\[redacted\]/);
+  assert.match(`${start.evidenceHead}\n${start.evidenceTail}`, /ordinary diagnostic: dependency bootstrap failed/);
+  assert.ok(attestation.redactionsApplied.includes("stripe keys"));
+  assert.ok(attestation.redactionsApplied.includes("openai keys"));
+  assert.ok(attestation.redactionsApplied.includes("url credentials"));
 });
 
 test("health HTTP error fixture is not mislabeled as a timeout", async () => {
