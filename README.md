@@ -2,6 +2,17 @@
 
 [![CI](https://github.com/bootproof/bootproof/actions/workflows/ci.yml/badge.svg)](https://github.com/bootproof/bootproof/actions/workflows/ci.yml)
 
+![BootProof demo](assets/bootproof_viral_demo.gif)
+
+**BootProof proves whether a GitHub repo actually boots.**
+
+It runs the repo, observes real localhost health evidence, classifies failures,
+and writes a receipt. No proof, no green check.
+
+```bash
+npx bootproof@latest up .
+```
+
 > **The honest Run Button for repos — with proof, not vibes.**
 
 **Human diagnosis. Machine proof. One engine.**
@@ -489,7 +500,7 @@ Run `npm run pack:check` to pack BootProof, install the tarball in an isolated t
 Repository metadata points to:
 
 ```text
-https://github.com/rossbuckley1990-hash/bootproof
+https://github.com/bootproof/bootproof
 ```
 
 ## What BootProof Is Not

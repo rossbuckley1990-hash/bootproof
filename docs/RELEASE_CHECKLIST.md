@@ -16,11 +16,11 @@ BootProof publishes compiled JavaScript, not TypeScript source. `dist/` is requi
    npm ci
    ```
 
-3. Run the tests and a clean build:
+3. Run a clean build and the full test suite:
 
    ```bash
-   npm test
    npm run build
+   npm test
    ```
 
 4. Pack and smoke-test the installed artifact:
@@ -43,7 +43,7 @@ BootProof publishes compiled JavaScript, not TypeScript source. `dist/` is requi
 6. Confirm the package name, version, npm account, and registry target:
 
    ```bash
-   npm view bootproof
+   npm view bootproof version
    npm whoami
    npm config get registry
    ```
@@ -53,7 +53,8 @@ BootProof publishes compiled JavaScript, not TypeScript source. `dist/` is requi
 1. Commit the release changes and create the matching GitHub tag:
 
    ```bash
-   git tag v0.1.0
+   VERSION="$(node -p "require('./package.json').version")"
+   git tag "v${VERSION}"
    git push origin main --tags
    ```
 
@@ -63,20 +64,37 @@ BootProof publishes compiled JavaScript, not TypeScript source. `dist/` is requi
    npm publish
    ```
 
-3. Install from the registry in a fresh temporary directory and rerun:
+3. Verify the published version and CLI directly from the registry:
 
    ```bash
-   npx bootproof --help
-   npx bootproof up /path/to/local/repository
-   npx bootproof up https://github.com/user/repository
+   EXPECTED_VERSION="$(node -p "require('./package.json').version")"
+   npm view bootproof version
+   npx --yes bootproof@latest --help
+   npx --yes "bootproof@${EXPECTED_VERSION}" --help
    ```
+
+   The npm version must equal `EXPECTED_VERSION`. The help output must include
+   `up`, `verify-url`, `plan-agent`, `explain-run`, `fix`, `apply-repair`,
+   `diff`, `registry`, `help`, and `version`.
+
+4. Run explicit-version smoke commands from a fresh directory:
+
+   ```bash
+   npx --yes "bootproof@${EXPECTED_VERSION}" up /path/to/local/repository
+   npx --yes "bootproof@${EXPECTED_VERSION}" up https://github.com/user/repository
+   ```
+
+Do not use a bare cached `npx bootproof` invocation as release verification.
+Prefer `bootproof@latest` or the explicit expected version. If npm's local
+cache is demonstrably stale, clear it with `npm cache clean --force` and rerun
+the explicit-version check.
 
 Remote URL mode accepts credential-free public HTTPS repositories from GitHub, GitLab, Bitbucket, and Codeberg. It retains clones under `.bootproof/remotes/` and requires `--provider local --unsafe-local` before executing remote repository code.
 
 Remote repair follows the same rule:
 
 ```bash
-npx bootproof fix https://github.com/user/repository --provider local --unsafe-local
+npx --yes "bootproof@${EXPECTED_VERSION}" fix https://github.com/user/repository --provider local --unsafe-local
 ```
 
 `fix` never mutates the source tree. `apply-repair` is the separate explicit application step and refuses invalid signatures, disallowed paths, and stale preimages.

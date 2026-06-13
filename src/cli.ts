@@ -119,6 +119,7 @@ Usage:
   bootproof registry export <path> --federated              explicitly write a public-candidate receipt
   bootproof attest export <path>                            compatibility alias for local registry export
   bootproof attest check <path>                             verify a registry entry signature
+  bootproof help
   bootproof version
 
 Options for up:
