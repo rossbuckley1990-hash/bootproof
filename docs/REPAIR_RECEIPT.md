@@ -100,6 +100,10 @@ backward-compatible inspection and application.
 
 The receipt uses the same Ed25519 canonical-body pattern as attestations: `signer` and `signature` are excluded from the signed body. Tampering with the repair, before result, or after result invalidates verification.
 
+An intact signature establishes integrity, not authorship by itself. `bootproof verify` reports
+whether the repair receipt signer is this machine, explicitly known, or unknown foreign, using
+the same local trust store as attestation verification.
+
 `beforeAttestationSha256` and both verification hashes are SHA-256 hashes of the corresponding attestation JSON objects.
 
 `fileChanges` is a signed application manifest. It contains only allowlisted boot-plumbing files and binds the expected preimage and verified after-content to SHA-256 hashes. `preconditions` binds read-only source inputs, such as the repository Compose file from which a repaired copy was derived.

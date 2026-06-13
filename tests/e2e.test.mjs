@@ -8,7 +8,7 @@ import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
-import { buildAttestation, writeAttestation } from "../dist/proof.js";
+import { buildAttestation, signerFingerprint, writeAttestation } from "../dist/proof.js";
 import { createRepairCommand } from "../dist/repair-safety.js";
 
 const CLI = path.resolve("dist/cli.js");
@@ -91,6 +91,52 @@ function freshCopy(name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bp-e2e-"));
   fs.cpSync(path.join(FIX, name), tmp, { recursive: true });
   return tmp;
+}
+
+function isolatedHome() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "bp-home-"));
+  return {
+    home,
+    env: { HOME: home, USERPROFILE: home },
+  };
+}
+
+function freshEd25519Signer() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+  return {
+    privateKey,
+    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+  };
+}
+
+function resignAttestation(attestation, signer) {
+  const { signature: _signature, signer: _embeddedSigner, ...body } = attestation;
+  return {
+    ...body,
+    signer: { publicKey: signer.publicKeyPem, algorithm: "ed25519" },
+    signature: crypto.sign(null, Buffer.from(JSON.stringify(body)), signer.privateKey).toString("base64"),
+  };
+}
+
+function resignRepairReceipt(receipt, signer) {
+  const { signature: _signature, signer: _embeddedSigner, ...body } = receipt;
+  return {
+    ...body,
+    signer: { publicKey: signer.publicKeyPem, algorithm: "ed25519" },
+    signature: crypto.sign(null, Buffer.from(JSON.stringify(body)), signer.privateKey).toString("base64"),
+  };
+}
+
+function resignRegistryEntry(entry, signer) {
+  const { signature: _signature, ...body } = entry;
+  return {
+    ...body,
+    signature: {
+      algorithm: "ed25519",
+      publicKey: signer.publicKeyPem,
+      value: crypto.sign(null, Buffer.from(JSON.stringify(body)), signer.privateKey).toString("base64"),
+    },
+  };
 }
 
 function createCliDiffRepo() {
@@ -502,7 +548,7 @@ test("e2e: real boot, observed health, signed attestation that verifies", async 
   assert.ok(att.signature, "attestation must be signed");
   assert.ok(att.observed.some(o => o.kind === "health" && o.ok), "health must be an observed step");
   const v = run(["verify", repo]);
-  assert.match(v.out, /signature valid/);
+  assert.match(v.out, /signature intact, signer: this machine/);
 });
 
 test("parent environment including RAILS_ENV and PATH reaches the app process", async () => {
@@ -635,7 +681,7 @@ test("honesty: early refusal fixture writes signed proof that explains and verif
 
   const explained = run(["explain", attestation]);
   assert.match(explained.out, /Failure class: not_an_application/);
-  assert.match(explained.out, /Trust level: local_developer_signed/);
+  assert.match(explained.out, /Attested trust claim: local_developer_signed/);
   assert.match(explained.out, /What happened:/);
   assert.match(explained.out, /Why BootProof refused:/);
   assert.match(explained.out, /Safe next step:/);
@@ -643,11 +689,172 @@ test("honesty: early refusal fixture writes signed proof that explains and verif
 
   const verified = run(["verify", attestation]);
   assert.equal(verified.code, 0);
-  assert.match(verified.out, /signature valid/);
+  assert.match(verified.out, /signature intact, signer: this machine/);
 
   for (const name of [".env", ".env.local", ".env.development", ".env.production"]) {
     assert.ok(!fs.existsSync(path.join(repo, name)), `${name} must not be written`);
   }
+});
+
+test("signature trust: forged claims re-signed by a fresh key remain unknown until explicitly pinned", () => {
+  const { home, env } = isolatedHome();
+  const repo = freshCopy("early-refusal-attestation");
+  const generated = run(["up", repo, "--provider", "local", "--unsafe-local", "--ci"], true, env);
+  assert.equal(generated.code, 1, generated.out);
+  const attestationPath = path.join(repo, ".bootproof", "attestation.json");
+  const original = JSON.parse(fs.readFileSync(attestationPath, "utf8"));
+
+  const self = run(["verify", attestationPath, "--ci"], false, env);
+  assert.equal(self.code, 0, self.out);
+  assert.match(self.out, /signature intact, signer: this machine/);
+  assert.doesNotMatch(self.out, /trust-on-first-use/i);
+
+  const attacker = freshEd25519Signer();
+  const forged = structuredClone(original);
+  forged.result.booted = true;
+  forged.result.healthVerified = true;
+  const resigned = resignAttestation(forged, attacker);
+  const forgedPath = path.join(repo, ".bootproof", "forged-attestation.json");
+  fs.writeFileSync(forgedPath, JSON.stringify(resigned, null, 2) + "\n");
+
+  const unknown = run(["verify", forgedPath, "--ci"], false, env);
+  assert.equal(unknown.code, 0, unknown.out);
+  assert.match(unknown.out, /signature intact, signer: UNKNOWN — integrity only, not a trusted signer/);
+  assert.doesNotMatch(unknown.out, /trust-on-first-use/i);
+  assert.equal(fs.existsSync(path.join(home, ".bootproof", "known_signers.json")), false);
+
+  const strictUnknown = run(["verify", forgedPath, "--require-known-signer", "--ci"], true, env);
+  assert.equal(strictUnknown.code, 1, strictUnknown.out);
+  assert.match(strictUnknown.out, /signer: UNKNOWN/);
+
+  const fingerprint = signerFingerprint(attacker.publicKeyPem);
+  const foreignFailedPath = path.join(repo, ".bootproof", "foreign-failed-attestation.json");
+  fs.writeFileSync(foreignFailedPath, JSON.stringify(resignAttestation(original, attacker), null, 2) + "\n");
+  const trusted = run(["verify", foreignFailedPath, "--trust-signer", "--ci"], false, env);
+  assert.equal(trusted.code, 0, trusted.out);
+  assert.match(trusted.out, new RegExp(`Trusting signer: ${fingerprint}`));
+  assert.match(trusted.out, new RegExp(`signature intact, signer: known \\(${fingerprint}\\)`));
+
+  const known = run(["verify", foreignFailedPath, "--require-known-signer", "--ci"], false, env);
+  assert.equal(known.code, 0, known.out);
+  assert.match(known.out, new RegExp(`signature intact, signer: known \\(${fingerprint}\\)`));
+  const store = JSON.parse(fs.readFileSync(path.join(home, ".bootproof", "known_signers.json"), "utf8"));
+  assert.equal(store.schema, "bootproof/known-signers/v1");
+  assert.ok(!Number.isNaN(Date.parse(store.signers[fingerprint].firstSeenAt)));
+
+  const tampered = structuredClone(original);
+  tampered.result.booted = true;
+  const tamperedPath = path.join(repo, ".bootproof", "tampered-attestation.json");
+  fs.writeFileSync(tamperedPath, JSON.stringify(tampered, null, 2) + "\n");
+  const invalid = run(["verify", tamperedPath, "--ci"], true, env);
+  assert.equal(invalid.code, 1, invalid.out);
+  assert.match(invalid.out, /signature INVALID/);
+});
+
+test("signature trust: directory verification warns and fails strict mode for a cross-repo replay", () => {
+  const { env } = isolatedHome();
+  const sourceRepo = freshCopy("early-refusal-attestation");
+  execFileSync("git", ["init", "-q"], { cwd: sourceRepo });
+  execFileSync("git", ["config", "user.name", "BootProof Test"], { cwd: sourceRepo });
+  execFileSync("git", ["config", "user.email", "bootproof@example.invalid"], { cwd: sourceRepo });
+  execFileSync("git", ["add", "."], { cwd: sourceRepo });
+  execFileSync("git", ["commit", "-q", "-m", "source repository"], { cwd: sourceRepo });
+
+  const generated = run(["up", sourceRepo, "--provider", "local", "--unsafe-local", "--ci"], true, env);
+  assert.equal(generated.code, 1, generated.out);
+  const sourceAttestationPath = path.join(sourceRepo, ".bootproof", "attestation.json");
+  const attestation = JSON.parse(fs.readFileSync(sourceAttestationPath, "utf8"));
+  const attestedCommit = attestation.repo.commit;
+  assert.ok(attestedCommit);
+
+  const targetRepo = freshCopy("early-refusal-attestation");
+  fs.writeFileSync(path.join(targetRepo, "unrelated.txt"), "different repository\n");
+  execFileSync("git", ["init", "-q"], { cwd: targetRepo });
+  execFileSync("git", ["config", "user.name", "BootProof Test"], { cwd: targetRepo });
+  execFileSync("git", ["config", "user.email", "bootproof@example.invalid"], { cwd: targetRepo });
+  execFileSync("git", ["add", "."], { cwd: targetRepo });
+  execFileSync("git", ["commit", "-q", "-m", "unrelated repository"], { cwd: targetRepo });
+  const targetAttestationPath = path.join(targetRepo, ".bootproof", "attestation.json");
+  fs.mkdirSync(path.dirname(targetAttestationPath), { recursive: true });
+  fs.copyFileSync(sourceAttestationPath, targetAttestationPath);
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetRepo, encoding: "utf8" }).trim();
+  assert.notEqual(head, attestedCommit);
+
+  const warned = run(["verify", targetRepo, "--ci"], false, env);
+  assert.equal(warned.code, 0, warned.out);
+  assert.match(warned.out, /signature intact, signer: this machine/);
+  assert.match(
+    warned.out,
+    new RegExp(`does not describe the repository's current commit \\(${attestedCommit.slice(0, 8)} vs ${head.slice(0, 8)}\\)`),
+  );
+  assert.match(warned.out, /it is not proof of the current working tree/);
+
+  const strict = run(["verify", targetRepo, "--strict", "--ci"], true, env);
+  assert.equal(strict.code, 1, strict.out);
+  assert.match(strict.out, /not proof of the current working tree/);
+});
+
+test("signature trust: repair receipts and registry entries use the same signer tiers", () => {
+  const { env } = isolatedHome();
+  const repo = freshCopy("early-refusal-attestation");
+  const generated = run(["up", repo, "--provider", "local", "--unsafe-local", "--ci"], true, env);
+  assert.equal(generated.code, 1, generated.out);
+
+  const misplacedTrustFlag = run(["attest", "export", repo, "--trust-signer", "--ci"], true, env);
+  assert.equal(misplacedTrustFlag.code, 1, misplacedTrustFlag.out);
+  assert.match(misplacedTrustFlag.out, /--trust-signer is supported only by attest check/);
+
+  const exported = run(["attest", "export", repo, "--ci"], false, env);
+  assert.equal(exported.code, 0, exported.out);
+  const selfRegistry = run(["attest", "check", repo, "--ci"], false, env);
+  assert.match(selfRegistry.out, /signature intact, signer: this machine/);
+
+  const attacker = freshEd25519Signer();
+  const registryPath = path.join(repo, ".bootproof", "registry-entry.json");
+  const registryEntry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  fs.writeFileSync(registryPath, JSON.stringify(resignRegistryEntry(registryEntry, attacker), null, 2) + "\n");
+  const foreignRegistry = run(["attest", "check", repo, "--require-known-signer", "--ci"], true, env);
+  assert.equal(foreignRegistry.code, 1, foreignRegistry.out);
+  assert.match(foreignRegistry.out, /signature intact, signer: UNKNOWN/);
+
+  const receipt = {
+    schema: "bootproof/repair-receipt/v1",
+    repairId: "foreign-receipt",
+    createdAt: "2026-06-13T00:00:00.000Z",
+    bootproofVersion: "0.3.0",
+    beforeFailureClass: "unknown_failure",
+    beforeEvidenceHash: "sha256:test",
+    proposedAction: {
+      actionType: "instruction",
+      mutationScope: "none",
+      riskLevel: "low",
+      requiresApproval: false,
+      instruction: "Review the failure.",
+      explanation: "Test receipt",
+      evidenceRefs: [],
+      deterministic: true,
+      source: "deterministic_playbook",
+      approvalPrompt: "",
+      blockedReason: "",
+      verificationStep: "Rerun BootProof.",
+    },
+    actionType: "instruction",
+    mutationScope: "none",
+    riskLevel: "low",
+    userApprovalRequired: false,
+    applyResult: { status: "not_applied", exitCode: null, evidence: "" },
+    progressed: false,
+    verified: false,
+    explanation: "Test receipt",
+    redactionsApplied: [],
+    signer: null,
+    signature: null,
+  };
+  const receiptPath = path.join(repo, ".bootproof", "foreign-repair-receipt.json");
+  fs.writeFileSync(receiptPath, JSON.stringify(resignRepairReceipt(receipt, attacker), null, 2) + "\n");
+  const foreignReceipt = run(["verify", receiptPath, "--require-known-signer", "--ci"], true, env);
+  assert.equal(foreignReceipt.code, 1, foreignReceipt.out);
+  assert.match(foreignReceipt.out, /signature intact, signer: UNKNOWN/);
 });
 
 test("machine interface: --json emits one strict failed result object", () => {
@@ -984,7 +1191,7 @@ test("remote mode clones GitHub sources but refuses execution without the existi
   assert.equal(att.result.healthVerified, false);
   assert.deepEqual(att.observed, []);
   const verified = run(["verify", attestationPath], false, remote.env, remote.cwd);
-  assert.match(verified.out, /signature valid/);
+  assert.match(verified.out, /signature intact, signer: this machine/);
   assert.match(verified.out, /Replay requires explicit host execution acknowledgement/);
 
   const replay = run(["up", att.repo.path, "--ci", "--json"], true, remote.env, remote.cwd);
@@ -1384,7 +1591,7 @@ test("fix MVP requires uppercase Y, writes receipts, and records changed-failure
   assert.equal(receipt.progressed, true);
   assert.equal(receipt.verified, false);
   assert.equal(fs.readFileSync(protectedEnv, "utf8"), "REAL_SECRET=preserve\n");
-  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature valid/);
+  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature intact, signer: this machine/);
 });
 
 test("fix MVP records the safe RAILS_ENV instruction without mutating protected env files", () => {
@@ -1564,7 +1771,7 @@ test("fix --ai requires two uppercase approvals, reruns BootProof, and records a
   assert.equal(receipt.verified, false);
   assert.equal(fs.existsSync(path.join(repo, ".bootproof", "repair-after-attestation.json")), true);
   assert.equal(fs.readFileSync(protectedEnv, "utf8"), "REAL_SECRET=preserve\n");
-  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature valid/);
+  assert.match(run(["verify", path.join(repo, ".bootproof", "repair-receipt.json")]).out, /signature intact, signer: this machine/);
 });
 
 test("bootproof up remains zero-AI even when a provider key and fetch shim exist", () => {
@@ -1710,13 +1917,13 @@ test("repair: conflicting repository Compose port produces signed verified recei
     assert.equal(receipt.failure.beforeAttestationSha256, beforeAttestationHash);
     assert.equal(receipt.verification.before.attestationSha256, beforeAttestationHash);
     assert.equal(receipt.verification.after.attestationSha256, afterAttestationHash);
-    assert.match(run(["verify", path.join(repo, result.afterAttestationPath)]).out, /signature valid/);
+    assert.match(run(["verify", path.join(repo, result.afterAttestationPath)]).out, /signature intact, signer: this machine/);
 
     const patch = fs.readFileSync(path.join(repo, result.patchPath), "utf8");
     assert.match(patch, /docker-compose\.bootproof\.override\.yml/);
     assert.match(patch, /complete repaired copy/);
     assert.doesNotMatch(patch, /!override/);
-    assert.match(run(["verify", receiptPath]).out, /repair receipt signature valid/);
+    assert.match(run(["verify", receiptPath]).out, /signature intact, signer: this machine/);
     assert.match(run(["explain", receiptPath]).out, /Before: NOT VERIFIED — service_port_allocated/);
 
     const applyDryRun = run(["apply-repair", repo, "--dry-run", "--json"], true);
@@ -1806,7 +2013,7 @@ test("repair: declared package manager activation is verified end to end", async
   assert.deepEqual(receipt.repair.fileChanges, []);
   assert.equal(receipt.verification.after.booted, true);
   assert.match(receipt.verification.after.healthObservation, /HTTP 200/);
-  assert.match(run(["verify", path.join(repo, result.receiptPath)]).out, /repair receipt signature valid/);
+  assert.match(run(["verify", path.join(repo, result.receiptPath)]).out, /signature intact, signer: this machine/);
 });
 
 test("repair: Prisma migration preparation is verified end to end", async () => {
@@ -1895,7 +2102,7 @@ test("repair: public GitHub URL runs only through the retained managed clone and
   assert.equal(fs.existsSync(path.join(remote.cwd, result.receiptPath)), true);
   assert.equal(fs.existsSync(path.join(remote.source, ".bootproof")), false);
   assert.equal(hashWorkingTree(remote.source), sourceHash);
-  assert.match(run(["verify", path.join(remote.cwd, result.receiptPath)]).out, /repair receipt signature valid/);
+  assert.match(run(["verify", path.join(remote.cwd, result.receiptPath)]).out, /signature intact, signer: this machine/);
 });
 
 test("repair: public GitLab URL uses the same retained-clone and execution safety gates", async () => {
@@ -2420,7 +2627,7 @@ test("attest export: redacted entry written locally, nothing uploaded, consent m
   assert.equal(entry.schema, "bootproof/registry-entry/v1");
   assert.equal(entry.optInRequired, true);
   const check = run(["attest", "check", repo]);
-  assert.match(check.out, /signature valid/);
+  assert.match(check.out, /signature intact, signer: this machine/);
 });
 
 test("registry export: explicit federated receipt write is local, signed, and opt-in", async () => {

@@ -11,12 +11,14 @@ import { redactText } from "./redact.js";
 import {
   attestationPath,
   buildAttestation,
+  evaluateDetachedSignature,
   gitInfo,
   signDetached,
   TOOL_ID,
   verifyDetached,
   verifySignature,
   writeAttestation,
+  type SignatureTrustResult,
 } from "./proof.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
 import { inferRepo } from "./infer.js";
@@ -234,6 +236,14 @@ function canonicalReceipt(receipt: RepairReceipt): Buffer {
 export function verifyRepairReceipt(receipt: RepairReceipt): boolean {
   if (!receipt.signature || !receipt.signer) return false;
   return verifyDetached(canonicalReceipt(receipt), receipt.signature, receipt.signer.publicKey);
+}
+
+export function evaluateRepairReceiptSignature(receipt: RepairReceipt): SignatureTrustResult {
+  return evaluateDetachedSignature(
+    canonicalReceipt(receipt),
+    receipt.signature,
+    receipt.signer?.publicKey,
+  );
 }
 
 export function sha256Attestation(attestation: Attestation): string {

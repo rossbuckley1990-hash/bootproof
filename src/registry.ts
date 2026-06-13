@@ -8,7 +8,12 @@ import type { Inference, Attestation, FailureClass } from "./types.js";
 import type { RepairReceipt, RepairKind } from "./repair.js";
 import { buildExecutionEnv } from "./exec.js";
 import { redactText } from "./redact.js";
-import { signDetached, verifyDetached } from "./proof.js";
+import {
+  evaluateDetachedSignature,
+  signDetached,
+  verifyDetached,
+  type SignatureTrustResult,
+} from "./proof.js";
 
 export type RegistryMode =
   | "local_export"
@@ -370,6 +375,14 @@ export function verifyRegistryEntry(entry: RegistryEntry): boolean {
   return Boolean(
     entry.signature &&
     verifyDetached(canonicalWithoutSignature(entry), entry.signature.value, entry.signature.publicKey),
+  );
+}
+
+export function evaluateRegistryEntrySignature(entry: RegistryEntry): SignatureTrustResult {
+  return evaluateDetachedSignature(
+    canonicalWithoutSignature(entry),
+    entry.signature?.value,
+    entry.signature?.publicKey,
   );
 }
 
