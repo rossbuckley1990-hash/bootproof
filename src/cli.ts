@@ -5,7 +5,15 @@ import * as readline from "node:readline/promises";
 import { inferRepo } from "./infer.js";
 import { buildPlan, composeFileFor, envExampleFor } from "./plan.js";
 import { up, type UpOptions, type UpOutcome } from "./run.js";
-import { verifySignature, attestationPath, writeAttestation, TOOL_ID } from "./proof.js";
+import {
+  attestationPath,
+  currentGitHead,
+  evaluateAttestationSignature,
+  trustSigner,
+  writeAttestation,
+  TOOL_ID,
+  type SignatureTrustResult,
+} from "./proof.js";
 import { pollHealth } from "./exec.js";
 import { buildExternalHealthAttestation } from "./external-health.js";
 import {
@@ -26,7 +34,7 @@ import {
   buildFederatedReceipt,
   buildRegistryEntry,
   currentGitBranch,
-  verifyRegistryEntry,
+  evaluateRegistryEntrySignature,
   writeFederatedReceipt,
   writeRegistryEntry,
   registryEntryPath,
@@ -38,6 +46,7 @@ import { cloneRemoteTarget, isRemoteTarget, managedRemoteSource, type RemoteClon
 import {
   applyVerifiedRepair,
   executeAiSuggestedRepair,
+  evaluateRepairReceiptSignature,
   latestDeterministicRepairCandidate,
   latestFailedAttestation,
   repairRepo,
@@ -75,8 +84,8 @@ const SUPPORTED_FLAGS: Record<string, ReadonlySet<string>> = {
   fix: new Set(["provider", "unsafe-local", "port", "timeout", "dry-run", "json", "ci", "ai"]),
   up: new Set(["provider", "unsafe-local", "install", "workspace", "port", "timeout", "dry-run", "json", "ci", "command", "external-health"]),
   "verify-url": new Set(["timeout", "json", "ci"]),
-  verify: new Set(["ci"]),
-  attest: new Set(["ci"]),
+  verify: new Set(["ci", "trust-signer", "require-known-signer", "strict"]),
+  attest: new Set(["ci", "trust-signer", "require-known-signer", "strict"]),
   registry: new Set(["mode", "federated", "ci"]),
   explain: new Set(["ci"]),
 };
@@ -152,6 +161,11 @@ Options for diff:
   --base <ref>             base Git commit (default HEAD^)
   --head <ref>             head Git commit (default HEAD)
   --json                   one bootproof/diff-result/v1 JSON object on stdout
+
+Options for verify and attest check:
+  --trust-signer           explicitly pin an intact foreign signer in ~/.bootproof/known_signers.json
+  --require-known-signer   fail when the signer is not this machine or explicitly pinned
+  --strict                 require a known signer and fail directory verification on commit mismatch
 
 Honesty contract: no green check without an observed event; dry runs say "would";
 .env/.env.local are never written; secrets are never invented.
@@ -306,6 +320,45 @@ function printFailure(failureClass: NonNullable<Attestation["result"]["failureCl
 
 function isRepairReceipt(value: unknown): value is RepairReceipt {
   return Boolean(value && typeof value === "object" && (value as { schema?: string }).schema === "bootproof/repair-receipt/v1");
+}
+
+function signatureTrustText(result: SignatureTrustResult): string {
+  if (!result.integrityValid || result.tier === "invalid") return "signature INVALID";
+  if (result.tier === "self") return "signature intact, signer: this machine";
+  if (result.tier === "known") {
+    return `signature intact, signer: known (${result.label ?? result.fingerprint})`;
+  }
+  return "signature intact, signer: UNKNOWN — integrity only, not a trusted signer";
+}
+
+function printSignatureTrust(result: SignatureTrustResult): void {
+  const message = signatureTrustText(result);
+  if (!result.integrityValid) bad(message);
+  else if (result.tier === "unknown-foreign") warn(message);
+  else ok(message);
+}
+
+function maybeTrustSigner(
+  result: SignatureTrustResult,
+  publicKey: string | null | undefined,
+  requested: boolean,
+  reevaluate: () => SignatureTrustResult,
+): SignatureTrustResult {
+  if (!requested || !result.integrityValid || result.tier !== "unknown-foreign" || !publicKey) return result;
+  console.log(`Trusting signer: ${result.fingerprint}`);
+  trustSigner(publicKey);
+  return reevaluate();
+}
+
+function signerTrustFails(result: SignatureTrustResult, requireKnown: boolean): boolean {
+  return !result.integrityValid || (requireKnown && result.tier === "unknown-foreign");
+}
+
+function commitMismatchMessage(attestation: Attestation, repo: string): string | null {
+  const head = currentGitHead(repo);
+  if (!head || attestation.repo.commit === head) return null;
+  const attested = attestation.repo.commit?.slice(0, 8) ?? "none";
+  return `This attestation does not describe the repository's current commit (${attested} vs ${head.slice(0, 8)}); it is not proof of the current working tree.`;
 }
 
 function optionalRepairReceipt(repo: string): RepairReceipt | null {
@@ -909,27 +962,44 @@ async function main() {
   }
 
   if (cmd === "verify") {
-    const p = path.extname(target) === ".json" ? target : attestationPath(target);
+    const directoryTarget = fs.existsSync(target) && fs.statSync(target).isDirectory();
+    const p = directoryTarget ? attestationPath(target) : target;
     if (!fs.existsSync(p)) { bad(`no proof at ${p} — run bootproof up or bootproof fix first`); process.exitCode = 1; return; }
     const proof: unknown = JSON.parse(fs.readFileSync(p, "utf8"));
+    const requireKnownSigner = Boolean(flags["require-known-signer"] || flags.strict);
+    const trustRequested = Boolean(flags["trust-signer"]);
     if (isRepairReceipt(proof)) {
-      const valid = verifyRepairReceipt(proof);
-      (valid ? ok : bad)(`repair receipt signature ${valid ? "valid" : "INVALID"} (ed25519, trust-on-first-use)`);
+      let trust = evaluateRepairReceiptSignature(proof);
+      trust = maybeTrustSigner(
+        trust,
+        proof.signer?.publicKey,
+        trustRequested,
+        () => evaluateRepairReceiptSignature(proof),
+      );
+      printSignatureTrust(trust);
       const summary = proof.verification && proof.repair
         ? `failure=${proof.verification.before.failureClass} repair=${proof.repair.id} after=${proof.verification.after.healthObservation}`
         : `failure=${proof.beforeFailureClass} repair=${proof.repairId} applied=${proof.applyResult.status} progressed=${proof.progressed} verified=${proof.verified}`;
       console.log(`${DIM}${summary}${RESET}`);
-      if (!valid) process.exitCode = 1;
+      if (signerTrustFails(trust, requireKnownSigner)) process.exitCode = 1;
       return;
     }
     const att = proof as Attestation;
-    const sig = verifySignature(att);
-    (sig ? ok : bad)(`signature ${sig ? "valid" : "INVALID"} (ed25519, trust-on-first-use)`);
-    console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
+    let trust = evaluateAttestationSignature(att);
+    trust = maybeTrustSigner(
+      trust,
+      att.signer?.publicKey,
+      trustRequested,
+      () => evaluateAttestationSignature(att),
+    );
+    printSignatureTrust(trust);
+    console.log(`Attested trust claim: ${att.trust?.level ?? "legacy_unspecified"} (signed content; signer tier shown above)`);
+    const commitMismatch = directoryTarget ? commitMismatchMessage(att, target) : null;
+    if (commitMismatch) warn(commitMismatch);
     if (att.verificationMode === "external-health") {
       console.log(`${DIM}attested: classification=${att.classification} bootproofOrchestrated=false at ${att.observedAt ?? att.finishedAt}${RESET}`);
       console.log("This attestation observes an externally managed service; it does not claim BootProof started the application.");
-      if (!sig) process.exitCode = 1;
+      if (signerTrustFails(trust, requireKnownSigner) || (commitMismatch && requireKnownSigner)) process.exitCode = 1;
       return;
     }
     console.log(`${DIM}attested: booted=${att.result.booted} at commit ${att.repo.commit ?? "unknown"} on ${att.environment.os} node ${att.environment.node}${RESET}`);
@@ -940,12 +1010,16 @@ async function main() {
     } else {
       console.log(`Replaying attested plan with bootproof up --provider ${att.plan.provider} would re-verify it on this machine.`);
     }
-    if (att.result.booted) {
+    if (att.result.booted && !commitMismatch && (trust.tier === "self" || trust.tier === "known")) {
       const live = await pollHealth(att.plan.healthUrl, 3000);
       if (live.responded) ok(`bonus observation: ${att.plan.healthUrl} is responding right now (HTTP ${live.status})`);
       else console.log(`${DIM}(app not currently running — attestation describes a past verified run)${RESET}`);
+    } else if (att.result.booted && commitMismatch) {
+      console.log(`${DIM}(live health bonus skipped because the attestation does not match the current commit)${RESET}`);
+    } else if (att.result.booted && trust.tier === "unknown-foreign") {
+      console.log(`${DIM}(live health bonus skipped because the signer is unknown)${RESET}`);
     }
-    if (!sig) process.exitCode = 1;
+    if (signerTrustFails(trust, requireKnownSigner) || (commitMismatch && requireKnownSigner)) process.exitCode = 1;
     return;
   }
 
@@ -997,6 +1071,13 @@ async function main() {
     const sub = positional[0];
     const repo = path.resolve(String(positional[1] ?? "."));
     if (sub === "export") {
+      const verificationFlag = ["trust-signer", "require-known-signer", "strict"]
+        .find(flag => flags[flag] !== undefined);
+      if (verificationFlag) {
+        bad(`--${verificationFlag} is supported only by attest check`);
+        process.exitCode = 1;
+        return;
+      }
       const entry = registryEntryFor(repo, "local_export");
       if (!entry) { bad(`no attestation at ${attestationPath(repo)} — run bootproof up first`); process.exitCode = 1; return; }
       const out = writeRegistryEntry(repo, entry);
@@ -1011,10 +1092,17 @@ async function main() {
       const ep = registryEntryPath(repo);
       if (!fs.existsSync(ep)) { bad(`no registry entry at ${ep}`); process.exitCode = 1; return; }
       const entry = JSON.parse(fs.readFileSync(ep, "utf8"));
-      const valid = verifyRegistryEntry(entry);
-      (valid ? ok : bad)(`registry entry signature ${valid ? "valid" : "INVALID"}`);
+      const requireKnownSigner = Boolean(flags["require-known-signer"] || flags.strict);
+      let trust = evaluateRegistryEntrySignature(entry);
+      trust = maybeTrustSigner(
+        trust,
+        entry.signature?.publicKey,
+        Boolean(flags["trust-signer"]),
+        () => evaluateRegistryEntrySignature(entry),
+      );
+      printSignatureTrust(trust);
       console.log(`${DIM}verified=${entry.verified} class=${entry.failureClass ?? "none"} commit=${entry.commitHash?.slice(0, 8) ?? "?"}${RESET}`);
-      if (!valid) process.exitCode = 1;
+      if (signerTrustFails(trust, requireKnownSigner)) process.exitCode = 1;
       return;
     }
     bad(`unknown attest subcommand: ${sub ?? "(none)"} — use export or check`);
@@ -1026,10 +1114,10 @@ async function main() {
     const p = positional[0] ? path.resolve(positional[0]) : attestationPath(target);
     const proof: unknown = JSON.parse(fs.readFileSync(p, "utf8"));
     if (isRepairReceipt(proof)) {
-      const valid = verifyRepairReceipt(proof);
+      const trust = evaluateRepairReceiptSignature(proof);
       console.log(`${BOLD}Repair receipt explained${RESET}`);
-      console.log(`Signature: ${valid ? "valid" : "INVALID"}`);
-      if (!valid) {
+      console.log(`Signature: ${signatureTrustText(trust).replace(/^signature /, "")}`);
+      if (!trust.integrityValid) {
         console.log("The receipt has been tampered with or is malformed. Its repair claims are not trusted.");
         process.exitCode = 1;
         return;
@@ -1049,7 +1137,14 @@ async function main() {
       return;
     }
     const att = proof as Attestation;
+    const trust = evaluateAttestationSignature(att);
     console.log(`${BOLD}Attestation explained${RESET}`);
+    console.log(`Signature: ${signatureTrustText(trust).replace(/^signature /, "")}`);
+    if (!trust.integrityValid) {
+      console.log("The attestation has been tampered with or is malformed. Its boot claims are not trusted.");
+      process.exitCode = 1;
+      return;
+    }
     if (att.verificationMode === "external-health") {
       console.log(att.result.healthVerified
         ? `This externally managed service was VERIFIED: ${att.result.healthObservation}.`
@@ -1061,7 +1156,7 @@ async function main() {
       return;
     }
     console.log(att.result.booted ? `This run BOOTED: ${att.result.healthObservation}.` : `This run did NOT verify. Failure class: ${att.result.failureClass}.`);
-    console.log(`Trust level: ${att.trust?.level ?? "legacy_unspecified"}`);
+    console.log(`Attested trust claim: ${att.trust?.level ?? "legacy_unspecified"} (signed content; signer tier shown above)`);
     if (!att.result.booted && att.result.failureClass) {
       const diagnosis = diagnoseFailure(att.result.failureClass, att.result.failureEvidence, att.result.explanation);
       console.log(`What happened: ${diagnosis.whatHappened}`);

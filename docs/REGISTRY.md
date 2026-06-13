@@ -28,6 +28,9 @@ A future BootProof indexer could crawl public receipts, verify signatures, and b
 commons of verified boot, failure, and repair knowledge. The crawler and public index do not
 exist in this repository and are not implemented by this command.
 
+`bootproof attest check` distinguishes this machine's signer, explicitly pinned known signers,
+and unknown foreign signers. Signature integrity alone does not establish authorship.
+
 ## Private Cloud Registry
 
 Organisations may later explicitly upload redacted attestations and repair receipts to

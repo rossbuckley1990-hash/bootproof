@@ -16,6 +16,25 @@ import { buildExecutionEnv } from "./exec.js";
 
 export const TOOL_ID = "bootproof@0.3.0";
 
+export type SignerTrustTier = "invalid" | "self" | "known" | "unknown-foreign";
+
+export interface SignatureTrustResult {
+  integrityValid: boolean;
+  tier: SignerTrustTier;
+  fingerprint: string | null;
+  label: string | null;
+}
+
+interface KnownSignerRecord {
+  firstSeenAt: string;
+  label?: string;
+}
+
+interface KnownSignerStore {
+  schema: "bootproof/known-signers/v1";
+  signers: Record<string, KnownSignerRecord>;
+}
+
 export function gitInfo(repo: string): Attestation["repo"] {
   const git = (...args: string[]) => {
     try { return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: buildExecutionEnv() }).trim(); } catch { return null; }
@@ -34,6 +53,10 @@ function signerKeyPath(): string {
   return path.join(os.homedir(), ".bootproof", "signer.json");
 }
 
+export function knownSignersPath(): string {
+  return path.join(os.homedir(), ".bootproof", "known_signers.json");
+}
+
 function loadOrCreateSigner(): { privateKey: crypto.KeyObject; publicKeyPem: string } {
   const p = signerKeyPath();
   if (fs.existsSync(p)) {
@@ -46,6 +69,98 @@ function loadOrCreateSigner(): { privateKey: crypto.KeyObject; publicKeyPem: str
   fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
   fs.writeFileSync(p, JSON.stringify({ privateKeyPem, publicKeyPem }), { mode: 0o600 });
   return { privateKey: crypto.createPrivateKey(privateKeyPem), publicKeyPem };
+}
+
+function localSignerPublicKey(): string | null {
+  const p = signerKeyPath();
+  if (!fs.existsSync(p)) return null;
+  try {
+    const saved = JSON.parse(fs.readFileSync(p, "utf8")) as { publicKeyPem?: unknown };
+    return typeof saved.publicKeyPem === "string" ? saved.publicKeyPem : null;
+  } catch {
+    return null;
+  }
+}
+
+function emptyKnownSignerStore(): KnownSignerStore {
+  return { schema: "bootproof/known-signers/v1", signers: {} };
+}
+
+function readKnownSignerStore(): KnownSignerStore {
+  const p = knownSignersPath();
+  if (!fs.existsSync(p)) return emptyKnownSignerStore();
+  try {
+    const value = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<KnownSignerStore>;
+    if (value.schema !== "bootproof/known-signers/v1" || !value.signers || typeof value.signers !== "object") {
+      return emptyKnownSignerStore();
+    }
+    return { schema: value.schema, signers: value.signers };
+  } catch {
+    return emptyKnownSignerStore();
+  }
+}
+
+export function signerFingerprint(publicKeyPem: string): string {
+  const publicKey = crypto.createPublicKey(publicKeyPem);
+  const spki = publicKey.export({ type: "spki", format: "der" });
+  return `sha256:${crypto.createHash("sha256").update(spki).digest("hex")}`;
+}
+
+export function trustSigner(publicKeyPem: string, label?: string): {
+  fingerprint: string;
+  firstSeenAt: string;
+  label: string | null;
+} {
+  const fingerprint = signerFingerprint(publicKeyPem);
+  const store = readKnownSignerStore();
+  const existing = store.signers[fingerprint];
+  const record: KnownSignerRecord = existing ?? {
+    firstSeenAt: new Date().toISOString(),
+    ...(label ? { label } : {}),
+  };
+  if (label) record.label = label;
+  store.signers[fingerprint] = record;
+  const p = knownSignersPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(p, JSON.stringify(store, null, 2) + "\n", { mode: 0o600 });
+  return {
+    fingerprint,
+    firstSeenAt: record.firstSeenAt,
+    label: record.label ?? null,
+  };
+}
+
+function signerTrust(publicKeyPem: string): Omit<SignatureTrustResult, "integrityValid"> {
+  let fingerprint: string;
+  try {
+    fingerprint = signerFingerprint(publicKeyPem);
+  } catch {
+    return { tier: "invalid", fingerprint: null, label: null };
+  }
+  const localPublicKey = localSignerPublicKey();
+  if (localPublicKey) {
+    try {
+      if (signerFingerprint(localPublicKey) === fingerprint) {
+        return { tier: "self", fingerprint, label: null };
+      }
+    } catch {
+      // A malformed local signer cannot establish trust in a foreign artifact.
+    }
+  }
+  const known = readKnownSignerStore().signers[fingerprint];
+  if (known) return { tier: "known", fingerprint, label: known.label ?? null };
+  return { tier: "unknown-foreign", fingerprint, label: null };
+}
+
+export function evaluateDetachedSignature(
+  body: Buffer,
+  signature: string | null | undefined,
+  publicKeyPem: string | null | undefined,
+): SignatureTrustResult {
+  if (!signature || !publicKeyPem || !verifyDetached(body, signature, publicKeyPem)) {
+    return { integrityValid: false, tier: "invalid", fingerprint: null, label: null };
+  }
+  return { integrityValid: true, ...signerTrust(publicKeyPem) };
 }
 
 function canonicalBody(att: Attestation): Buffer {
@@ -122,9 +237,23 @@ export function verifyDetached(body: Buffer, signature: string, publicKeyPem: st
 
 export function verifySignature(att: Attestation): boolean {
   if (!att.signature || !att.signer) return false;
+  return verifyDetached(canonicalBody(att), att.signature, att.signer.publicKey);
+}
+
+export function evaluateAttestationSignature(att: Attestation): SignatureTrustResult {
+  return evaluateDetachedSignature(canonicalBody(att), att.signature, att.signer?.publicKey);
+}
+
+export function currentGitHead(repo: string): string | null {
   try {
-    return crypto.verify(null, canonicalBody(att), crypto.createPublicKey(att.signer.publicKey), Buffer.from(att.signature, "base64"));
-  } catch { return false; }
+    return execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+      env: buildExecutionEnv(),
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 export function attestationPath(repo: string): string {

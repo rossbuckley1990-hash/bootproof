@@ -18,11 +18,12 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 12. Confidence describes evidence found, not predicted success.
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
 14. A deterministic repair suggestion requires a signature-valid classified failed attestation.
-15. Commands run only after the exact command, mutation scope, and risk are shown and the user types uppercase `Y`. JSON and CI modes never approve commands.
-16. Repair generation never patches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
-17. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
-18. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
-19. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
+15. A valid signature proves the attestation was not altered after signing. It does not, by itself, prove WHO produced it. BootProof distinguishes self-signed, known-signer, and unknown-foreign signatures, and binds directory verification to the repository's current commit.
+16. Commands run only after the exact command, mutation scope, and risk are shown and the user types uppercase `Y`. JSON and CI modes never approve commands.
+17. Repair generation never patches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
+18. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
+19. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
+20. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
 
 These behaviors are enforced by tests.
 
@@ -101,7 +102,17 @@ Current local runs use:
 local_developer_signed
 ```
 
-Local attestations are useful evidence. CI/OIDC attestations are stronger supply-chain proof. BootProof does not pretend local laptop proof is enterprise CI proof.
+The embedded public key proves integrity only. Local verification reports whether that key is
+this machine's signer, an explicitly pinned signer in `~/.bootproof/known_signers.json`, or an
+unknown foreign signer. Pinning uses `bootproof verify <proof> --trust-signer` and never happens
+automatically on first use.
+
+`--require-known-signer` fails on unknown foreign signers. Directory verification compares the
+attested commit with live Git `HEAD`, and `--strict` fails if they differ.
+
+Local attestations are useful evidence. CI/OIDC attestations are stronger supply-chain proof.
+Keyless/OIDC authorship binding is intentionally deferred to the CI/Action work. BootProof does
+not pretend local laptop proof is enterprise CI proof.
 
 `ci_oidc_signed` is reserved for future workload-identity-backed signing. BootProof does not emit it today.
 
