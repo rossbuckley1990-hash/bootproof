@@ -25,6 +25,10 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `go_runtime_missing` | A selected Go service command cannot run because the `go` executable is unavailable. | Install the repository-supported Go version and rerun. |
 | `go_build_failed` | Go module resolution or compilation failed for the selected service. | Inspect the preserved compiler/module evidence and resolve the specific source or dependency error. |
 | `missing_project_cli` | A selected package script references a repository CLI that is unavailable in the prepared development environment. | Complete the repository's documented bootstrap or development-environment setup, then rerun. |
+| `repo_requires_devenv` | Repository setup files identify `devenv sync` as a prerequisite for the project development environment. | Install and configure the documented Sentry devenv tooling, then review `devenv sync` and `direnv allow`. |
+| `missing_devenv_tool` | Sentry's setup script reports that the `devenv` tool is unavailable. | Install devenv through the documented project path before reviewing `devenv sync`. |
+| `missing_direnv_tool` | The project activation path requires `direnv`, but the executable is unavailable. | Install and configure direnv, then review `devenv sync` and run `direnv allow`. |
+| `sentry_virtualenv_not_activated` | Sentry's project virtual environment exists but has not been activated through direnv. | Run `direnv allow` after the documented devenv synchronization step. |
 | `missing_php_runtime` | The repository requires PHP, but the `php` executable is unavailable. | Install a repository-supported PHP version; mention Homebrew only when its presence is evidenced. |
 | `missing_composer` | The repository requires Composer, but the `composer` executable is unavailable. | Install Composer through an evidenced or documented method. |
 | `unsupported_php_version_for_composer_lock` | The current PHP version does not satisfy package constraints recorded in `composer.lock`. | Select a compatible PHP version, then rerun `composer install`; do not edit the lockfile as the first step. |

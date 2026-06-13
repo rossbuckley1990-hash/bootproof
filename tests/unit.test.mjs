@@ -291,6 +291,65 @@ test("missing project CLI failures preserve package script metadata and hybrid g
   );
 });
 
+test("Sentry devenv setup failures classify precisely with setup metadata", () => {
+  const makefile = fs.readFileSync(path.join(FIX, "python-node-sentry-like", "Makefile"), "utf8");
+  const setupScript = fs.readFileSync(path.join(FIX, "python-node-sentry-like", "scripts", "do.sh"), "utf8");
+  assert.match(setupScript, /Please install the devenv tool/);
+  assert.match(setupScript, /Your sentry virtualenv isn't activated/);
+  const setupEvidence = [
+    "projectCli: sentry",
+    "setupFiles: Makefile, scripts/do.sh",
+    makefile,
+  ].join("\n");
+  const required = classifyFailure(setupEvidence);
+  assert.equal(required.class, "repo_requires_devenv");
+  assert.equal(required.metadata.projectCli, "sentry");
+  assert.equal(required.metadata.setupCommand, "devenv sync");
+  assert.equal(required.metadata.activationHint, "direnv allow");
+  assert.deepEqual(required.metadata.setupFiles, ["Makefile", "scripts/do.sh"]);
+
+  const missingDevenvEvidence = [
+    "Please install the devenv tool:",
+    "https://github.com/getsentry/devenv#install",
+    "projectCli: sentry",
+    "setupFiles: Makefile, scripts/do.sh",
+  ].join("\n");
+  const missingDevenv = classifyFailure(missingDevenvEvidence);
+  assert.equal(missingDevenv.class, "missing_devenv_tool");
+  assert.equal(missingDevenv.metadata.missingTool, "devenv");
+
+  const missingDirenvEvidence = [
+    "zsh: command not found: direnv",
+    "projectCli: sentry",
+    "setupFiles: Makefile, scripts/do.sh",
+  ].join("\n");
+  const missingDirenv = classifyFailure(missingDirenvEvidence);
+  assert.equal(missingDirenv.class, "missing_direnv_tool");
+  assert.equal(missingDirenv.metadata.missingTool, "direnv");
+
+  const inactiveEvidence = [
+    "Your sentry virtualenv isn't activated. You need to successfully run 'direnv allow'.",
+    "setupFiles: Makefile, scripts/do.sh",
+  ].join("\n");
+  const inactive = classifyFailure(inactiveEvidence);
+  assert.equal(inactive.class, "sentry_virtualenv_not_activated");
+  assert.equal(inactive.metadata.projectCli, "sentry");
+
+  for (const [failure, evidence] of [
+    [required, setupEvidence],
+    [missingDevenv, missingDevenvEvidence],
+    [missingDirenv, missingDirenvEvidence],
+    [inactive, inactiveEvidence],
+  ]) {
+    assert.match(failure.safeNextStep, /devenv sync/);
+    assert.match(failure.safeNextStep, /direnv allow/);
+    assert.equal(
+      diagnoseFailure(failure.class, evidence, failure.explanation).safeNextStep,
+      failure.safeNextStep,
+    );
+  }
+});
+
 test("PHP and Composer runtime failures classify precisely with conservative guidance", () => {
   const missingPhpEvidence = "zsh: command not found: php";
   const missingPhp = classifyFailure(missingPhpEvidence);
@@ -631,6 +690,7 @@ test("Sentry-like repository is a low-confidence Python/Node hybrid with devserv
     "make-driven",
     "large-hybrid-app",
     "devservices-backed",
+    "devenv-managed",
   ]) {
     assert.ok(inf.stack.includes(stack), `missing stack marker ${stack}`);
   }
@@ -641,6 +701,7 @@ test("Sentry-like repository is a low-confidence Python/Node hybrid with devserv
   assert.ok(inf.frontendMarkers.includes("pnpm-lock.yaml"));
   assert.ok(inf.frontendMarkers.includes("static/"));
   assert.ok(inf.serviceMarkers.includes("devservices/"));
+  assert.ok(inf.serviceMarkers.includes("scripts/do.sh"));
   assert.equal(inf.packageManager, "pnpm");
   assert.equal(inf.appCommand, "pnpm dev");
   assert.equal(inf.selectedPackageScriptName, "dev");
@@ -650,6 +711,10 @@ test("Sentry-like repository is a low-confidence Python/Node hybrid with devserv
   assert.match(inf.appCommandSource, /project CLI sentry readiness not established/);
   assert.match(inf.commandScope, /large Python\/Node hybrid/);
   assert.ok(inf.confidence <= 60, `unready project CLI confidence was ${inf.confidence}`);
+  const plan = buildPlan(inf, "local");
+  const serializedPlan = JSON.stringify(plan);
+  assert.doesNotMatch(serializedPlan, /devenv sync/);
+  assert.doesNotMatch(serializedPlan, /direnv allow/);
 });
 
 test("simple React inference remains on the existing Node frontend path", () => {
@@ -661,6 +726,7 @@ test("simple React inference remains on the existing Node frontend path", () => 
   assert.equal(inf.stack.includes("python-backend"), false);
   assert.equal(inf.stack.includes("large-hybrid-app"), false);
   assert.equal(inf.stack.includes("devservices-backed"), false);
+  assert.equal(inf.stack.includes("devenv-managed"), false);
   assert.equal(inf.appCommand, "npm run dev");
   assert.equal(inf.projectCliCommand, null);
   assert.equal(inf.projectCliReady, null);
@@ -1547,6 +1613,18 @@ test("deterministic fix MVP maps only exact known failures to repair candidates"
     "RAILS_ENV=development bootproof up . --provider local --unsafe-local --install",
   );
   assert.equal(rails.action.patch, null, "missing env guidance must never patch protected env files");
+
+  const devenv = deterministicRepairCandidateFor(attestation(
+    "missing_devenv_tool",
+    "Please install the devenv tool:\nhttps://github.com/getsentry/devenv#install",
+  ));
+  assert.equal(devenv.action.actionType, "instruction");
+  assert.equal(devenv.action.command, null);
+  assert.equal(devenv.action.mutationScope, "host_tool_install");
+  assert.equal(devenv.action.riskLevel, "medium");
+  assert.equal(devenv.action.requiresApproval, true);
+  assert.match(devenv.action.instruction, /devenv sync/);
+  assert.match(devenv.action.instruction, /direnv allow/);
 
   assert.equal(deterministicRepairCandidateFor(attestation(
     "missing_build_tool",
