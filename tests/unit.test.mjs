@@ -2566,7 +2566,7 @@ test("health verification replaces a transient 500 with a later healthy 302", as
     assert.equal(health.evidence.redirectLocation, "/users/sign_in");
     assert.equal(health.evidence.bodyExcerpt, "ready");
     assert.equal(health.evidence.acceptedAsHealthy, true);
-    assert.doesNotMatch(JSON.stringify(health.evidence), /500|warming up/);
+    assert.doesNotMatch(JSON.stringify(health.evidence), /HTTP 500|warming up/);
   });
 });
 

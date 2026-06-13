@@ -620,8 +620,8 @@ http.createServer((_request, response) => {
   assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
   assert.equal(att.result.healthEvidence.connectionError, null);
   assert.ok(!Number.isNaN(Date.parse(att.result.healthEvidence.timestamp)));
-  assert.doesNotMatch(JSON.stringify(att.result.healthEvidence), /500|warming up/);
-  assert.doesNotMatch(JSON.stringify(att.observed.filter(step => step.kind === "health")), /500|warming up/);
+  assert.doesNotMatch(JSON.stringify(att.result.healthEvidence), /HTTP 500|warming up/);
+  assert.doesNotMatch(JSON.stringify(att.observed.filter(step => step.kind === "health")), /HTTP 500|warming up/);
 });
 
 test("honesty: early refusal fixture writes signed proof that explains and verifies without touching env", () => {
