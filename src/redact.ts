@@ -44,8 +44,8 @@ export function redactJsonValue(input: unknown): { value: unknown; applied: stri
     }
     if (typeof value === "string") {
       if (
-        /(?:hash|sha256|commit)$/i.test(key) &&
-        /^[0-9a-f]{40,64}$/i.test(value)
+        /(?:hash|sha256|fingerprint|commit)$/i.test(key) &&
+        /^(?:sha256:)?[0-9a-f]{40,64}$/i.test(value)
       ) {
         return value;
       }

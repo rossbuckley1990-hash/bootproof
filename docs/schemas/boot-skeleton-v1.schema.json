@@ -164,7 +164,12 @@
           }
         },
         "envVars": {
-          "$ref": "#/$defs/stringSet"
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
         },
         "lockfiles": {
           "$ref": "#/$defs/stringSet"

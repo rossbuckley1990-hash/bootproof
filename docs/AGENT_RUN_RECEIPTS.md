@@ -28,7 +28,11 @@ bootproof explain-run <run-id>
 ```
 
 The explanation distinguishes planning-only, approval stops, blocked actions,
-external health verification, and BootProof-orchestrated verification.
+external health verification, and BootProof-orchestrated verification. When
+the initial modern attestation contains a valid
+`bootproof/boot-skeleton/v1` object, the explanation also shows its safe
+structural fields and fingerprint. Legacy attestations without `bootSkeleton`
+remain valid.
 
 Receipts are local only. BootProof redacts secret-like values and local username
 paths before hashing and writing them. It performs no upload, telemetry, or

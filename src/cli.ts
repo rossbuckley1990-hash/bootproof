@@ -8,6 +8,7 @@ import { up, type UpOptions, type UpOutcome } from "./run.js";
 import { verifySignature, attestationPath, writeAttestation, TOOL_ID } from "./proof.js";
 import { pollHealth } from "./exec.js";
 import { buildExternalHealthAttestation } from "./external-health.js";
+import { explainBootSkeleton } from "./boot-skeleton.js";
 import {
   agentPlanPath,
   buildAgentPlan,
@@ -1059,8 +1060,7 @@ async function main() {
     const att = proof as Attestation;
     console.log(`${BOLD}Attestation explained${RESET}`);
     if (att.bootSkeleton) {
-      console.log(`Boot skeleton fingerprint: ${att.bootSkeleton.fingerprint}`);
-      console.log("The fingerprint describes boot-relevant structure; it is not proof of bootability.");
+      for (const line of explainBootSkeleton(att.bootSkeleton)) console.log(line);
     }
     if (att.verificationMode === "external-health") {
       console.log(att.result.healthVerified

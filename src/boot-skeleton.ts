@@ -118,6 +118,219 @@ export function bootSkeletonFingerprint(components: BootSkeletonComponents): `sh
   return `sha256:${hex}`;
 }
 
+const BOOT_SKELETON_KEYS = new Set(["schema", "fingerprint", "components"]);
+const COMPONENT_KEYS = new Set([
+  "runtimes",
+  "packageManagers",
+  "frameworks",
+  "startCommands",
+  "healthCandidates",
+  "services",
+  "ports",
+  "envVars",
+  "lockfiles",
+  "workspaceTopology",
+]);
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function unsupportedKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, path: string): string[] {
+  return Object.keys(value)
+    .filter(key => !allowed.has(key))
+    .map(key => `${path}: unsupported field: ${key}`);
+}
+
+function duplicateEntries(values: unknown[]): boolean {
+  return new Set(values.map(value => JSON.stringify(value))).size !== values.length;
+}
+
+function validateStringSet(value: unknown, path: string, pattern?: RegExp): string[] {
+  if (!Array.isArray(value)) return [`${path} must be an array`];
+  const errors: string[] = [];
+  if (duplicateEntries(value)) errors.push(`${path} must not contain duplicates`);
+  for (const [index, item] of value.entries()) {
+    if (typeof item !== "string" || !item.trim()) {
+      errors.push(`${path}[${index}] must be a non-empty string`);
+    } else if (pattern && !pattern.test(item)) {
+      errors.push(`${path}[${index}] has an invalid format`);
+    }
+  }
+  return errors;
+}
+
+function validateObjectArray(
+  value: unknown,
+  path: string,
+  allowed: ReadonlySet<string>,
+  required: readonly string[],
+  validateEntry: (entry: Record<string, unknown>, path: string) => string[],
+): string[] {
+  if (!Array.isArray(value)) return [`${path} must be an array`];
+  const errors: string[] = [];
+  if (duplicateEntries(value)) errors.push(`${path} must not contain duplicates`);
+  for (const [index, item] of value.entries()) {
+    const itemPath = `${path}[${index}]`;
+    const entry = record(item);
+    if (!entry) {
+      errors.push(`${itemPath} must be an object`);
+      continue;
+    }
+    errors.push(...unsupportedKeys(entry, allowed, itemPath));
+    for (const key of required) {
+      if (!(key in entry)) errors.push(`${itemPath}.${key} is required`);
+    }
+    errors.push(...validateEntry(entry, itemPath));
+  }
+  return errors;
+}
+
+export function validateBootSkeleton(value: unknown): string[] {
+  const skeleton = record(value);
+  if (!skeleton) return ["boot skeleton must be an object"];
+  const errors = unsupportedKeys(skeleton, BOOT_SKELETON_KEYS, "bootSkeleton");
+  for (const key of BOOT_SKELETON_KEYS) {
+    if (!(key in skeleton)) errors.push(`bootSkeleton.${key} is required`);
+  }
+  if (skeleton.schema !== "bootproof/boot-skeleton/v1") errors.push("bootSkeleton.schema is invalid");
+  if (typeof skeleton.fingerprint !== "string" || !/^sha256:[0-9a-f]{64}$/.test(skeleton.fingerprint)) {
+    errors.push("bootSkeleton.fingerprint must match sha256:<64 lowercase hex characters>");
+  }
+
+  const components = record(skeleton.components);
+  if (!components) {
+    errors.push("bootSkeleton.components must be an object");
+    return [...new Set(errors)];
+  }
+  errors.push(...unsupportedKeys(components, COMPONENT_KEYS, "bootSkeleton.components"));
+  for (const key of COMPONENT_KEYS) {
+    if (!(key in components)) errors.push(`bootSkeleton.components.${key} is required`);
+  }
+
+  const versionedKeys = new Set(["family", "major"]);
+  for (const field of ["runtimes", "packageManagers"] as const) {
+    errors.push(...validateObjectArray(
+      components[field],
+      `bootSkeleton.components.${field}`,
+      versionedKeys,
+      ["family", "major"],
+      (entry, itemPath) => [
+        ...(typeof entry.family === "string" && entry.family.trim()
+          ? []
+          : [`${itemPath}.family must be a non-empty string`]),
+        ...(entry.major === null || Number.isInteger(entry.major) && Number(entry.major) >= 0
+          ? []
+          : [`${itemPath}.major must be a non-negative integer or null`]),
+      ],
+    ));
+  }
+
+  errors.push(...validateStringSet(components.frameworks, "bootSkeleton.components.frameworks"));
+  errors.push(...validateObjectArray(
+    components.startCommands,
+    "bootSkeleton.components.startCommands",
+    new Set(["source", "shape"]),
+    ["source", "shape"],
+    (entry, itemPath) => ["source", "shape"].flatMap(key =>
+      typeof entry[key] === "string" && entry[key]!.trim()
+        ? []
+        : [`${itemPath}.${key} must be a non-empty string`]
+    ),
+  ));
+  errors.push(...validateObjectArray(
+    components.healthCandidates,
+    "bootSkeleton.components.healthCandidates",
+    new Set(["protocol", "port", "route"]),
+    ["protocol", "port", "route"],
+    (entry, itemPath) => [
+      ...(["http", "https"].includes(String(entry.protocol)) ? [] : [`${itemPath}.protocol is invalid`]),
+      ...(Number.isInteger(entry.port) && Number(entry.port) >= 1 && Number(entry.port) <= 65535
+        ? []
+        : [`${itemPath}.port must be an integer from 1 to 65535`]),
+      ...(typeof entry.route === "string" && entry.route.startsWith("/")
+        ? []
+        : [`${itemPath}.route must start with /`]),
+    ],
+  ));
+  errors.push(...validateObjectArray(
+    components.services,
+    "bootSkeleton.components.services",
+    new Set(["name", "type"]),
+    ["name", "type"],
+    (entry, itemPath) => ["name", "type"].flatMap(key =>
+      typeof entry[key] === "string" && entry[key]!.trim()
+        ? []
+        : [`${itemPath}.${key} must be a non-empty string`]
+    ),
+  ));
+  errors.push(...validateObjectArray(
+    components.ports,
+    "bootSkeleton.components.ports",
+    new Set(["service", "containerPort", "publishedPort", "protocol"]),
+    ["service", "containerPort", "publishedPort", "protocol"],
+    (entry, itemPath) => [
+      ...(typeof entry.service === "string" && entry.service.trim()
+        ? []
+        : [`${itemPath}.service must be a non-empty string`]),
+      ...(Number.isInteger(entry.containerPort) && Number(entry.containerPort) >= 1 && Number(entry.containerPort) <= 65535
+        ? []
+        : [`${itemPath}.containerPort must be an integer from 1 to 65535`]),
+      ...(entry.publishedPort === null
+        || Number.isInteger(entry.publishedPort) && Number(entry.publishedPort) >= 1 && Number(entry.publishedPort) <= 65535
+        ? []
+        : [`${itemPath}.publishedPort must be an integer from 1 to 65535 or null`]),
+      ...(["tcp", "udp"].includes(String(entry.protocol)) ? [] : [`${itemPath}.protocol is invalid`]),
+    ],
+  ));
+  errors.push(...validateStringSet(
+    components.envVars,
+    "bootSkeleton.components.envVars",
+    /^[A-Z][A-Z0-9_]*$/,
+  ));
+  errors.push(...validateStringSet(components.lockfiles, "bootSkeleton.components.lockfiles"));
+  errors.push(...validateStringSet(components.workspaceTopology, "bootSkeleton.components.workspaceTopology"));
+
+  if (!errors.length) {
+    const expected = bootSkeletonFingerprint(components as unknown as BootSkeletonComponents);
+    if (skeleton.fingerprint !== expected) {
+      errors.push("bootSkeleton.fingerprint does not match its canonical components");
+    }
+  }
+  return [...new Set(errors)];
+}
+
+function versionedMarker(value: { family: string; major: number | null }): string {
+  return value.major === null ? value.family : `${value.family}@${value.major}`;
+}
+
+export function explainBootSkeleton(value: unknown): string[] {
+  const errors = validateBootSkeleton(value);
+  if (errors.length) {
+    return [
+      `Boot skeleton: invalid (${errors.join("; ")}).`,
+      "Structural details were withheld because this boot skeleton does not satisfy the v1 contract.",
+    ];
+  }
+  const skeleton = value as BootSkeleton;
+  const components = skeleton.components;
+  const list = (values: string[]) => values.length ? values.join(", ") : "none";
+  return [
+    `Boot skeleton fingerprint: ${skeleton.fingerprint}`,
+    `Runtime markers: ${list(components.runtimes.map(versionedMarker))}`,
+    `Package managers: ${list(components.packageManagers.map(versionedMarker))}`,
+    `Frameworks: ${list(components.frameworks)}`,
+    `Services: ${list(components.services.map(service => `${service.name} (${service.type})`))}`,
+    `Environment variable names (${components.envVars.length}): ${list(components.envVars)}`,
+    `Health candidates: ${list(components.healthCandidates.map(candidate =>
+      `${candidate.protocol}://<host>:${candidate.port}${candidate.route}`
+    ))}`,
+    "This fingerprint groups structurally similar boot setups; it is not proof of bootability and makes no prediction. Only observed health evidence can prove boot.",
+  ];
+}
+
 function exactMajor(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const match = value.trim().match(/^(?:v|node-|ruby-|python-)?(\d+)(?:\.\d+){0,3}(?:[-+].*)?$/i);
@@ -612,9 +825,12 @@ export function buildBootSkeleton(
     lockfiles: lockfileComponents(repo),
     workspaceTopology: workspaceComponents(repo, pkg),
   }) as BootSkeletonComponents;
-  return {
+  const skeleton: BootSkeleton = {
     schema: "bootproof/boot-skeleton/v1",
     fingerprint: bootSkeletonFingerprint(components),
     components,
   };
+  const errors = validateBootSkeleton(skeleton);
+  if (errors.length) throw new Error(`invalid boot skeleton: ${errors.join("; ")}`);
+  return skeleton;
 }

@@ -27,12 +27,21 @@ Structurally equivalent repositories can therefore share a fingerprint even
 when their names, paths, commits, or safe template values differ. A structural
 change to the boot setup produces a different fingerprint.
 
+The strict machine schema is
+[`schemas/boot-skeleton-v1.schema.json`](schemas/boot-skeleton-v1.schema.json).
+BootProof validates generated skeletons at runtime. `bootproof explain` and
+`bootproof explain-run` show the fingerprint and safe structural components
+when a modern receipt contains one.
+
 ## Honesty Boundary
 
 The fingerprint is content-addressed structural evidence. It is not a
 prediction, a success claim, or proof that a repository boots. BootProof does
 not use fingerprint similarity to issue a green check. Verified boot still
 requires observed health evidence.
+
+Predicted is not proven. Similar fingerprints only identify similar boot
+structure; they do not establish that either repository is healthy.
 
 This implementation performs no corpus lookup, prediction, telemetry, registry
 submission, receipt upload, or Cloud call.

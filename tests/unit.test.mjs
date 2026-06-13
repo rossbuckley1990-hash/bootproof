@@ -15,6 +15,8 @@ import {
   bootSkeletonFingerprint,
   buildBootSkeleton,
   canonicalBootSkeletonJson,
+  explainBootSkeleton,
+  validateBootSkeleton,
 } from "../dist/boot-skeleton.js";
 import {
   buildExecutionEnv,
@@ -2759,6 +2761,7 @@ test("boot skeleton canonicalization is deterministic, structural, redacted, and
   assert.match(first.fingerprint, /^sha256:[0-9a-f]{64}$/);
   assert.equal(first.fingerprint, repeated.fingerprint);
   assert.equal(first.fingerprint, equivalent.fingerprint);
+  assert.deepEqual(validateBootSkeleton(first), []);
   assert.equal(
     canonicalBootSkeletonJson(first.components),
     canonicalBootSkeletonJson(repeated.components),
@@ -2788,6 +2791,40 @@ test("boot skeleton canonicalization is deterministic, structural, redacted, and
     && candidate.port === 5173
     && candidate.route === "/advertised-health"
   ));
+  const explanation = explainBootSkeleton(first).join("\n");
+  assert.match(explanation, new RegExp(first.fingerprint));
+  assert.match(explanation, /Runtime markers: node@20/);
+  assert.match(explanation, /Package managers: pnpm@9/);
+  assert.match(explanation, /Frameworks: vite/);
+  assert.match(explanation, /Services:/);
+  assert.match(explanation, /Environment variable names \(\d+\):/);
+  assert.match(explanation, /Health candidates:/);
+  assert.match(explanation, /not proof of bootability/);
+  assert.match(explanation, /Only observed health evidence can prove boot/);
+  assert.doesNotMatch(explanation, /first-private-value|PROTECTED_ONLY/);
+});
+
+test("boot skeleton runtime validator enforces the strict v1 schema", () => {
+  const repo = createBootSkeletonFixture("validator", { secret: "validator-private-value" });
+  const inference = inferRepo(repo);
+  const valid = buildBootSkeleton(repo, buildPlan(inference, "local"), inference);
+  assert.deepEqual(validateBootSkeleton(valid), []);
+
+  const extraRoot = structuredClone(valid);
+  extraRoot.unexpected = true;
+  assert.ok(validateBootSkeleton(extraRoot).some(error => /unsupported field: unexpected/.test(error)));
+
+  const extraComponent = structuredClone(valid);
+  extraComponent.components.healthCandidates[0].secretValue = "must-not-be-accepted";
+  assert.ok(validateBootSkeleton(extraComponent).some(error => /unsupported field: secretValue/.test(error)));
+
+  const malformedFingerprint = structuredClone(valid);
+  malformedFingerprint.fingerprint = "sha256:not-hex";
+  assert.ok(validateBootSkeleton(malformedFingerprint).some(error => /must match sha256/.test(error)));
+
+  const mismatchedFingerprint = structuredClone(valid);
+  mismatchedFingerprint.components.frameworks.push("different-framework");
+  assert.ok(validateBootSkeleton(mismatchedFingerprint).some(error => /does not match its canonical components/.test(error)));
 });
 
 test("boot skeleton fingerprint changes for a structurally different boot setup", () => {
@@ -2857,6 +2894,16 @@ test("boot skeleton JSON schema is a strict v1 machine interface", () => {
   assert.equal(schema.properties.components.additionalProperties, false);
   assert.ok(schema.required.includes("fingerprint"));
   assert.match(schema.properties.fingerprint.pattern, /sha256/);
+  assert.equal(schema.properties.components.properties.envVars.items.pattern, "^[A-Z][A-Z0-9_]*$");
+
+  const agentSchema = JSON.parse(fs.readFileSync(
+    path.join("docs", "schemas", "agent-run-receipts-v1.schema.json"),
+    "utf8",
+  ));
+  assert.match(
+    agentSchema.$defs.initialReceipt.properties.attestation.description,
+    /Modern attestations include an optional bootSkeleton/,
+  );
 });
 
 test("redaction masks secrets, urls credentials and home paths", async () => {
