@@ -1192,6 +1192,22 @@ test("plan-agent recognizes the Airbyte abctl runbook without executing it", () 
   const repo = path.join(FIX, "airbyte");
   const marker = path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE");
   fs.rmSync(marker, { force: true });
+  const fixtureDescription = fs.readFileSync(
+    path.join(repo, "docs", "bootproof-fixture.md"),
+    "utf8",
+  );
+  for (const expectedMarker of [
+    "abctl",
+    "Docker",
+    "kind",
+    "Kubernetes",
+    "Helm",
+    "/api/v1/health",
+    "credentials",
+    "large orchestration repository",
+  ]) {
+    assert.match(fixtureDescription, new RegExp(expectedMarker, "i"));
+  }
   const plan = buildAgentPlan(repo, { availableTools: new Set() });
 
   assert.equal(plan.currentFailureClass, "airbyte_abctl_managed");
@@ -1263,6 +1279,17 @@ test("plan-agent recognizes the Airbyte abctl runbook without executing it", () 
   assert.ok(plan.candidateNextActions.some(candidate =>
     candidate.classification === "external_health_verification_required" &&
     candidate.command === "bootproof verify-url http://localhost:8001/api/v1/health"
+  ));
+  assert.equal(
+    plan.candidateNextActions.some(candidate =>
+      candidate.command.startsWith("kind create cluster") ||
+      candidate.command.startsWith("helm install")
+    ),
+    false,
+    "Airbyte planning must leave underlying kind/Helm orchestration to abctl",
+  );
+  assert.ok(plan.observedEvidence.some(evidence =>
+    /Documented cluster command: kind create cluster --name bootproof-fixture/.test(evidence)
   ));
   assert.equal(validateAgentPlan(plan).valid, true);
   assert.equal(fs.existsSync(marker), false);
@@ -1561,6 +1588,22 @@ test("shared action risk model classifies commands without allowing risk downgra
   assert.equal(abctl.riskLevel, "high");
   assert.equal(abctl.mutationScope, "kubernetes_cluster");
   assert.equal(abctl.requiresApproval, true);
+
+  for (const command of [
+    createRepairCommand("kind", ["create", "cluster", "--name", "bootproof-fixture"]),
+    createRepairCommand("helm", ["install", "fixture", "chart"]),
+  ]) {
+    const clusterMutation = assessActionRisk({
+      actionType: "command",
+      command,
+      riskLevel: "low",
+      mutationScope: "none",
+    });
+    assert.equal(clusterMutation.riskLevel, "high", command.display);
+    assert.equal(clusterMutation.mutationScope, "kubernetes_cluster", command.display);
+    assert.equal(clusterMutation.requiresApproval, true, command.display);
+    assert.match(clusterMutation.approvalPrompt, /create or modify a local Kubernetes cluster/);
+  }
 
   const migration = assessActionRisk({
     actionType: "command",

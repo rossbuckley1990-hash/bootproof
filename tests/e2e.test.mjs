@@ -843,6 +843,60 @@ test("plan-agent emits an Airbyte runbook plan and executes no Airbyte command",
   ));
 });
 
+test("plan-agent CI mode does not prompt or execute mocked Airbyte orchestration tools", () => {
+  const repo = freshCopy("airbyte");
+  const mockBin = fs.mkdtempSync(path.join(os.tmpdir(), "bp-airbyte-tools-"));
+  const executionMarker = path.join(repo, "AIRBYTE_TOOL_MUST_NOT_EXECUTE");
+  try {
+    for (const tool of ["abctl", "docker", "helm", "java", "kind", "kubectl"]) {
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(mockBin, `${tool}.CMD`),
+          `@echo ${tool}>>"${executionMarker}"\r\n`,
+        );
+      } else {
+        const executable = path.join(mockBin, tool);
+        fs.writeFileSync(
+          executable,
+          `#!/bin/sh\nprintf '%s\\n' '${tool}' >> '${executionMarker}'\n`,
+        );
+        fs.chmodSync(executable, 0o755);
+      }
+    }
+
+    const { out, code } = run(
+      ["plan-agent", repo, "--ci", "--json"],
+      false,
+      {
+        PATH: mockBin,
+        ...(process.platform === "win32" ? { PATHEXT: ".CMD;.EXE" } : {}),
+      },
+    );
+    assert.equal(code, 0);
+    const plan = JSON.parse(out);
+    assert.ok(plan.classifications.includes("airbyte_abctl_managed"));
+    assert.ok(plan.classifications.includes("external_orchestrator_required"));
+    assert.equal(plan.canBootProofOrchestrateDirectly, false);
+    assert.equal(plan.canBootProofVerifyExternally, true);
+    assert.doesNotMatch(out, /Type Y to approve|Run this command\?/);
+    assert.doesNotMatch(out, /"booted"\s*:\s*true|"verified"\s*:\s*true|"success"\s*:\s*true/i);
+    assert.equal(fs.existsSync(executionMarker), false);
+    assert.equal(fs.existsSync(path.join(repo, "PLAN_AGENT_MUST_NOT_EXECUTE")), false);
+
+    const runsDirectory = path.join(repo, ".bootproof", "agent-runs");
+    const [runId] = fs.readdirSync(runsDirectory);
+    const summary = JSON.parse(fs.readFileSync(
+      path.join(runsDirectory, runId, "final-summary.json"),
+      "utf8",
+    ));
+    assert.equal(summary.onlyPlanned, true);
+    assert.equal(summary.verified, false);
+    assert.equal(summary.bootproofOrchestrated, false);
+  } finally {
+    fs.rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
 test("external health verification appends to the latest local agent run", async () => {
   await withHttpServer((_request, response) => {
     response.statusCode = 200;

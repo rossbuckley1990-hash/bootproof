@@ -188,6 +188,47 @@ test("GitHub Action comment markdown distinguishes external health verification"
   assert.match(markdown, /BootProof did not start this service\./);
   assert.match(markdown, /already-running documented environment/);
   assert.match(markdown, /localhost:8001\/api\/v1\/health/);
+  assert.match(markdown, /Status: 200/);
+});
+
+test("external health without observed success never claims BootProof started or verified the service", () => {
+  const proof = attestation({
+    verificationMode: "external-health",
+    bootproofOrchestrated: false,
+    externalHealthUrl: "http://localhost:8001/api/v1/health",
+    observedStatus: null,
+    observedFinalUrl: "http://localhost:8001/api/v1/health",
+    classification: "external_health_unreachable",
+    result: {
+      ...attestation().result,
+      booted: false,
+      healthVerified: false,
+      healthObservation: null,
+      healthEvidence: healthEvidence({
+        requestedUrl: "http://localhost:8001/api/v1/health",
+        statusCode: null,
+        statusText: "",
+        acceptedAsHealthy: false,
+        connectionError: "connection refused",
+      }),
+      failureClass: "external_health_unreachable",
+      failureEvidence: "connection refused",
+      explanation: "External health was not verified. BootProof did not start or orchestrate the service.",
+    },
+  });
+  const markdown = renderComment({
+    result: result({
+      booted: false,
+      healthVerified: false,
+      failureClass: "external_health_unreachable",
+      verificationMode: "external-health",
+      classification: "external_health_unreachable",
+    }),
+    attestation: proof,
+  });
+  assert.match(markdown, /Execution Halted/);
+  assert.match(markdown, /BootProof did not start or orchestrate the service/);
+  assert.doesNotMatch(markdown, /External Health Verified|Verified Boot|Status: ✅ Success/);
 });
 
 test("GitHub Action comment markdown summarises an existing agent plan without execution", () => {
