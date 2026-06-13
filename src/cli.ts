@@ -204,6 +204,7 @@ function machineResult(outcome: UpOutcome, evidencePath: string) {
     observed: outcome.attestation?.observed ?? [],
     explanation: result?.explanation ?? outcome.refusal?.explanation ?? null,
     trust: outcome.attestation?.trust ?? null,
+    bootSkeleton: outcome.attestation?.bootSkeleton ?? null,
     writtenFiles: outcome.writtenFiles,
   };
 }
@@ -243,6 +244,7 @@ function externalMachineResult(attestation: Attestation, evidencePath: string | 
     observed: attestation.observed,
     explanation: attestation.result.explanation,
     trust: attestation.trust,
+    bootSkeleton: attestation.bootSkeleton ?? null,
     writtenFiles: evidencePath ? [evidencePath] : [],
   };
 }
@@ -260,6 +262,9 @@ function printExternalHealthResult(attestation: Attestation, evidencePath: strin
     if (connectionError) console.log(`Connection error: ${connectionError}`);
   }
   console.log("Ownership: externally managed (bootproofOrchestrated=false).");
+  if (attestation.bootSkeleton) {
+    console.log(`Boot skeleton fingerprint: ${attestation.bootSkeleton.fingerprint}`);
+  }
   if (evidencePath) console.log(`Evidence: ${evidencePath}`);
 }
 
@@ -874,6 +879,9 @@ async function main() {
       return;
     }
     printInference(outcome.inference);
+    if (outcome.attestation?.bootSkeleton) {
+      console.log(`  boot skeleton fingerprint: ${outcome.attestation.bootSkeleton.fingerprint}`);
+    }
     console.log("");
     if (outcome.refusal) {
       for (const o of outcome.attestation?.observed ?? []) (o.observation.startsWith("skipped") ? warn : o.ok ? ok : bad)(`${o.id}: ${o.observation}`);
@@ -1050,6 +1058,10 @@ async function main() {
     }
     const att = proof as Attestation;
     console.log(`${BOLD}Attestation explained${RESET}`);
+    if (att.bootSkeleton) {
+      console.log(`Boot skeleton fingerprint: ${att.bootSkeleton.fingerprint}`);
+      console.log("The fingerprint describes boot-relevant structure; it is not proof of bootability.");
+    }
     if (att.verificationMode === "external-health") {
       console.log(att.result.healthVerified
         ? `This externally managed service was VERIFIED: ${att.result.healthObservation}.`
