@@ -1,0 +1,36 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "go-ollama-service",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "go.mod",
+    "main.go",
+    "cmd/",
+    "OLLAMA_HOST",
+    "serve command",
+    "port 11434",
+    "/api/tags"
+  ],
+  "expectedBootProof": {
+    "kind": "classification_and_inference",
+    "values": [
+      "go-backend",
+      "go run . serve",
+      "go_runtime_missing",
+      "go_build_failed",
+      "http://127.0.0.1:11434/",
+      "http://127.0.0.1:11434/api/tags"
+    ]
+  },
+  "safeNextStep": "Use the evidenced Go serve command only when the repository markers support it, then require an observed HTTP response on port 11434.",
+  "repairDisposition": "refused",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "verified_boot_possible",
+  "verificationBasis": "Observed HTTP 200 health from the root or /api/tags can verify the service; Go markers and a running process cannot.",
+  "redactionsApplied": [
+    "no model data included",
+    "no host environment values included",
+    "no local username paths included"
+  ]
+}
+

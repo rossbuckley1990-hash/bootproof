@@ -1,0 +1,36 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "airbyte-abctl-external-orchestrator",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "Airbyte Open Source README marker",
+    "settings.gradle root project airbyte",
+    "airbyte-cdk/",
+    "airbyte-integrations/",
+    "docker-images/",
+    "docs mention abctl",
+    "kind and Helm deployment markers"
+  ],
+  "expectedBootProof": {
+    "kind": "agent_plan",
+    "values": [
+      "airbyte_abctl_managed",
+      "large_orchestration_repo",
+      "external_orchestrator_required",
+      "kind_kubernetes_backed",
+      "helm_deployed",
+      "auth_required"
+    ]
+  },
+  "safeNextStep": "Review host tooling, explicitly approve the high-risk abctl local install step outside bootproof up, then use bootproof verify-url against http://localhost:8001/api/v1/health.",
+  "repairDisposition": "approval_required",
+  "externallyOrchestrated": true,
+  "evidenceOutcome": "verified_boot_possible",
+  "verificationBasis": "An observed successful external health response can verify the already-running service, but BootProof must not claim that it started Airbyte.",
+  "redactionsApplied": [
+    "no credentials output included",
+    "no Kubernetes secrets included",
+    "no copied vendor manifests included"
+  ]
+}
+

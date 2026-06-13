@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/registry-seed-example-v1.schema.json",
+  "title": "BootProof real-world registry seed example",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "name",
+    "source",
+    "structuralMarkers",
+    "expectedBootProof",
+    "safeNextStep",
+    "repairDisposition",
+    "externallyOrchestrated",
+    "evidenceOutcome",
+    "verificationBasis",
+    "redactionsApplied"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bootproof/registry-seed-example/v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "const": "synthetic_minimal_fixture"
+    },
+    "structuralMarkers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "expectedBootProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "values"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "classification",
+            "inference",
+            "classification_and_inference",
+            "agent_plan"
+          ]
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "safeNextStep": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repairDisposition": {
+      "enum": [
+        "automatic",
+        "approval_required",
+        "refused"
+      ]
+    },
+    "externallyOrchestrated": {
+      "type": "boolean"
+    },
+    "evidenceOutcome": {
+      "enum": [
+        "verified_boot_possible",
+        "diagnostic_only"
+      ]
+    },
+    "verificationBasis": {
+      "type": "string",
+      "minLength": 1
+    },
+    "redactionsApplied": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
+

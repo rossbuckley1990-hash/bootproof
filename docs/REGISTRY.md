@@ -52,3 +52,15 @@ The strict schemas are:
 
 - [`schemas/registry-entry-v1.schema.json`](schemas/registry-entry-v1.schema.json)
 - [`schemas/federated-receipt-v1.schema.json`](schemas/federated-receipt-v1.schema.json)
+
+## Documentation Seeds
+
+Small synthetic examples of the real-world classifier and inference coverage live
+under [`examples/registry-seeds/`](examples/registry-seeds/). They use the
+documentation-only
+[`registry-seed-example-v1` schema](schemas/registry-seed-example-v1.schema.json)
+and are explained in [REAL_WORLD_FIXTURES.md](REAL_WORLD_FIXTURES.md).
+
+These examples are not attestations, proof, upload requests, or production
+registry entries. They contain no network behavior and are never submitted
+automatically.

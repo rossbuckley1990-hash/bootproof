@@ -1,0 +1,32 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "rails-bundler",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "Gemfile",
+    "bin/rails",
+    "config/database.yml example marker",
+    "rbenv version is not installed",
+    "Gem::Ext::BuildError",
+    "Failed to build gem native extension"
+  ],
+  "expectedBootProof": {
+    "kind": "classification_and_inference",
+    "values": [
+      "ruby-backend",
+      "missing_ruby_version",
+      "native_extension_compile_failed"
+    ]
+  },
+  "safeNextStep": "Approve installation of the exact repository-required Ruby version or evidenced native build dependency, rerun dependency installation, then require observed Rails HTTP health.",
+  "repairDisposition": "approval_required",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "verified_boot_possible",
+  "verificationBasis": "An observed Rails HTTP response, including an accepted authentication redirect, may verify boot; successful Bundler installation is not proof.",
+  "redactionsApplied": [
+    "no Bundler credentials included",
+    "no database values included",
+    "no copied application configuration included"
+  ]
+}
+

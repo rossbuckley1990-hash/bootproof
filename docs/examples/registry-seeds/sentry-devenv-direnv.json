@@ -1,0 +1,41 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "sentry-devenv-direnv",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "pyproject.toml",
+    "Makefile",
+    "package.json",
+    "pnpm-lock.yaml",
+    "devservices/",
+    "scripts/do.sh mentions devenv",
+    "devenv sync",
+    "direnv allow"
+  ],
+  "expectedBootProof": {
+    "kind": "classification_and_inference",
+    "values": [
+      "python-backend",
+      "node-frontend",
+      "make-driven",
+      "devservices-backed",
+      "devenv-managed",
+      "large-hybrid-app",
+      "repo_requires_devenv",
+      "missing_devenv_tool",
+      "missing_direnv_tool",
+      "sentry_virtualenv_not_activated"
+    ]
+  },
+  "safeNextStep": "Install and configure the documented devenv and direnv tools, review and run devenv sync, activate with direnv allow, and rerun BootProof without automatic setup execution.",
+  "repairDisposition": "approval_required",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "diagnostic_only",
+  "verificationBasis": "Setup-path evidence supports conservative diagnosis only; verified boot requires a later observed application health response.",
+  "redactionsApplied": [
+    "no virtual environment contents included",
+    "no package registry credentials included",
+    "no copied vendor scripts included"
+  ]
+}
+
