@@ -2010,8 +2010,13 @@ test("repair safety JSON schemas are strict machine interfaces", () => {
   assert.ok(receiptSchema.required.includes("source"));
   assert.ok(receiptSchema.required.includes("userApprovalRequired"));
   assert.equal(aiSchema.additionalProperties, false);
+  assert.equal(aiSchema.properties.schema.type, "string");
   assert.equal(aiSchema.properties.schema.const, "bootproof/ai-repair-suggestion/v1");
+  assert.equal(aiSchema.properties.suggested_action_type.type, "string");
+  assert.equal(aiSchema.properties.risk_level.type, "string");
+  assert.equal(aiSchema.properties.requires_human_approval.type, "boolean");
   assert.equal(aiSchema.properties.requires_human_approval.const, true);
+  assert.equal(aiSchema.$defs.patch.properties.format.type, "string");
 });
 
 function aiSuggestion(overrides = {}) {
@@ -2108,6 +2113,39 @@ test("AI repair sends only redacted structured evidence and accepts strict JSON"
   assert.equal(requested.action.deterministic, false);
   assert.equal(requested.action.riskLevel, "medium", "unknown commands cannot be downgraded");
   assert.equal(requested.action.requiresApproval, true);
+});
+
+test("OpenAI AI repair request uses a strict fully typed response format schema", async () => {
+  const attestation = failedAiAttestation("unclassified startup failure");
+  let requestBody;
+  await requestAiRepairSuggestion(attestation, {
+    env: { OPENAI_API_KEY: "test-key" },
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({
+        output_text: JSON.stringify(aiSuggestion()),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const format = requestBody.text.format;
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.name, "bootproof_ai_repair_suggestion");
+  assert.equal(format.strict, true);
+  assert.equal(format.schema.type, "object");
+  assert.equal(format.schema.additionalProperties, false);
+  assert.equal(format.schema.properties.schema.type, "string");
+  assert.equal(
+    format.schema.properties.schema.const,
+    "bootproof/ai-repair-suggestion/v1",
+  );
+  assert.equal(format.schema.properties.suggested_action_type.type, "string");
+  assert.equal(format.schema.properties.risk_level.type, "string");
+  assert.equal(format.schema.properties.requires_human_approval.type, "boolean");
+  assert.equal(
+    format.schema.properties.suggested_patch.anyOf[0].properties.format.type,
+    "string",
+  );
 });
 
 test("AI repair rejects invalid JSON and dangerous suggestions through shared safety", async () => {

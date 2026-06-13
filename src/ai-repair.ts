@@ -90,10 +90,10 @@ const AI_REPAIR_JSON_SCHEMA = {
   additionalProperties: false,
   required: [...SUGGESTION_KEYS],
   properties: {
-    schema: { const: "bootproof/ai-repair-suggestion/v1" },
+    schema: { type: "string", const: "bootproof/ai-repair-suggestion/v1" },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     failure_class: { type: "string", minLength: 1 },
-    suggested_action_type: { enum: ["command", "patch", "instruction"] },
+    suggested_action_type: { type: "string", enum: ["command", "patch", "instruction"] },
     suggested_command: {
       anyOf: [
         {
@@ -116,7 +116,7 @@ const AI_REPAIR_JSON_SCHEMA = {
           additionalProperties: false,
           required: ["format", "content", "files"],
           properties: {
-            format: { const: "unified-diff" },
+            format: { type: "string", const: "unified-diff" },
             content: { type: "string", minLength: 1 },
             files: {
               type: "array",
@@ -130,8 +130,8 @@ const AI_REPAIR_JSON_SCHEMA = {
       ],
     },
     explanation_for_user: { type: "string", minLength: 1 },
-    risk_level: { enum: [...ACTION_RISK_LEVELS] },
-    requires_human_approval: { const: true },
+    risk_level: { type: "string", enum: [...ACTION_RISK_LEVELS] },
+    requires_human_approval: { type: "boolean", const: true },
     why_this_is_safe: { type: "string", minLength: 1 },
     what_to_check_after: { type: "string", minLength: 1 },
   },
