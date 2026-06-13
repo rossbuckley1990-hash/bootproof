@@ -20,6 +20,7 @@ export type FailureClass =
   | "missing_runtime_tool"
   | "go_runtime_missing"
   | "go_build_failed"
+  | "missing_project_cli"
   | "missing_php_runtime"
   | "missing_composer"
   | "unsupported_php_version_for_composer_lock"
@@ -113,6 +114,10 @@ export interface Inference {
   dependencyInstallRequired: boolean;
   appCommand: string | null;
   appCommandSource: string;
+  selectedPackageScriptName: string | null;
+  selectedPackageScriptCommand: string | null;
+  projectCliCommand: string | null;
+  projectCliReady: boolean | null;
   backendCommand: string | null;
   frontendCommand: string | null;
   asset_dev_server_command: string | null;

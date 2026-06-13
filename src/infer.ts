@@ -209,6 +209,45 @@ function pickAppCommand(pkg: any, pm: PackageManager): { command: string | null;
   return { command: null, source: "no dev/start/serve/preview script found", script: null };
 }
 
+function shellSegmentExecutable(segment: string): string | null {
+  let remaining = segment.trim();
+  while (/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+/.test(remaining)) {
+    remaining = remaining.replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+)\s+/, "");
+  }
+  return remaining.match(/^([A-Za-z0-9_.-]+)/)?.[1] ?? null;
+}
+
+function projectCliFromScript(scriptCommand: string, packageManager: PackageManager): string | null {
+  const standardCommands = new Set([
+    "npm", "pnpm", "yarn", "bun", "node", "npx", "corepack",
+    "go", "ruby", "bundle", "make", "python", "python3", "php", "composer",
+    "cd", "echo", "env", "export", "sh", "bash", "true", "false", "test",
+  ]);
+  if (packageManager !== "unknown") standardCommands.add(packageManager);
+  for (const segment of scriptCommand.split(/\s*(?:&&|\|\||;)\s*/)) {
+    const executable = shellSegmentExecutable(segment);
+    if (executable && !standardCommands.has(executable)) return executable;
+  }
+  return null;
+}
+
+function executableAvailable(repo: string, executable: string): boolean {
+  const localBin = path.join(repo, "node_modules", ".bin", executable);
+  if (exists(repo, path.relative(repo, localBin))) return true;
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      if (fs.existsSync(path.join(directory, `${executable}${extension.toLowerCase()}`))
+        || fs.existsSync(path.join(directory, `${executable}${extension.toUpperCase()}`))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function detectNestedFrontend(repo: string): { dir: string; pkg: any } | null {
   const preferred = ["superset-frontend", "frontend", "web", "ui", "client"];
   for (const dir of preferred) {
@@ -326,7 +365,12 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     (exists(repo, "superset/app.py") || exists(repo, "superset/config.py") || /\bflask\b/i.test(pyproject + setupPy + makefile));
   const hasFlask = hasFlaskBackend && (/\bflask\b/i.test(pyproject + setupPy + makefile) || exists(repo, "superset/app.py"));
   const hasDjango = exists(repo, "manage.py") && /\bdjango\b/i.test(pyproject + requirements);
-  const hasPythonBackend = hasFlaskBackend || hasDjango;
+  const hasLargePythonNodeHybrid =
+    exists(repo, "pyproject.toml")
+    && exists(repo, "Makefile")
+    && exists(repo, "package.json")
+    && exists(repo, "pnpm-lock.yaml");
+  const hasPythonBackend = hasFlaskBackend || hasDjango || hasLargePythonNodeHybrid;
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
   const hasRubyBackend = exists(repo, "Gemfile");
   const hasLaravel = exists(repo, "artisan") && Boolean(composer);
@@ -338,11 +382,25 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const goService = detectGoService(repo);
   const rubyCommand = detectRubyCommand(repo);
   const hasMakeDrivenBackend = Boolean(makefile && /^[A-Za-z0-9_.-]+:\s*(?:[^=]|$)/m.test(makefile));
-  const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend || hasLaravelViteFrontend);
+  const hasNodeFrontend = Boolean(pkg) && (
+    isDirectory(repo, "public")
+    || isDirectory(repo, "packages")
+    || exists(repo, "nx.json")
+    || hasGoBackend
+    || hasRubyBackend
+    || hasLaravelViteFrontend
+    || hasLargePythonNodeHybrid
+  );
   const hasReact = Boolean(rootDeps.react || nestedDeps.react);
   const hasReactFrontend = Boolean(nestedFrontend && hasReact);
   const hasCelery = /\bcelery\b/i.test(pyproject + setupPy + makefile + compose);
   const hasCompose = serviceMarkers.length > 0;
+
+  if (hasLargePythonNodeHybrid) {
+    if (isDirectory(repo, "src")) backendMarkers.push("src/");
+    if (isDirectory(repo, "static")) frontendMarkers.push("static/");
+    if (isDirectory(repo, "devservices")) serviceMarkers.push("devservices/");
+  }
 
   if (hasGoBackend) {
     if (exists(repo, "main.go")) backendMarkers.push("main.go");
@@ -359,7 +417,12 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (hasRubyBackend) stack.push("ruby-backend");
   if (hasPhpBackend) stack.push("php-backend");
   if (hasLaravel) stack.push("laravel");
-  if (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend && !hasPhpBackend) stack.push("make-driven");
+  if (
+    hasLargePythonNodeHybrid
+    || (hasMakeDrivenBackend && !hasPythonBackend && !hasGoBackend && !hasRubyBackend && !hasPhpBackend)
+  ) {
+    stack.push("make-driven");
+  }
   if (hasNodeFrontend) stack.push("node-frontend");
   if (hasReactFrontend) stack.push("react-frontend");
   if (hasReact && !hasReactFrontend) stack.push("react");
@@ -371,6 +434,8 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (rootDeps.prisma || rootDeps["@prisma/client"] || exists(repo, "prisma/schema.prisma")) stack.push("prisma");
   if (hasCompose) stack.push("docker-compose");
   if (hasCelery) stack.push("celery");
+  if (hasLargePythonNodeHybrid) stack.push("large-hybrid-app");
+  if (hasLargePythonNodeHybrid && isDirectory(repo, "devservices")) stack.push("devservices-backed");
 
   const setupSteps: string[] = [];
   if (/^\s*superset db upgrade\s*$/m.test(makefile)) setupSteps.push("superset db upgrade");
@@ -393,6 +458,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     goService,
     rubyCommand,
     hasPythonBackend,
+    hasLargePythonNodeHybrid,
     hasFlask,
     hasDjango,
     hasGoBackend,
@@ -571,6 +637,12 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   const pm = detectPackageManager(repo, pkg, nestedFrontend?.dir ?? null);
   const rootApp = pickAppCommand(pkg, pm.pm);
   const rootScriptText = rootApp.script ? String(pkg?.scripts?.[rootApp.script] ?? "") : "";
+  const projectCliCommand = architecture.hasLargePythonNodeHybrid && rootScriptText
+    ? projectCliFromScript(rootScriptText, pm.pm)
+    : null;
+  const projectCliReady = projectCliCommand === null
+    ? null
+    : executableAvailable(repo, projectCliCommand);
   const assetDevServerCommand = architecture.hasLaravelViteFrontend && /\bvite\b/i.test(rootScriptText)
     ? rootApp.command
     : null;
@@ -610,6 +682,8 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ?? (architecture.hasGoBackend && architecture.hasNodeFrontend && rootApp.command ? rootApp.command : null)
     ?? repositoryBackendCommand
     ?? rootApp.command;
+  const selectedProjectCliCommand = rootApp.command === appCommand ? projectCliCommand : null;
+  const selectedProjectCliReady = selectedProjectCliCommand === null ? null : projectCliReady;
   const appCommandSource = architecture.flaskCommand
     ? `Makefile Flask command: ${architecture.flaskCommand}`
     : djangoCommand && appCommand === djangoCommand
@@ -624,7 +698,9 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
         ? architecture.goService.commandSource ?? architecture.goEntrypoint?.source ?? rootApp.source
         : rubyCommand && appCommand === rubyCommand
           ? architecture.rubyCommand?.source ?? rootApp.source
-          : rootApp.source;
+          : selectedProjectCliCommand && selectedProjectCliReady === false
+            ? `${rootApp.source}; project CLI ${selectedProjectCliCommand} readiness not established`
+            : rootApp.source;
   const recognizedApplication =
     architecture.hasPythonBackend ||
     architecture.hasGoBackend ||
@@ -663,6 +739,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ? "multi-workspace development pipeline; no single application health target selected"
     : incompleteAppCommand
     ? "frontend/dev pipeline only; Go backend markers also detected"
+    : architecture.hasLargePythonNodeHybrid && rootApp.command === appCommand
+      ? selectedProjectCliCommand && selectedProjectCliReady === false
+        ? `large Python/Node hybrid package script; project CLI ${selectedProjectCliCommand} readiness not established`
+        : "large Python/Node hybrid package script"
     : architecture.hasFlask && nestedFrontend
       ? "Python/Flask backend command; React frontend and worker require separate orchestration"
     : djangoCommand && appCommand === djangoCommand
@@ -699,6 +779,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
   if (pm.pm !== "unknown" && !pm.evidence.includes("assuming")) confidence += 10;
   if (!portEvidence.includes("assumption")) confidence += 10;
   if (services.length || env.required.length) confidence += 5;
+  if (selectedProjectCliCommand && selectedProjectCliReady === false) confidence = Math.min(confidence, 60);
 
   return {
     repoPath: repo,
@@ -720,6 +801,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     dependencyInstallRequired,
     appCommand,
     appCommandSource,
+    selectedPackageScriptName: rootApp.command === appCommand ? rootApp.script : null,
+    selectedPackageScriptCommand: rootApp.command === appCommand ? rootScriptText || null : null,
+    projectCliCommand: selectedProjectCliCommand,
+    projectCliReady: selectedProjectCliReady,
     backendCommand,
     frontendCommand,
     asset_dev_server_command: assetDevServerCommand,

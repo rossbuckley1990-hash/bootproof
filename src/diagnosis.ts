@@ -236,6 +236,11 @@ export function diagnoseFailure(
         "The selected Go service did not compile or its declared modules could not be resolved.",
         "Inspect the preserved Go compiler or module evidence, resolve the reported issue, then rerun BootProof.",
       );
+    case "missing_project_cli":
+      return preciseFailure(
+        "The selected package script depends on a repository CLI that is not available in the current development environment.",
+        "Prepare the repository's documented development environment or bootstrap services so its project CLI is available, then rerun BootProof.",
+      );
     case "runtime_engine_mismatch":
       return {
         whatHappened: "The available Node.js runtime does not satisfy the repository's declared engine requirement.",

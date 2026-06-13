@@ -102,6 +102,47 @@ function goBuildFailure(evidence: string): FailureClassification | null {
   };
 }
 
+function scriptReferencesCommand(scriptCommand: string, missingCommand: string): boolean {
+  const escaped = missingCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|&&|\\|\\||;)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s]+\\s+)*${escaped}(?:\\s|$)`).test(scriptCommand);
+}
+
+function missingProjectCliFailure(evidence: string): FailureClassification | null {
+  const missingCommand =
+    evidence.match(/(?:^|\n)(?:\/bin\/)?(?:ba|da|z)?sh:\s*([A-Za-z0-9_.-]+):\s*command not found\b/im)?.[1]
+    ?? evidence.match(/(?:^|\n)([A-Za-z0-9_.-]+):\s*command not found\b/im)?.[1];
+  const scriptName = evidence.match(/^scriptName:\s*(.+)$/im)?.[1]?.trim();
+  const scriptCommand = evidence.match(/^scriptCommand:\s*(.+)$/im)?.[1]?.trim();
+  const packageManager = evidence.match(/^packageManager:\s*(npm|pnpm|yarn|bun)$/im)?.[1]?.toLowerCase();
+  const knownRuntimeOrManager = new Set([
+    "npm", "pnpm", "yarn", "bun", "node", "npx", "corepack",
+    "go", "ruby", "bundle", "make", "python", "python3", "php", "composer",
+  ]);
+  if (
+    !missingCommand
+    || knownRuntimeOrManager.has(missingCommand.toLowerCase())
+    || !scriptName
+    || !scriptCommand
+    || !scriptReferencesCommand(scriptCommand, missingCommand)
+  ) {
+    return null;
+  }
+  const pythonNodeHybrid = /^projectContext:\s*python-node-hybrid$/im.test(evidence);
+  return {
+    class: "missing_project_cli",
+    explanation: `The selected ${scriptName} package script requires the project CLI ${missingCommand}, but that command was not available in PATH.`,
+    metadata: {
+      missingCommand,
+      scriptName,
+      scriptCommand,
+      ...(packageManager ? { packageManager } : {}),
+    },
+    safeNextStep: pythonNodeHybrid
+      ? `Prepare the repository's documented Python development environment or bootstrap/devservices setup so the ${missingCommand} project CLI is available, then rerun BootProof.`
+      : `Prepare the repository's documented development environment so the ${missingCommand} project CLI is available, then rerun BootProof.`,
+  };
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -244,6 +285,9 @@ function classifyRealWorldFailure(evidence: string): FailureClassification | nul
 
   const goBuild = goBuildFailure(evidence);
   if (goBuild) return goBuild;
+
+  const missingProjectCli = missingProjectCliFailure(evidence);
+  if (missingProjectCli) return missingProjectCli;
 
   if (missingCommand(evidence, "php")) {
     return {
@@ -498,7 +542,7 @@ export function classifyFailure(evidence: string): FailureClassification {
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "orchestration_not_supported", "go_service_orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
-  "go_runtime_missing", "go_build_failed",
+  "go_runtime_missing", "go_build_failed", "missing_project_cli",
   "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
   "laravel_sqlite_database_missing", "laravel_migrations_required",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",

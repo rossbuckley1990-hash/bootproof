@@ -24,6 +24,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `missing_runtime_tool` | An explicit Ruby, Bundler, Make, Python, PHP, or Composer run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
 | `go_runtime_missing` | A selected Go service command cannot run because the `go` executable is unavailable. | Install the repository-supported Go version and rerun. |
 | `go_build_failed` | Go module resolution or compilation failed for the selected service. | Inspect the preserved compiler/module evidence and resolve the specific source or dependency error. |
+| `missing_project_cli` | A selected package script references a repository CLI that is unavailable in the prepared development environment. | Complete the repository's documented bootstrap or development-environment setup, then rerun. |
 | `missing_php_runtime` | The repository requires PHP, but the `php` executable is unavailable. | Install a repository-supported PHP version; mention Homebrew only when its presence is evidenced. |
 | `missing_composer` | The repository requires Composer, but the `composer` executable is unavailable. | Install Composer through an evidenced or documented method. |
 | `unsupported_php_version_for_composer_lock` | The current PHP version does not satisfy package constraints recorded in `composer.lock`. | Select a compatible PHP version, then rerun `composer install`; do not edit the lockfile as the first step. |

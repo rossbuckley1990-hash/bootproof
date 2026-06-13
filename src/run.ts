@@ -27,6 +27,7 @@ import {
 } from "./exec.js";
 import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue } from "./taxonomy.js";
 import { buildAttestation, writeAttestation } from "./proof.js";
+import { redactText } from "./redact.js";
 
 function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
   if (/(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i.test(evidence)) {
@@ -71,6 +72,19 @@ function recordHealthPort(
     inference.port = port;
     inference.portEvidence = `observed healthy HTTP response at ${url}`;
   }
+}
+
+function packageScriptFailureContext(inference: Inference): string {
+  if (!inference.selectedPackageScriptName || !inference.selectedPackageScriptCommand) return "";
+  return [
+    "Package script context",
+    `scriptName: ${inference.selectedPackageScriptName}`,
+    `scriptCommand: ${redactText(inference.selectedPackageScriptCommand).text}`,
+    `packageManager: ${inference.packageManager}`,
+    inference.stack.includes("python-backend") && inference.stack.includes("node-frontend")
+      ? "projectContext: python-node-hybrid"
+      : "",
+  ].filter(Boolean).join("\n");
 }
 
 
@@ -192,6 +206,10 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   if (opts.command) {
     inference.appCommand = opts.command;
     inference.appCommandSource = "--command override";
+    inference.selectedPackageScriptName = null;
+    inference.selectedPackageScriptCommand = null;
+    inference.projectCliCommand = null;
+    inference.projectCliReady = null;
     inference.commandScope = "explicit --command override";
     inference.incompleteAppCommand = false;
     inference.multiAppCommand = false;
@@ -486,10 +504,11 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         planned.command,
       );
       const portMismatchEvidence = healthCandidatePortMismatchEvidence(portMismatch);
+      const packageScriptContext = packageScriptFailureContext(inference);
       const exit = app.exited();
       if (exit && !health.responded) {
         const processEvidence = app.evidence();
-        const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
+        const evidence = [processEvidenceText(processEvidence), portMismatchEvidence, packageScriptContext].filter(Boolean).join("\n");
         observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, processEvidence));
         const c = classifyFailure(evidence);
         await app.stop();
@@ -509,7 +528,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
       }
       const processEvidence = app.evidence();
-      const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
+      const evidence = [processEvidenceText(processEvidence), portMismatchEvidence, packageScriptContext].filter(Boolean).join("\n");
       const healthFailureMessage = health.responded
         ? `only HTTP ${health.status} observed at ${health.url ?? plan.healthUrl}`
         : `no HTTP response at candidates ${health.candidates.join(", ")} within ${opts.timeoutMs}ms`;
