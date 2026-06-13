@@ -148,6 +148,12 @@ export function diagnoseFailure(
         whyRefused: "The detected application requires backend/frontend or repository-specific orchestration that BootProof cannot yet execute safely.",
         safeNextStep: "Use the repository's documented runbook. Treat this attestation as diagnosis only, not proof of a localhost boot.",
       };
+    case "go_service_orchestration_not_supported":
+      return {
+        whatHappened: explanation,
+        whyRefused: "A Go service was detected, but repository evidence did not establish one safe runnable service command and health contract.",
+        safeNextStep: "Use the repository's documented service command, or rerun with an explicit reviewed --command and health port. Treat this attestation as diagnosis only.",
+      };
     case "auth_required":
       return {
         whatHappened: explanation,
@@ -220,6 +226,16 @@ export function diagnoseFailure(
         whyRefused: "BootProof cannot execute the repository's explicit run path without its declared runtime or build tool.",
         safeNextStep: "Install the required tool at a version supported by the repository, then rerun BootProof.",
       };
+    case "go_runtime_missing":
+      return preciseFailure(
+        "BootProof cannot execute the selected Go service command without the Go runtime.",
+        "Install a Go version supported by the repository, then rerun BootProof.",
+      );
+    case "go_build_failed":
+      return preciseFailure(
+        "The selected Go service did not compile or its declared modules could not be resolved.",
+        "Inspect the preserved Go compiler or module evidence, resolve the reported issue, then rerun BootProof.",
+      );
     case "runtime_engine_mismatch":
       return {
         whatHappened: "The available Node.js runtime does not satisfy the repository's declared engine requirement.",

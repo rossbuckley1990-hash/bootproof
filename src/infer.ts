@@ -38,6 +38,15 @@ interface PackageManagerDetection {
   packageDir: string;
 }
 
+interface GoServiceDetection {
+  ollamaLike: boolean;
+  command: string | null;
+  commandSource: string | null;
+  port: number | null;
+  healthCandidates: string[];
+  markers: string[];
+}
+
 const REPO_COMPOSE_FILES = [
   "docker-compose.yml",
   "docker-compose.yaml",
@@ -239,6 +248,55 @@ function detectGoEntrypoint(repo: string): { commandBase: string; source: string
   };
 }
 
+function detectGoService(repo: string): GoServiceDetection {
+  if (!exists(repo, "go.mod")) {
+    return {
+      ollamaLike: false,
+      command: null,
+      commandSource: null,
+      port: null,
+      healthCandidates: [],
+      markers: [],
+    };
+  }
+
+  const moduleFile = readText(repo, "go.mod");
+  const mainFile = readText(repo, "main.go");
+  const commandFile = readText(repo, "cmd/cmd.go");
+  const routesFile = readText(repo, "server/routes.go");
+  const envConfigFile = readText(repo, "envconfig/config.go");
+  const evidence = [moduleFile, mainFile, commandFile, routesFile, envConfigFile].join("\n");
+  const exactModule = /^module\s+github\.com\/ollama\/ollama\s*$/m.test(moduleFile);
+  const ollamaModule = /^module\s+\S*ollama(?:\/\S*)?\s*$/mi.test(moduleFile);
+  const markers = [
+    exactModule || ollamaModule ? "ollama module" : null,
+    /\bOLLAMA_HOST\b/.test(evidence) ? "OLLAMA_HOST" : null,
+    /\b11434\b/.test(evidence) ? "port 11434" : null,
+    /["'`]\/api\/tags["'`]/.test(evidence) ? "/api/tags" : null,
+    /\bUse:\s*["']serve["']|\bollama serve\b/i.test(evidence) ? "serve command" : null,
+  ].filter((marker): marker is string => marker !== null);
+  const hasRootEntrypoint = exists(repo, "main.go");
+  const hasServeEvidence = markers.includes("serve command");
+  const strongOllamaEvidence = exactModule || markers.length >= 3;
+  const ollamaLike = hasRootEntrypoint && hasServeEvidence && strongOllamaEvidence;
+
+  return {
+    ollamaLike,
+    command: ollamaLike ? "go run . serve" : null,
+    commandSource: ollamaLike ? "Ollama Go service entrypoint: main.go + serve command" : null,
+    port: ollamaLike ? 11434 : null,
+    healthCandidates: ollamaLike
+      ? [
+          "http://127.0.0.1:11434/",
+          "http://localhost:11434/",
+          "http://127.0.0.1:11434/api/tags",
+          "http://localhost:11434/api/tags",
+        ]
+      : [],
+    markers,
+  };
+}
+
 function detectRubyCommand(repo: string): { commandBase: string; source: string } | null {
   if (!exists(repo, "Gemfile") || !exists(repo, "bin/rails")) return null;
   return { commandBase: "bundle exec rails server -b 127.0.0.1", source: "Rails entrypoint: bin/rails" };
@@ -277,6 +335,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const hasLaravelViteFrontend = hasLaravel && Boolean(pkg) && Boolean(viteConfig);
   const makeCommand = detectMakeCommand(repo, makefile);
   const goEntrypoint = detectGoEntrypoint(repo);
+  const goService = detectGoService(repo);
   const rubyCommand = detectRubyCommand(repo);
   const hasMakeDrivenBackend = Boolean(makefile && /^[A-Za-z0-9_.-]+:\s*(?:[^=]|$)/m.test(makefile));
   const hasNodeFrontend = Boolean(pkg) && (isDirectory(repo, "public") || isDirectory(repo, "packages") || exists(repo, "nx.json") || hasGoBackend || hasRubyBackend || hasLaravelViteFrontend);
@@ -284,6 +343,13 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   const hasReactFrontend = Boolean(nestedFrontend && hasReact);
   const hasCelery = /\bcelery\b/i.test(pyproject + setupPy + makefile + compose);
   const hasCompose = serviceMarkers.length > 0;
+
+  if (hasGoBackend) {
+    if (exists(repo, "main.go")) backendMarkers.push("main.go");
+    if (isDirectory(repo, "cmd")) backendMarkers.push("cmd/");
+    if (isDirectory(repo, "server")) backendMarkers.push("server/");
+    backendMarkers.push(...goService.markers);
+  }
 
   const stack: string[] = [];
   if (hasPythonBackend) stack.push("python-backend");
@@ -324,6 +390,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     workerCommand,
     makeCommand,
     goEntrypoint,
+    goService,
     rubyCommand,
     hasPythonBackend,
     hasFlask,
@@ -512,20 +579,22 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     architecture.flaskCommand,
     architecture.makeCommand?.command ?? null,
     architecture.goEntrypoint?.sourceText ?? null,
+    architecture.goService.command,
     architecture.rubyCommand?.commandBase ?? null,
     architecture.sailCommand,
   ];
   const { port, evidence: portEvidence } = detectPort(pkg, repo, commandEvidence, {
     ignorePackageScripts: architecture.hasLaravel,
-    defaultPort: architecture.sailCommand ? 80 : architecture.hasLaravel ? 8000 : 3000,
+    defaultPort: architecture.goService.port
+      ?? (architecture.sailCommand ? 80 : architecture.hasLaravel ? 8000 : 3000),
   });
-  const goCommand = architecture.goEntrypoint
+  const goCommand = architecture.goService.command ?? (architecture.goEntrypoint
     ? [
         architecture.goEntrypoint.commandBase,
         architecture.goEntrypoint.portFlag ? `--port ${port}` : "",
         architecture.goEntrypoint.dataDirFlag ? "--data .bootproof/runtime/go-app" : "",
       ].filter(Boolean).join(" ")
-    : null;
+    : null);
   const rubyCommand = architecture.rubyCommand ? `${architecture.rubyCommand.commandBase} -p ${port}` : null;
   const djangoCommand = architecture.hasDjango ? `python manage.py runserver 127.0.0.1:${port}` : null;
   const laravelCommand = architecture.hasLaravel
@@ -552,7 +621,7 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     : architecture.makeCommand && appCommand === architecture.makeCommand.command
       ? architecture.makeCommand.source
       : goCommand && appCommand === goCommand
-        ? architecture.goEntrypoint?.source ?? rootApp.source
+        ? architecture.goService.commandSource ?? architecture.goEntrypoint?.source ?? rootApp.source
         : rubyCommand && appCommand === rubyCommand
           ? architecture.rubyCommand?.source ?? rootApp.source
           : rootApp.source;
@@ -615,8 +684,10 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     ? []
     : !appCommand && composeHealthCandidates.length
       ? composeHealthCandidates
-      : !appCommand
+    : !appCommand
         ? []
+    : architecture.goService.ollamaLike
+      ? architecture.goService.healthCandidates
     : architecture.hasGoBackend && architecture.hasNodeFrontend
       ? [`http://localhost:${port}/api/health`, `http://localhost:${port}/`]
       : [`http://localhost:${port}/`];
@@ -657,7 +728,11 @@ export function inferRepo(repoPath: string, opts: { workspace?: string } = {}): 
     incompleteAppCommand,
     multiAppCommand,
     port,
-    portEvidence,
+    portEvidence: architecture.goService.port
+      ? "known Ollama service port from repository evidence"
+      : portEvidence,
+    observedPort: null,
+    healthCandidateSource: architecture.goService.ollamaLike ? "known_service" : "inferred",
     healthCandidates,
     services,
     requiredEnv: env.required,

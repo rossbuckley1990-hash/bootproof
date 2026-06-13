@@ -94,6 +94,8 @@ export function buildAttestation(input: {
       healthObservation: input.healthObservation,
       healthEvidence: input.healthEvidence ?? null,
       observedHealthCandidates: input.observedHealthCandidates ?? [],
+      observedPort: input.plan.observedPort ?? null,
+      healthCandidateSource: input.plan.healthCandidateSource ?? "inferred",
       failureClass: input.failureClass,
       failureEvidence: input.failureEvidence,
       explanation: input.explanation,

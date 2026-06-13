@@ -11,12 +11,15 @@ export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 export type FailureClass =
   | "not_an_application"
   | "orchestration_not_supported"
+  | "go_service_orchestration_not_supported"
   | "auth_required"
   | "external_health_unreachable"
   | "runtime_engine_mismatch"
   | "missing_ruby_version"
   | "missing_package_manager"
   | "missing_runtime_tool"
+  | "go_runtime_missing"
+  | "go_build_failed"
   | "missing_php_runtime"
   | "missing_composer"
   | "unsupported_php_version_for_composer_lock"
@@ -56,6 +59,8 @@ export type FailureClass =
   | "unknown_failure";
 
 export type VerificationMode = "bootproof-orchestrated" | "external-health";
+
+export type HealthCandidateSource = "inferred" | "known_service" | "process_output" | "observed";
 
 export type ExternalVerificationClassification =
   | "external_service_verified"
@@ -117,6 +122,8 @@ export interface Inference {
   multiAppCommand: boolean;
   port: number;
   portEvidence: string;
+  observedPort: number | null;
+  healthCandidateSource: HealthCandidateSource;
   healthCandidates: string[];
   services: ServiceNeed[];
   requiredEnv: string[];
@@ -139,6 +146,8 @@ export interface RunPlan {
   steps: PlanStep[];
   healthUrl: string;
   healthCandidates: string[];
+  observedPort: number | null;
+  healthCandidateSource: HealthCandidateSource;
   generatedFiles: { path: string; purpose: string }[];
 }
 
@@ -198,6 +207,8 @@ export interface Attestation {
     healthObservation: string | null;
     healthEvidence: HealthEvidence | null;
     observedHealthCandidates: string[];
+    observedPort: number | null;
+    healthCandidateSource: HealthCandidateSource;
     failureClass: FailureClass | null;
     failureEvidence: string | null;
     explanation: string;

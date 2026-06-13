@@ -15,12 +15,15 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 |---|---|---|
 | `not_an_application` | No trustworthy runnable entrypoint was found. | Select a runnable workspace or add an explicit start command. |
 | `orchestration_not_supported` | An application stack was detected, but no explicit supported entrypoint or source-built Compose web service was found. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
+| `go_service_orchestration_not_supported` | A Go service was detected, but no safe runnable service command and health contract could be established. | Use the documented service command or provide an explicit reviewed override; do not treat detection as boot proof. |
 | `auth_required` | An externally managed health endpoint returned HTTP 401 or 403. | Use a separate unauthenticated health endpoint or verify authentication manually without exposing credentials. |
 | `external_health_unreachable` | An externally managed health endpoint could not be reached or did not return HTTP 2xx/3xx. | Confirm the service and endpoint are reachable, then rerun external verification. |
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |
 | `missing_ruby_version` | The exact Ruby version selected by rbenv is not installed. | Run `rbenv install <version>`. |
 | `missing_package_manager` | The declared package manager executable is absent. | Enable Corepack or install the required manager. |
-| `missing_runtime_tool` | An explicit Go, Ruby, Bundler, Make, PHP, or Composer run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
+| `missing_runtime_tool` | An explicit Ruby, Bundler, Make, Python, PHP, or Composer run path was selected, but the executable is absent. | Install the repository-supported runtime or tool and rerun. |
+| `go_runtime_missing` | A selected Go service command cannot run because the `go` executable is unavailable. | Install the repository-supported Go version and rerun. |
+| `go_build_failed` | Go module resolution or compilation failed for the selected service. | Inspect the preserved compiler/module evidence and resolve the specific source or dependency error. |
 | `missing_php_runtime` | The repository requires PHP, but the `php` executable is unavailable. | Install a repository-supported PHP version; mention Homebrew only when its presence is evidenced. |
 | `missing_composer` | The repository requires Composer, but the `composer` executable is unavailable. | Install Composer through an evidenced or documented method. |
 | `unsupported_php_version_for_composer_lock` | The current PHP version does not satisfy package constraints recorded in `composer.lock`. | Select a compatible PHP version, then rerun `composer install`; do not edit the lockfile as the first step. |
