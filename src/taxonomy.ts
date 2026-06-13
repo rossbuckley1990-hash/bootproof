@@ -145,7 +145,52 @@ function composerLockPhpFailure(evidence: string): FailureClassification | null 
   };
 }
 
+function portInUseFailure(evidence: string): FailureClassification | null {
+  if (
+    !/EADDRINUSE|address already in use|Failed to listen on|listen tcp\b[^\n]*\bbind:/i.test(evidence)
+  ) {
+    return null;
+  }
+  const failedListen = evidence.match(
+    /Failed to listen on\s+(\[[^\]]+\]|[^:\s]+):(\d{1,5})\s+\(reason:\s*Address already in use\)/i,
+  );
+  const tcpListen = evidence.match(
+    /listen tcp\s+(?:(\[[^\]]+\]|[^:\s]*):)?(\d{1,5}):\s*bind:\s*address already in use/i,
+  );
+  const address = evidence.match(
+    /(?:EADDRINUSE|address already in use)[^\n]*?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1?\]?)?:(\d{1,5})\b/i,
+  );
+  const fallbackPort = evidence.match(/(?:EADDRINUSE|address already in use)[^\n]*?:(\d{1,5})\b/i)?.[1]
+    ?? evidence.match(/\b[Pp]ort\s+(\d{1,5})\s+is\s+(?:already\s+)?in use\b/)?.[1];
+  const host = (failedListen?.[1] ?? tcpListen?.[1] ?? address?.[1])?.replace(/^\[|\]$/g, "");
+  const port = failedListen?.[2] ?? tcpListen?.[2] ?? address?.[2] ?? fallbackPort;
+  const command = evidence.match(/^selectedCommand:\s*(.+)$/mi)?.[1]?.trim();
+  const explicitProcessName = evidence.match(/^processName:\s*(.+)$/mi)?.[1]?.trim();
+  const commandExecutable = command
+    ?.replace(/^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, "")
+    .match(/^\s*["']?([^"' \t]+)/)?.[1];
+  const processName = explicitProcessName ?? commandExecutable?.split(/[\\/]/).at(-1);
+  const metadata: FailureMetadata = {};
+  if (port) metadata.port = port;
+  if (host) metadata.host = host;
+  if (command) metadata.command = command;
+  if (processName) metadata.processName = processName;
+  return {
+    class: "port_in_use",
+    explanation: port
+      ? `The application could not bind port ${port} because it is already in use.`
+      : "The application could not bind its requested port because it is already in use.",
+    ...(Object.keys(metadata).length ? { metadata } : {}),
+    safeNextStep: port
+      ? `Identify the process using the port with lsof -i :${port}. Stop it, or rerun the application with a different port.`
+      : "Identify the process using the configured port, stop it, or rerun the application with a different port.",
+  };
+}
+
 function classifyRealWorldFailure(evidence: string): FailureClassification | null {
+  const occupiedPort = portInUseFailure(evidence);
+  if (occupiedPort) return occupiedPort;
+
   const composerPhpFailure = composerLockPhpFailure(evidence);
   if (composerPhpFailure) return composerPhpFailure;
 

@@ -234,11 +234,10 @@ export function diagnoseFailure(
         safeNextStep: "Provide the real required values using the repository's documented configuration path, then rerun BootProof.",
       };
     case "port_in_use":
-      return {
-        whatHappened: "The application port is already in use.",
-        whyRefused: "BootProof could not observe the inferred application owning and serving that port.",
-        safeNextStep: "Stop the process using the port or rerun with an explicit --port value supported by the application.",
-      };
+      return preciseFailure(
+        "BootProof could not observe the selected application owning and serving its requested port.",
+        "Identify the process using the port, stop it, or rerun with a different supported port.",
+      );
     case "docker_unavailable":
       return {
         whatHappened: "The run plan requires Docker, but the Docker daemon or command is unavailable.",

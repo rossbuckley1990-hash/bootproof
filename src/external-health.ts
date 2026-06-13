@@ -215,6 +215,12 @@ export async function buildExternalHealthAttestation(
       }],
       healthUrl: observation.requestedUrl,
       healthCandidates: [observation.requestedUrl],
+      inferredPort: null,
+      overrideCommandPort: null,
+      observedPort: observation.statusCode === null
+        ? null
+        : Number(new URL(observation.finalUrl).port || (new URL(observation.finalUrl).protocol === "https:" ? "443" : "80")),
+      healthCandidateSource: observation.verified ? "observed" : "inferred",
       generatedFiles: [],
     },
     observed: [{

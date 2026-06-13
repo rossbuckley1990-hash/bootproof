@@ -43,7 +43,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `redis_unavailable` | Redis refused or could not accept the connection. | Start Redis and verify the configured host and port. |
 | `postgres_auth_env_missing` | Postgres was reached but authentication or env configuration did not match. | Correct the real database configuration; BootProof will not invent credentials. |
 | `migrations_missing` | The database schema is absent or behind. | Run the repository's documented migration flow. Repair is attempted only for one unambiguous recognized framework. |
-| `port_in_use` | The application port is occupied. | Stop the process or use a supported explicit port. |
+| `port_in_use` | The selected application command could not bind its requested port. | Identify the process with `lsof -i :<port>`, then stop it or use a different supported port. |
 | `native_build_dependency` | An OS toolchain or native dependency is missing. | Install the required build dependency and rerun. |
 | `private_registry_or_auth` | Package installation requires credentials. | Provide real registry credentials outside BootProof. |
 | `tls_or_proxy_interception` | TLS verification is blocked by a proxy or certificate chain. | Configure the trusted CA or use an appropriate network. |

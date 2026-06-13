@@ -54,6 +54,7 @@ export type FailureClass =
   | "unknown_failure";
 
 export type VerificationMode = "bootproof-orchestrated" | "external-health";
+export type HealthCandidateSource = "inferred" | "command_override" | "process_output" | "observed";
 
 export type ExternalVerificationClassification =
   | "external_service_verified"
@@ -114,6 +115,10 @@ export interface Inference {
   incompleteAppCommand: boolean;
   multiAppCommand: boolean;
   port: number;
+  inferredPort: number;
+  overrideCommandPort: number | null;
+  observedPort: number | null;
+  healthCandidateSource: HealthCandidateSource;
   portEvidence: string;
   healthCandidates: string[];
   services: ServiceNeed[];
@@ -137,6 +142,10 @@ export interface RunPlan {
   steps: PlanStep[];
   healthUrl: string;
   healthCandidates: string[];
+  inferredPort: number | null;
+  overrideCommandPort: number | null;
+  observedPort: number | null;
+  healthCandidateSource: HealthCandidateSource;
   generatedFiles: { path: string; purpose: string }[];
 }
 
@@ -196,6 +205,10 @@ export interface Attestation {
     healthObservation: string | null;
     healthEvidence: HealthEvidence | null;
     observedHealthCandidates: string[];
+    inferredPort: number | null;
+    overrideCommandPort: number | null;
+    observedPort: number | null;
+    healthCandidateSource: HealthCandidateSource;
     failureClass: FailureClass | null;
     failureEvidence: string | null;
     explanation: string;

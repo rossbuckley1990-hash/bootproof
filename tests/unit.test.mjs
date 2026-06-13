@@ -36,7 +36,7 @@ import {
   generateAgentRunId,
   readAgentRun,
 } from "../dist/agent-run.js";
-import { packageManagerVersionMatches } from "../dist/run.js";
+import { commandOverrideHealth, packageManagerVersionMatches, up } from "../dist/run.js";
 import { diagnoseFailure } from "../dist/diagnosis.js";
 import { isRemoteTarget, managedRemoteSource, parseGithubRemote, parseRemoteTarget } from "../dist/remote.js";
 import {
@@ -211,6 +211,10 @@ test("infers a runnable node app with evidence", () => {
   assert.equal(inf.appCommand, "npm run start");
   assert.match(inf.appCommandSource, /scripts\.start/);
   assert.equal(inf.port, 3000);
+  assert.equal(inf.inferredPort, 3000);
+  assert.equal(inf.overrideCommandPort, null);
+  assert.equal(inf.observedPort, null);
+  assert.equal(inf.healthCandidateSource, "inferred");
   assert.match(inf.portEvidence, /assumption/, "default port must be labeled as an assumption, not evidence");
 });
 
@@ -232,6 +236,81 @@ test("failure taxonomy classifies real-world evidence strings", () => {
   assert.equal(classifyFailure(fs.readFileSync(path.join(FIX, "service-port-allocated", "evidence.txt"), "utf8")).class, "service_port_allocated");
   assert.equal(classifyFailure("only HTTP 503 observed at http://localhost:3000/").class, "health_http_error");
   assert.equal(classifyFailure("gibberish nobody has seen").class, "unknown_failure");
+});
+
+test("command overrides provide deterministic health candidates and port collision metadata", () => {
+  assert.deepEqual(
+    commandOverrideHealth("php artisan serve --host=127.0.0.1 --port=8000"),
+    {
+      host: "127.0.0.1",
+      port: 8000,
+      healthCandidates: [
+        "http://127.0.0.1:8000/",
+        "http://localhost:8000/",
+      ],
+    },
+  );
+  assert.equal(commandOverrideHealth("php artisan serve"), null);
+
+  const collisionEvidence = [
+    "Failed to listen on 127.0.0.1:8000 (reason: Address already in use)",
+    "selectedCommand: php artisan serve --host=127.0.0.1 --port=8000",
+  ].join("\n");
+  const collision = classifyFailure(collisionEvidence);
+  assert.equal(collision.class, "port_in_use");
+  assert.deepEqual(collision.metadata, {
+    port: "8000",
+    host: "127.0.0.1",
+    command: "php artisan serve --host=127.0.0.1 --port=8000",
+    processName: "php",
+  });
+  assert.match(collision.safeNextStep, /lsof -i :8000/);
+  assert.match(collision.safeNextStep, /different port/);
+  assert.equal(
+    diagnoseFailure(collision.class, collisionEvidence, collision.explanation).safeNextStep,
+    collision.safeNextStep,
+  );
+
+  assert.equal(
+    classifyFailure("listen tcp :4321: bind: address already in use").metadata.port,
+    "4321",
+  );
+  assert.equal(
+    classifyFailure("Error: listen EADDRINUSE: address already in use :::3000").metadata.port,
+    "3000",
+  );
+});
+
+test("Laravel command override replaces stale inferred Vite health port", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-command-health-"));
+  try {
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      scripts: { dev: "vite --port 8080" },
+      devDependencies: { vite: "^6.0.0" },
+    }));
+    const outcome = await up(repo, {
+      provider: "local",
+      unsafeLocal: true,
+      dryRun: true,
+      timeoutMs: 1000,
+      install: false,
+      command: "php artisan serve --host=127.0.0.1 --port=8000",
+    });
+    assert.equal(outcome.inference.inferredPort, 8080);
+    assert.equal(outcome.inference.overrideCommandPort, 8000);
+    assert.equal(outcome.inference.port, 8000);
+    assert.equal(outcome.inference.healthCandidateSource, "command_override");
+    assert.deepEqual(outcome.inference.healthCandidates, [
+      "http://127.0.0.1:8000/",
+      "http://localhost:8000/",
+    ]);
+    assert.ok(!outcome.inference.healthCandidates.includes("http://localhost:8080/"));
+    assert.equal(outcome.plan.inferredPort, 8080);
+    assert.equal(outcome.plan.overrideCommandPort, 8000);
+    assert.equal(outcome.plan.healthCandidateSource, "command_override");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("PHP and Composer runtime failures classify precisely with conservative guidance", () => {

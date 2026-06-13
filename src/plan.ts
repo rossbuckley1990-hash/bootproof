@@ -105,6 +105,10 @@ export function buildPlan(inf: Inference, provider: "docker" | "local"): RunPlan
     steps,
     healthUrl,
     healthCandidates,
+    inferredPort: inf.inferredPort,
+    overrideCommandPort: inf.overrideCommandPort,
+    observedPort: inf.observedPort,
+    healthCandidateSource: inf.healthCandidateSource,
     generatedFiles: [
       ...(composeFileFor(inf) ? [{ path: "docker-compose.bootproof.yml", purpose: "service containers" }] : []),
       ...(envExampleFor(inf) ? [{ path: ".env.bootproof.example", purpose: "suggested local env values (never auto-applied)" }] : []),

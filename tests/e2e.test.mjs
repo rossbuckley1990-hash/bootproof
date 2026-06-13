@@ -522,20 +522,30 @@ http.createServer((_request, response) => response.end("env ok")).listen(process
 test("--command is executed and reflected in terminal output, plan, and attestation", async () => {
   const repo = freshCopy("hello-app");
   const port = await getFreePort();
-  const command = "RAILS_ENV=development node override-server.cjs";
+  const command = `RAILS_ENV=development node override-server.cjs --host=127.0.0.1 --port=${port}`;
   fs.writeFileSync(path.join(repo, "server.js"), "throw new Error('inferred command must not run');");
   fs.writeFileSync(path.join(repo, "override-server.cjs"), `
 const http = require("http");
 if (process.env.RAILS_ENV !== "development") process.exit(2);
-http.createServer((_request, response) => response.end("override ok")).listen(process.env.PORT);
+const portArg = process.argv.find(value => value.startsWith("--port="));
+const hostArg = process.argv.find(value => value.startsWith("--host="));
+const port = Number(portArg.split("=")[1]);
+const host = hostArg.split("=")[1];
+http.createServer((_request, response) => response.end("override ok")).listen(port, host);
 `);
   const { out, code } = run(
-    ["up", repo, "--provider", "local", "--unsafe-local", "--command", command, "--port", String(port), "--timeout", "10000"],
+    ["up", repo, "--provider", "local", "--unsafe-local", "--command", command, "--timeout", "10000"],
     true,
   );
   assert.equal(code, 0);
-  assert.match(out, /selected command: RAILS_ENV=development node override-server\.cjs/);
+  assert.match(out, new RegExp(`selected command: RAILS_ENV=development node override-server\\.cjs --host=127\\.0\\.0\\.1 --port=${port}`));
   assert.match(out, /--command override/);
+  assert.match(out, /inferred port: 3000/);
+  assert.match(out, new RegExp(`override command port: ${port}`));
+  assert.match(out, new RegExp(`observed port: ${port}`));
+  assert.match(out, /health candidate source: observed/);
+  assert.match(out, new RegExp(`health candidates: http://127\\.0\\.0\\.1:${port}/`));
+  assert.doesNotMatch(out, /health candidates: http:\/\/localhost:3000\//);
 
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   const plannedStart = att.plan.steps.find(step => step.kind === "start-app");
@@ -544,6 +554,17 @@ http.createServer((_request, response) => response.end("override ok")).listen(pr
   assert.equal(observedStart.command, command);
   assert.equal(att.result.booted, true);
   assert.equal(att.result.healthVerified, true);
+  assert.equal(att.plan.inferredPort, 3000);
+  assert.equal(att.plan.overrideCommandPort, port);
+  assert.equal(att.plan.observedPort, port);
+  assert.equal(att.plan.healthCandidateSource, "observed");
+  assert.equal(att.plan.healthUrl, `http://127.0.0.1:${port}/`);
+  assert.ok(att.plan.healthCandidates.includes(`http://127.0.0.1:${port}/`));
+  assert.ok(!att.plan.healthCandidates.includes("http://localhost:3000/"));
+  assert.equal(att.result.inferredPort, 3000);
+  assert.equal(att.result.overrideCommandPort, port);
+  assert.equal(att.result.observedPort, port);
+  assert.equal(att.result.healthCandidateSource, "observed");
 });
 
 test("GitLab-style sign-in redirect verifies and replaces transient health errors", async () => {

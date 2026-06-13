@@ -178,6 +178,10 @@ function printInference(inf: ReturnType<typeof inferRepo>) {
   if (inf.appCommand) console.log(`  selected command: ${inf.appCommand} ${DIM}(${inf.appCommandSource})${RESET}`);
   if (inf.preparationCommands.length) console.log(`  preparation: ${inf.preparationCommands.map(command => command.command).join("; ")}`);
   console.log(`  command scope: ${inf.commandScope}`);
+  console.log(`  inferred port: ${inf.inferredPort}`);
+  if (inf.overrideCommandPort !== null) console.log(`  override command port: ${inf.overrideCommandPort}`);
+  if (inf.observedPort !== null) console.log(`  observed port: ${inf.observedPort}`);
+  console.log(`  health candidate source: ${inf.healthCandidateSource}`);
   console.log(`  port: ${inf.port} ${DIM}(${inf.portEvidence})${RESET}`);
   if (inf.healthCandidates.length) console.log(`  health candidates: ${inf.healthCandidates.join(", ")}`);
   if (inf.services.length) console.log(`  services: ${inf.services.map(s => `${s.kind} (${s.evidence})`).join("; ")}`);

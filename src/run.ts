@@ -17,6 +17,7 @@ import {
 } from "./exec.js";
 import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue } from "./taxonomy.js";
 import { buildAttestation, writeAttestation } from "./proof.js";
+import { redactText } from "./redact.js";
 
 function classifyHealthFailure(evidence: string): "health_http_error" | "health_check_timeout" {
   if (/(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i.test(evidence)) {
@@ -120,6 +121,43 @@ function commandWithPort(command: string, port: number): string {
     .replace(/(\bmanage\.py\s+runserver\s+(?:127\.0\.0\.1|localhost):)\d{2,5}\b/, `$1${port}`);
 }
 
+export interface CommandOverrideHealth {
+  host: string;
+  port: number;
+  healthCandidates: string[];
+}
+
+export function commandOverrideHealth(command: string): CommandOverrideHealth | null {
+  const portMatch = command.match(/(?:^|\s)(?:--port(?:=|\s+)|-p\s+)(\d{1,5})(?=\s|$)/i);
+  if (!portMatch) return null;
+  const port = Number(portMatch[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const hostMatch = command.match(/(?:^|\s)--host(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
+  const configuredHost = (hostMatch?.[1] ?? hostMatch?.[2] ?? hostMatch?.[3] ?? "localhost").trim();
+  const host = configuredHost === "0.0.0.0" || configuredHost === "::" || configuredHost === "[::]"
+    ? "localhost"
+    : configuredHost;
+  if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(host)) return null;
+  const urlHost = host === "::1" ? "[::1]" : host;
+  const healthCandidates = [`http://${urlHost}:${port}/`];
+  if (host === "127.0.0.1") healthCandidates.push(`http://localhost:${port}/`);
+  return { host, port, healthCandidates };
+}
+
+function healthPort(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : parsed.protocol === "http:" ? "80" : "");
+    return port ? Number(port) : null;
+  } catch {
+    return null;
+  }
+}
+
+function selectedCommandEvidence(command: string): string {
+  return `selectedCommand: ${redactText(command).text}`;
+}
+
 function unsupportedOrchestrationExplanation(inference: Inference): string | null {
   if (inference.appCommand) return null;
   const sourceComposeServices = inference.composeApplicationServices.filter(service => service.source === "build");
@@ -171,6 +209,16 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       inference.healthCandidates = inference.healthCandidates.map(candidate => candidate.replace(/:\d{2,5}(?=\/)/, `:${opts.port}`));
     } else if (inference.composeHealthCandidates.length) {
       inference.portEvidence = `repository Compose published port retained; --port ${opts.port} was not applied`;
+    }
+  }
+  if (opts.command && inference.appCommand) {
+    const overrideHealth = commandOverrideHealth(inference.appCommand);
+    if (overrideHealth) {
+      inference.overrideCommandPort = overrideHealth.port;
+      inference.port = overrideHealth.port;
+      inference.portEvidence = "derived from --command override";
+      inference.healthCandidates = overrideHealth.healthCandidates;
+      inference.healthCandidateSource = "command_override";
     }
   }
   const plan = buildPlan(inference, opts.provider);
@@ -420,7 +468,12 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const inferredHealthUrl = plan.healthUrl;
       const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs, app.output);
       plan.healthCandidates = health.candidates;
+      inference.healthCandidates = health.candidates;
       if (health.url) plan.healthUrl = health.url;
+      if (health.discoveredCandidates.length > 0) {
+        inference.healthCandidateSource = "process_output";
+        plan.healthCandidateSource = "process_output";
+      }
       const portMismatchEvidence = healthCandidatePortMismatchEvidence(
         detectHealthCandidatePortMismatch(
           inferredHealthUrl,
@@ -431,7 +484,11 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const exit = app.exited();
       if (exit && !health.responded) {
         const processEvidence = app.evidence();
-        const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
+        const evidence = [
+          processEvidenceText(processEvidence),
+          portMismatchEvidence,
+          selectedCommandEvidence(planned.command),
+        ].filter(Boolean).join("\n");
         observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, processEvidence));
         const c = classifyFailure(evidence);
         await app.stop();
@@ -440,6 +497,25 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       observed.push(step(planned.id, "start-app", planned.command, t, null, true, "app process started and was supervised"));
       const ht = new Date().toISOString();
       if (health.evidence?.acceptedAsHealthy) {
+        const observedPort = healthPort(health.evidence.requestedUrl);
+        inference.observedPort = observedPort;
+        plan.observedPort = observedPort;
+        inference.healthCandidateSource = "observed";
+        plan.healthCandidateSource = "observed";
+        plan.healthUrl = health.evidence.requestedUrl;
+        const observedHealthCandidates = [
+          health.evidence.requestedUrl,
+          ...health.candidates.filter(candidate =>
+            candidate !== health.evidence!.requestedUrl
+            && (observedPort === null || healthPort(candidate) === observedPort)
+          ),
+        ];
+        inference.healthCandidates = observedHealthCandidates;
+        plan.healthCandidates = observedHealthCandidates;
+        if (observedPort !== null) {
+          inference.port = observedPort;
+          inference.portEvidence = `observed healthy response at ${health.evidence.requestedUrl}`;
+        }
         const healthStep = health.evidence.redirectLocation
           ? healthStatusLabel(health.evidence)
           : `observed HTTP ${health.evidence.statusCode} at ${health.evidence.requestedUrl} after ${health.elapsedMs}ms (${health.attempts} attempts)`;
@@ -450,7 +526,11 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
         return { inference, plan, writtenFiles, attestation: att, refusal: null };
       }
       const processEvidence = app.evidence();
-      const evidence = [processEvidenceText(processEvidence), portMismatchEvidence].filter(Boolean).join("\n");
+      const evidence = [
+        processEvidenceText(processEvidence),
+        portMismatchEvidence,
+        selectedCommandEvidence(planned.command),
+      ].filter(Boolean).join("\n");
       const healthFailureMessage = health.responded
         ? `only HTTP ${health.status} observed at ${health.url ?? plan.healthUrl}`
         : `no HTTP response at candidates ${health.candidates.join(", ")} within ${opts.timeoutMs}ms`;
