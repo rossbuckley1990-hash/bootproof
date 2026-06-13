@@ -13,6 +13,19 @@ const installDir = path.join(tempRoot, "consumer");
 const homeDir = path.join(tempRoot, "home");
 const targetsDir = path.join(tempRoot, "targets");
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const sourceManifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+const expectedHelpCommands = [
+  /bootproof up <path\|git-url>/,
+  /bootproof verify-url <url>/,
+  /bootproof plan-agent <path\|git-url>/,
+  /bootproof explain-run <run-id>/,
+  /bootproof fix <path\|git-url>/,
+  /bootproof apply-repair <path>/,
+  /bootproof diff \[--base ref\]/,
+  /bootproof registry export <path>/,
+  /bootproof help/,
+  /bootproof version/,
+];
 
 for (const dir of [packDir, installDir, homeDir, targetsDir]) {
   fs.mkdirSync(dir, { recursive: true });
@@ -127,6 +140,16 @@ async function unusedPort() {
 }
 
 try {
+  assert.equal(sourceManifest.name, "bootproof");
+  assert.equal(sourceManifest.type, "module");
+  assert.equal(sourceManifest.exports, undefined, "CLI-only package must not advertise a library export");
+  assert.deepEqual(sourceManifest.bin, { bootproof: "dist/cli.js" });
+  assert(sourceManifest.files.includes("dist"), "package files must include dist");
+  assert(sourceManifest.files.includes("assets"), "package files must include the README demo asset");
+  assert.equal(sourceManifest.repository.url, "git+https://github.com/bootproof/bootproof.git");
+  assert.equal(sourceManifest.bugs.url, "https://github.com/bootproof/bootproof/issues");
+  assert.equal(sourceManifest.homepage, "https://github.com/bootproof/bootproof");
+
   const packed = run(npmCommand, ["pack", "--json", "--pack-destination", packDir]);
   const packInfo = JSON.parse(packed.stdout)[0];
   const fileNames = packInfo.files.map(file => file.path);
@@ -140,6 +163,7 @@ try {
 
   assert.deepEqual(forbidden, [], `forbidden package entries: ${forbidden.join(", ")}`);
   assert(fileNames.includes("dist/cli.js"), "package must contain dist/cli.js");
+  assert(fileNames.includes("assets/bootproof_viral_demo.gif"), "package must contain the README demo asset");
   assert(fileNames.includes("README.md"), "package must contain README.md");
   assert(fileNames.includes("LICENSE"), "package must contain LICENSE");
 
@@ -157,14 +181,31 @@ try {
     process.platform === "win32" ? "bootproof.cmd" : "bootproof",
   );
   assert(fs.existsSync(binary), "installed package must expose the bootproof executable");
+  const installedManifest = JSON.parse(fs.readFileSync(
+    path.join(installDir, "node_modules", "bootproof", "package.json"),
+    "utf8",
+  ));
+  assert.deepEqual(installedManifest.bin, { bootproof: "dist/cli.js" });
+  assert.equal(installedManifest.type, "module");
+  assert.equal(installedManifest.exports, undefined);
+  assert.match(
+    fs.readFileSync(path.join(installDir, "node_modules", "bootproof", "dist", "cli.js"), "utf8"),
+    /^#!\/usr\/bin\/env node/,
+  );
   if (process.platform !== "win32") {
     assert((fs.statSync(binary).mode & 0o111) !== 0, "installed bootproof executable must have an execute bit");
   }
 
   const help = run(binary, ["--help"], { cwd: installDir });
   assert.match(help.stdout, /Human diagnosis\. Machine proof\. One engine\./);
-  assert.match(help.stdout, /bootproof fix <path\|git-url>/);
-  assert.match(help.stdout, /bootproof apply-repair <path>/);
+  for (const command of expectedHelpCommands) {
+    assert.match(help.stdout, command, `packed CLI help is missing ${command}`);
+  }
+  assert.match(run(binary, ["help"], { cwd: installDir }).stdout, /Usage:/);
+  assert.equal(
+    run(binary, ["version"], { cwd: installDir }).stdout.trim(),
+    `bootproof@${sourceManifest.version}`,
+  );
 
   const refusalTarget = copyFixture("early-refusal-attestation");
   const refusal = run(binary, ["up", refusalTarget, "--ci", "--json"], {
@@ -230,7 +271,7 @@ try {
   assert.match(run(binary, ["verify", remoteAttestation], { cwd: installDir }).stdout, /signature valid/);
 
   console.log(`packed: ${packInfo.filename} (${packInfo.size} bytes, ${fileNames.length} files)`);
-  console.log("help: ok");
+  console.log("help/version: expected documented commands available");
   console.log("early refusal: exit 1, signed not_an_application attestation verified and explained");
   console.log("repair refusal: exit 1, no unverified repair receipt emitted");
   console.log(`healthy fixture: exit 0, HTTP health verified on port ${port}`);

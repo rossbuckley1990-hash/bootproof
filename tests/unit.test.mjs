@@ -992,6 +992,70 @@ test("taxonomy documentation and tool version stay synchronized", () => {
   assert.equal(TOOL_ID, `bootproof@${pkg.version}`);
 });
 
+test("launch metadata, README, release checks, and CLI help stay synchronized", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
+  assert.equal(pkg.name, "bootproof");
+  assert.equal(pkg.type, "module");
+  assert.equal(pkg.exports, undefined, "CLI-only package must not advertise a library export");
+  assert.deepEqual(pkg.bin, { bootproof: "dist/cli.js" });
+  assert.ok(pkg.files.includes("dist"));
+  assert.ok(pkg.files.includes("assets"));
+  assert.equal(pkg.repository.url, "git+https://github.com/bootproof/bootproof.git");
+  assert.equal(pkg.bugs.url, "https://github.com/bootproof/bootproof/issues");
+  assert.equal(pkg.homepage, "https://github.com/bootproof/bootproof");
+  assert.doesNotMatch(JSON.stringify(pkg), /rossbuckley1990-hash/);
+
+  const help = execFileSync(process.execPath, [path.resolve("dist", "cli.js"), "--help"], {
+    encoding: "utf8",
+    env: { ...process.env, NO_COLOR: "1" },
+  });
+  for (const command of [
+    "up",
+    "verify-url",
+    "plan-agent",
+    "explain-run",
+    "fix",
+    "apply-repair",
+    "diff",
+    "registry",
+    "help",
+    "version",
+  ]) {
+    assert.match(help, new RegExp(`bootproof ${command.replace("-", "\\-")}\\b`));
+  }
+  assert.match(
+    execFileSync(process.execPath, [path.resolve("dist", "cli.js"), "help"], {
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    }),
+    /Usage:/,
+  );
+
+  const readme = fs.readFileSync(path.resolve("README.md"), "utf8");
+  const readmeTop = readme.split(/\r?\n/).slice(0, 30).join("\n");
+  assert.match(readmeTop, /!\[BootProof demo\]\(assets\/bootproof_viral_demo\.gif\)/);
+  assert.match(readmeTop, /BootProof proves whether a GitHub repo actually boots\./);
+  assert.match(readmeTop, /npx bootproof@latest up \./);
+  assert.match(readmeTop, /No proof, no green check\./);
+  assert.doesNotMatch(readme, /rossbuckley1990-hash/);
+  for (const match of readme.matchAll(/!\[[^\]]*\]\(([^)]+\.gif)\)/g)) {
+    assert.equal(
+      fs.existsSync(path.resolve(match[1])),
+      true,
+      `README references missing GIF: ${match[1]}`,
+    );
+  }
+
+  const release = fs.readFileSync(path.resolve("docs", "RELEASE_CHECKLIST.md"), "utf8");
+  assert.match(release, /npm run build/);
+  assert.match(release, /npm test/);
+  assert.match(release, /npm pack --dry-run/);
+  assert.match(release, /npm publish/);
+  assert.match(release, /npm view bootproof version/);
+  assert.match(release, /bootproof@latest --help/);
+  assert.match(release, /explicit expected version/);
+});
+
 test("real-world registry seed examples are strict, redacted documentation fixtures", () => {
   const seedsDirectory = path.resolve("docs", "examples", "registry-seeds");
   const expectedFiles = [

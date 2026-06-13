@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "assets",
     "LICENSE",
     "README.md",
     "docs"
@@ -25,7 +26,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rossbuckley1990-hash/bootproof.git"
+    "url": "git+https://github.com/bootproof/bootproof.git"
   },
   "keywords": [
     "devtools",
@@ -46,9 +47,9 @@
     "typescript": "5.8.3"
   },
   "bugs": {
-    "url": "https://github.com/rossbuckley1990-hash/bootproof/issues"
+    "url": "https://github.com/bootproof/bootproof/issues"
   },
-  "homepage": "https://github.com/rossbuckley1990-hash/bootproof#readme",
+  "homepage": "https://github.com/bootproof/bootproof",
   "dependencies": {
     "yaml": "^2.9.0"
   }
