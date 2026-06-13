@@ -85,57 +85,63 @@ const FAILURE_EVIDENCE_LIMIT = 8000;
 const STEP_EVIDENCE_LIMIT = 2000;
 const RESPONSE_LIMIT = 256_000;
 
-const AI_REPAIR_JSON_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: [...SUGGESTION_KEYS],
-  properties: {
-    schema: { const: "bootproof/ai-repair-suggestion/v1" },
-    confidence: { type: "number", minimum: 0, maximum: 1 },
-    failure_class: { type: "string", minLength: 1 },
-    suggested_action_type: { enum: ["command", "patch", "instruction"] },
-    suggested_command: {
-      anyOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["executable", "args", "display"],
-          properties: {
-            executable: { type: "string", minLength: 1 },
-            args: { type: "array", items: { type: "string" } },
-            display: { type: "string", minLength: 1 },
-          },
-        },
-        { type: "null" },
-      ],
-    },
-    suggested_patch: {
-      anyOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["format", "content", "files"],
-          properties: {
-            format: { const: "unified-diff" },
-            content: { type: "string", minLength: 1 },
-            files: {
-              type: "array",
-              minItems: 1,
-              uniqueItems: true,
-              items: { type: "string", minLength: 1 },
+export function buildOpenAiRepairResponseFormat() {
+  return {
+    type: "json_schema",
+    name: "bootproof_ai_repair_suggestion",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: [...SUGGESTION_KEYS],
+      properties: {
+        schema: { type: "string", const: "bootproof/ai-repair-suggestion/v1" },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        failure_class: { type: "string", minLength: 1 },
+        suggested_action_type: { type: "string", enum: ["command", "patch", "instruction"] },
+        suggested_command: {
+          anyOf: [
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["executable", "args", "display"],
+              properties: {
+                executable: { type: "string", minLength: 1 },
+                args: { type: "array", items: { type: "string" } },
+                display: { type: "string", minLength: 1 },
+              },
             },
-          },
+            { type: "null" },
+          ],
         },
-        { type: "null" },
-      ],
+        suggested_patch: {
+          anyOf: [
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["format", "content", "files"],
+              properties: {
+                format: { type: "string", const: "unified-diff" },
+                content: { type: "string", minLength: 1 },
+                files: {
+                  type: "array",
+                  minItems: 1,
+                  items: { type: "string", minLength: 1 },
+                },
+              },
+            },
+            { type: "null" },
+          ],
+        },
+        explanation_for_user: { type: "string", minLength: 1 },
+        risk_level: { type: "string", enum: [...ACTION_RISK_LEVELS] },
+        requires_human_approval: { type: "boolean", const: true },
+        why_this_is_safe: { type: "string", minLength: 1 },
+        what_to_check_after: { type: "string", minLength: 1 },
+      },
     },
-    explanation_for_user: { type: "string", minLength: 1 },
-    risk_level: { enum: [...ACTION_RISK_LEVELS] },
-    requires_human_approval: { const: true },
-    why_this_is_safe: { type: "string", minLength: 1 },
-    what_to_check_after: { type: "string", minLength: 1 },
-  },
-} as const;
+  } as const;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -282,6 +288,9 @@ export function validateAiRepairSuggestion(
       if (!stringArray(patch.files) || patch.files.length === 0) {
         errors.push("suggested_patch.files must be a non-empty string array");
       } else if (typeof patch.content === "string") {
+        if (new Set(patch.files).size !== patch.files.length) {
+          errors.push("suggested_patch.files must not contain duplicates");
+        }
         const headers = patchHeaderFiles(patch.content);
         const declared = [...new Set(patch.files)].sort();
         if (headers.join("\n") !== declared.join("\n")) {
@@ -386,12 +395,7 @@ export async function requestAiRepairSuggestion(
             instructions: "You are a repair suggestion generator. Output only the requested strict JSON object.",
             input: prompt,
             text: {
-              format: {
-                type: "json_schema",
-                name: "bootproof_ai_repair_suggestion",
-                strict: true,
-                schema: AI_REPAIR_JSON_SCHEMA,
-              },
+              format: buildOpenAiRepairResponseFormat(),
             },
           }),
           signal: controller.signal,

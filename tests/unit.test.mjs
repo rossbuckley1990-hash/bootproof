@@ -65,6 +65,7 @@ import {
 import {
   AI_KEY_REQUIRED_MESSAGE,
   buildAiRepairContext,
+  buildOpenAiRepairResponseFormat,
   requestAiRepairSuggestion,
   resolveAiProvider,
   validateAiRepairSuggestion,
@@ -2010,8 +2011,13 @@ test("repair safety JSON schemas are strict machine interfaces", () => {
   assert.ok(receiptSchema.required.includes("source"));
   assert.ok(receiptSchema.required.includes("userApprovalRequired"));
   assert.equal(aiSchema.additionalProperties, false);
+  assert.equal(aiSchema.properties.schema.type, "string");
   assert.equal(aiSchema.properties.schema.const, "bootproof/ai-repair-suggestion/v1");
+  assert.equal(aiSchema.properties.suggested_action_type.type, "string");
+  assert.equal(aiSchema.properties.risk_level.type, "string");
+  assert.equal(aiSchema.properties.requires_human_approval.type, "boolean");
   assert.equal(aiSchema.properties.requires_human_approval.const, true);
+  assert.equal(aiSchema.$defs.patch.properties.format.type, "string");
 });
 
 function aiSuggestion(overrides = {}) {
@@ -2110,6 +2116,82 @@ test("AI repair sends only redacted structured evidence and accepts strict JSON"
   assert.equal(requested.action.requiresApproval, true);
 });
 
+test("OpenAI AI repair request uses a strict fully typed response format schema", async () => {
+  const attestation = failedAiAttestation("unclassified startup failure");
+  let requestBody;
+  await requestAiRepairSuggestion(attestation, {
+    env: { OPENAI_API_KEY: "test-key" },
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({
+        output_text: JSON.stringify(aiSuggestion()),
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const format = requestBody.text.format;
+  assert.deepEqual(format, buildOpenAiRepairResponseFormat());
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.name, "bootproof_ai_repair_suggestion");
+  assert.equal(format.strict, true);
+  assert.equal(format.schema.type, "object");
+  assert.equal(format.schema.additionalProperties, false);
+  assert.equal(format.schema.properties.schema.type, "string");
+  assert.equal(
+    format.schema.properties.schema.const,
+    "bootproof/ai-repair-suggestion/v1",
+  );
+  assert.equal(format.schema.properties.suggested_action_type.type, "string");
+  assert.equal(format.schema.properties.risk_level.type, "string");
+  assert.equal(format.schema.properties.requires_human_approval.type, "boolean");
+  assert.equal(
+    format.schema.properties.suggested_patch.anyOf[0].properties.format.type,
+    "string",
+  );
+});
+
+test("OpenAI AI repair response format recursively uses only supported schema keywords", () => {
+  const format = buildOpenAiRepairResponseFormat();
+  const supported = new Set([
+    "type",
+    "additionalProperties",
+    "required",
+    "properties",
+    "const",
+    "enum",
+    "minimum",
+    "maximum",
+    "minLength",
+    "minItems",
+    "items",
+    "anyOf",
+  ]);
+  const unsupported = [];
+
+  function inspect(schema, location = "$") {
+    assert.equal(schema && typeof schema === "object" && !Array.isArray(schema), true, location);
+    for (const [keyword, value] of Object.entries(schema)) {
+      if (!supported.has(keyword)) unsupported.push(`${location}.${keyword}`);
+      if (keyword === "properties") {
+        for (const [name, propertySchema] of Object.entries(value)) {
+          inspect(propertySchema, `${location}.properties.${name}`);
+        }
+      } else if (keyword === "anyOf") {
+        value.forEach((branch, index) => inspect(branch, `${location}.anyOf[${index}]`));
+      } else if (keyword === "items") {
+        inspect(value, `${location}.items`);
+      }
+    }
+  }
+
+  inspect(format.schema);
+  assert.deepEqual(unsupported, []);
+  assert.equal(JSON.stringify(format.schema).includes('"uniqueItems"'), false);
+  const files = format.schema.properties.suggested_patch.anyOf[0].properties.files;
+  assert.equal(files.type, "array");
+  assert.equal(files.items.type, "string");
+});
+
 test("AI repair rejects invalid JSON and dangerous suggestions through shared safety", async () => {
   const attestation = failedAiAttestation("unclassified startup failure");
   await assert.rejects(
@@ -2151,6 +2233,25 @@ test("AI repair suggestion schema rejects extra fields and mismatched action pay
       suggested_action_type: "instruction",
     }), "unknown_failure"),
     /instruction suggestions cannot contain a command/,
+  );
+  const duplicatePatch = [
+    "--- a/config/example.yml",
+    "+++ b/config/example.yml",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new",
+  ].join("\n");
+  assert.throws(
+    () => validateAiRepairSuggestion(aiSuggestion({
+      suggested_action_type: "patch",
+      suggested_command: null,
+      suggested_patch: {
+        format: "unified-diff",
+        content: duplicatePatch,
+        files: ["config/example.yml", "config/example.yml"],
+      },
+    }), "unknown_failure"),
+    /suggested_patch.files must not contain duplicates/,
   );
   const action = buildAiSuggestedRepairAction({
     actionType: "instruction",
