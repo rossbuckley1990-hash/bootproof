@@ -1,0 +1,29 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "monorepo-ambiguous-health",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "root package.json workspaces",
+    "parallel root dev command",
+    "apps/web/package.json",
+    "apps/docs/package.json",
+    "multiple plausible health ports"
+  ],
+  "expectedBootProof": {
+    "kind": "classification",
+    "values": [
+      "workspace_ambiguous"
+    ]
+  },
+  "safeNextStep": "Select one reviewed workspace explicitly and rerun BootProof against that application instead of guessing among parallel services.",
+  "repairDisposition": "refused",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "diagnostic_only",
+  "verificationBasis": "Ambiguous workspace markers justify refusal only; no workspace can be marked verified until its own health response is observed.",
+  "redactionsApplied": [
+    "workspace names are generic",
+    "no repository source included",
+    "no environment values included"
+  ]
+}
+

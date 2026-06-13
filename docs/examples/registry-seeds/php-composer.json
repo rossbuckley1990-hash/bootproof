@@ -1,0 +1,33 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "php-composer",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "composer.json",
+    "composer.lock",
+    "php command not found",
+    "composer command not found",
+    "lock file package PHP constraint mismatch",
+    "vendor/autoload.php missing"
+  ],
+  "expectedBootProof": {
+    "kind": "classification",
+    "values": [
+      "missing_php_runtime",
+      "missing_composer",
+      "unsupported_php_version_for_composer_lock",
+      "missing_php_vendor_autoload"
+    ]
+  },
+  "safeNextStep": "Select a PHP version compatible with composer.lock, install Composer through the documented local method, and run composer install without editing the lockfile as the first step.",
+  "repairDisposition": "refused",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "diagnostic_only",
+  "verificationBasis": "Runtime and dependency evidence can support only a failed diagnostic receipt until a separate application health check succeeds.",
+  "redactionsApplied": [
+    "no package registry credentials included",
+    "no private package names included",
+    "no local filesystem paths included"
+  ]
+}
+

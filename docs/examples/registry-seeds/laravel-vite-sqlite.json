@@ -1,0 +1,36 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "laravel-vite-sqlite",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "artisan",
+    "composer.json",
+    "package.json",
+    "vite.config.js",
+    ".env.example",
+    "Connection: sqlite",
+    "database/database.sqlite missing"
+  ],
+  "expectedBootProof": {
+    "kind": "classification_and_inference",
+    "values": [
+      "php-backend",
+      "laravel",
+      "node-frontend",
+      "vite",
+      "laravel_sqlite_database_missing",
+      "laravel_migrations_required"
+    ]
+  },
+  "safeNextStep": "Review creation of database/database.sqlite, separately approve php artisan migrate, then rerun the Laravel application and require observed HTTP health.",
+  "repairDisposition": "approval_required",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "verified_boot_possible",
+  "verificationBasis": "A later observed HTTP 2xx response or accepted redirect to /login can verify the Laravel application; file creation and migration completion alone cannot.",
+  "redactionsApplied": [
+    "no environment values included",
+    "no database contents included",
+    "no local username paths included"
+  ]
+}
+

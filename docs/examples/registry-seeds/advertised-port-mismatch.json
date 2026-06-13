@@ -1,0 +1,28 @@
+{
+  "schema": "bootproof/registry-seed-example/v1",
+  "name": "advertised-port-mismatch",
+  "source": "synthetic_minimal_fixture",
+  "structuralMarkers": [
+    "selected command starts a Vite asset server",
+    "inferred health URL uses port 8080",
+    "process output advertises https://localhost:5173/",
+    "no successful response on inferred health candidate"
+  ],
+  "expectedBootProof": {
+    "kind": "classification",
+    "values": [
+      "health_candidate_port_mismatch"
+    ]
+  },
+  "safeNextStep": "Confirm whether the advertised endpoint is an asset server or the primary application, correct the reviewed health target, and rerun verification.",
+  "repairDisposition": "refused",
+  "externallyOrchestrated": false,
+  "evidenceOutcome": "diagnostic_only",
+  "verificationBasis": "An advertised URL mismatch is precise failure evidence, not successful health evidence; BootProof must still observe the intended application endpoint.",
+  "redactionsApplied": [
+    "only localhost URL patterns included",
+    "no response body data included",
+    "no local username paths included"
+  ]
+}
+

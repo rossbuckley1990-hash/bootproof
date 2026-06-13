@@ -992,6 +992,99 @@ test("taxonomy documentation and tool version stay synchronized", () => {
   assert.equal(TOOL_ID, `bootproof@${pkg.version}`);
 });
 
+test("real-world registry seed examples are strict, redacted documentation fixtures", () => {
+  const seedsDirectory = path.resolve("docs", "examples", "registry-seeds");
+  const expectedFiles = [
+    "advertised-port-mismatch.json",
+    "airbyte-abctl-external-orchestrator.json",
+    "go-ollama-service.json",
+    "laravel-vite-sqlite.json",
+    "monorepo-ambiguous-health.json",
+    "php-composer.json",
+    "rails-bundler.json",
+    "sentry-devenv-direnv.json",
+  ].sort();
+  const files = fs.readdirSync(seedsDirectory).filter(file => file.endsWith(".json")).sort();
+  assert.deepEqual(files, expectedFiles);
+
+  const requiredFields = [
+    "schema",
+    "name",
+    "source",
+    "structuralMarkers",
+    "expectedBootProof",
+    "safeNextStep",
+    "repairDisposition",
+    "externallyOrchestrated",
+    "evidenceOutcome",
+    "verificationBasis",
+    "redactionsApplied",
+  ];
+  const repairDispositions = new Set(["automatic", "approval_required", "refused"]);
+  const evidenceOutcomes = new Set(["verified_boot_possible", "diagnostic_only"]);
+  const expectedKinds = new Set([
+    "classification",
+    "inference",
+    "classification_and_inference",
+    "agent_plan",
+  ]);
+  const forbiddenKeys = /^(?:password|passwd|secret|token|apiKey|privateKey|credentials|environmentValues)$/i;
+  const obviousSecretValue =
+    /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|sk_(?:live|test)_[A-Za-z0-9]+|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|https?:\/\/[^/\s:@]+:[^@\s]+@|postgres(?:ql)?:\/\/[^:\s]+:[^@\s]+@)/;
+  const localUsernamePath = /(?:\/Users\/[^/\s]+|\/home\/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)/;
+
+  const assertNoForbiddenKeys = (value, location) => {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => assertNoForbiddenKeys(item, `${location}[${index}]`));
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      assert.doesNotMatch(key, forbiddenKeys, `secret-bearing key ${location}.${key}`);
+      assertNoForbiddenKeys(child, `${location}.${key}`);
+    }
+  };
+
+  for (const file of files) {
+    const raw = fs.readFileSync(path.join(seedsDirectory, file), "utf8");
+    const seed = JSON.parse(raw);
+    assert.deepEqual(Object.keys(seed).sort(), [...requiredFields].sort(), `${file} fields`);
+    assert.equal(seed.schema, "bootproof/registry-seed-example/v1");
+    assert.equal(seed.source, "synthetic_minimal_fixture");
+    assert.equal(seed.name, file.replace(/\.json$/, ""));
+    assert.ok(Array.isArray(seed.structuralMarkers) && seed.structuralMarkers.length > 0);
+    assert.deepEqual(Object.keys(seed.expectedBootProof).sort(), ["kind", "values"]);
+    assert.ok(Array.isArray(seed.expectedBootProof?.values) && seed.expectedBootProof.values.length > 0);
+    assert.ok(expectedKinds.has(seed.expectedBootProof?.kind));
+    assert.equal(typeof seed.safeNextStep, "string");
+    assert.ok(seed.safeNextStep.length > 0);
+    assert.ok(repairDispositions.has(seed.repairDisposition));
+    assert.equal(typeof seed.externallyOrchestrated, "boolean");
+    assert.ok(evidenceOutcomes.has(seed.evidenceOutcome));
+    assert.equal(typeof seed.verificationBasis, "string");
+    assert.ok(seed.verificationBasis.length > 0);
+    assert.ok(Array.isArray(seed.redactionsApplied) && seed.redactionsApplied.length > 0);
+    assertNoForbiddenKeys(seed, file);
+    assert.doesNotMatch(raw, obviousSecretValue, `${file} contains a secret-looking value`);
+    assert.doesNotMatch(raw, localUsernamePath, `${file} contains a username-bearing local path`);
+  }
+
+  const schema = JSON.parse(fs.readFileSync(
+    path.resolve("docs", "schemas", "registry-seed-example-v1.schema.json"),
+    "utf8",
+  ));
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.schema.const, "bootproof/registry-seed-example/v1");
+  assert.deepEqual([...schema.required].sort(), [...requiredFields].sort());
+
+  const guide = fs.readFileSync(path.resolve("docs", "REAL_WORLD_FIXTURES.md"), "utf8");
+  assert.match(guide, /observed health evidence/i);
+  assert.match(guide, /Predictions and examples are not proof/i);
+  for (const file of expectedFiles) {
+    assert.match(guide, new RegExp(file.replace(/\.json$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
 test("planning-only agent loop reads prior attestations and emits strict risk-classified actions", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "bp-agent-plan-"));
   fs.cpSync(path.join(FIX, "agent-plan-orchestrated-like"), repo, { recursive: true });
