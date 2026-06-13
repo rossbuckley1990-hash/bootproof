@@ -23,6 +23,7 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 17. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
 18. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
 19. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
+20. A health response may only be recorded as a verified boot if it could have come from the process BootProof started. Pre-existing responders are refused (`health_preoccupied`); a response observed after the supervised process has exited is not a boot.
 
 These behaviors are enforced by tests.
 

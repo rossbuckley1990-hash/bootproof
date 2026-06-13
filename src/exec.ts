@@ -186,7 +186,8 @@ export function superviseApp(command: string, cwd: string, env: NodeJS.ProcessEn
   };
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
-  child.on("close", code => { exit = { code, early: true }; });
+  child.on("exit", code => { exit = { code, early: true }; });
+  child.on("error", () => { exit ??= { code: null, early: true }; });
   return {
     output: () => outTail,
     evidence: () => extractProcessEvidence(outHead, outTail),
@@ -328,6 +329,7 @@ export async function pollHealthCandidates(
   timeoutMs: number,
   output: () => string = () => "",
   intervalMs = 1000,
+  shouldStop: () => boolean = () => false,
 ): Promise<HealthObservation> {
   const started = Date.now();
   let attempts = 0;
@@ -335,17 +337,19 @@ export async function pollHealthCandidates(
   const discoveredCandidates = new Set<string>();
   let latestResponse: HealthEvidence | null = null;
   let latestConnectionError: HealthEvidence | null = null;
-  while (Date.now() - started < timeoutMs) {
+  while (Date.now() - started < timeoutMs && !shouldStop()) {
     for (const candidate of extractHealthCandidates(output())) {
       if (!candidates.has(candidate)) discoveredCandidates.add(candidate);
       candidates.add(candidate);
     }
     for (const url of candidates) {
+      if (shouldStop()) break;
       attempts++;
       const evidence = await probe(url);
       if (evidence.statusCode !== null) latestResponse = evidence;
       else if (evidence.connectionError || !latestConnectionError) latestConnectionError = evidence;
       if (evidence.acceptedAsHealthy) {
+        if (shouldStop()) break;
         return {
           responded: true,
           status: evidence.statusCode,
@@ -358,7 +362,10 @@ export async function pollHealthCandidates(
         };
       }
     }
-    await new Promise(r => setTimeout(r, intervalMs));
+    const waitUntil = Date.now() + intervalMs;
+    while (Date.now() < waitUntil && !shouldStop()) {
+      await new Promise(r => setTimeout(r, Math.min(25, waitUntil - Date.now())));
+    }
   }
   for (const candidate of extractHealthCandidates(output())) {
     if (!candidates.has(candidate)) discoveredCandidates.add(candidate);
@@ -373,6 +380,43 @@ export async function pollHealthCandidates(
     url: evidence?.requestedUrl ?? null,
     candidates: [...candidates],
     discoveredCandidates: [...discoveredCandidates],
+    evidence,
+  };
+}
+
+export async function probeHealthCandidatesOnce(initialUrls: string[]): Promise<HealthObservation> {
+  const started = Date.now();
+  const candidates = [...new Set(initialUrls)];
+  let attempts = 0;
+  let latestResponse: HealthEvidence | null = null;
+  let latestConnectionError: HealthEvidence | null = null;
+  for (const url of candidates) {
+    attempts++;
+    const evidence = await probe(url);
+    if (evidence.statusCode !== null) latestResponse = evidence;
+    else if (evidence.connectionError || !latestConnectionError) latestConnectionError = evidence;
+    if (evidence.acceptedAsHealthy) {
+      return {
+        responded: true,
+        status: evidence.statusCode,
+        attempts,
+        elapsedMs: Date.now() - started,
+        url,
+        candidates,
+        discoveredCandidates: [],
+        evidence,
+      };
+    }
+  }
+  const evidence = latestResponse ?? latestConnectionError;
+  return {
+    responded: evidence?.statusCode !== null && evidence?.statusCode !== undefined,
+    status: evidence?.statusCode ?? null,
+    attempts,
+    elapsedMs: Date.now() - started,
+    url: evidence?.requestedUrl ?? null,
+    candidates,
+    discoveredCandidates: [],
     evidence,
   };
 }

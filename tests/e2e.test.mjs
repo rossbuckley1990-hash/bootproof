@@ -188,6 +188,21 @@ async function withHttpServer(handler, runWithUrl) {
   }
 }
 
+async function withLocalhostHttpServer(handler, runWithUrl) {
+  const server = await new Promise((resolve, reject) => {
+    const candidate = http.createServer(handler);
+    candidate.once("error", reject);
+    candidate.listen(0, "localhost", () => resolve(candidate));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    return await runWithUrl(`http://localhost:${address.port}/`);
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
+
 function fakeRemote(fixture, canonicalUrl, setup) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-cwd-"));
   const source = fs.mkdtempSync(path.join(os.tmpdir(), "bp-remote-source-"));
@@ -503,6 +518,133 @@ test("e2e: real boot, observed health, signed attestation that verifies", async 
   assert.ok(att.observed.some(o => o.kind === "health" && o.ok), "health must be an observed step");
   const v = run(["verify", repo]);
   assert.match(v.out, /signature valid/);
+});
+
+test("honesty: a pre-existing healthy responder is refused before the app starts", async () => {
+  await withLocalhostHttpServer((_request, response) => {
+    response.statusCode = 200;
+    response.end("unrelated squatter");
+  }, async url => {
+    const repo = freshCopy("hello-app");
+    const port = Number(new URL(url).port);
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      name: "preoccupied-health",
+      private: true,
+      scripts: { start: "true" },
+    }));
+
+    const { out, code } = await runAsync([
+      "up",
+      repo,
+      "--provider",
+      "local",
+      "--unsafe-local",
+      "--port",
+      String(port),
+      "--timeout",
+      "10000",
+    ]);
+
+    assert.equal(code, 1, out);
+    assert.match(out, /NOT VERIFIED.*health_preoccupied/s);
+    assert.match(out, new RegExp(`A service was already responding at ${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(out, new RegExp(`bootproof verify-url ${url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.doesNotMatch(out, /\bBOOTED\b|booted=true|app process started and was supervised/);
+
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.booted, false);
+    assert.equal(att.result.healthVerified, false);
+    assert.equal(att.result.failureClass, "health_preoccupied");
+    assert.equal(att.result.healthEvidence.requestedUrl, url);
+    assert.equal(att.result.healthEvidence.statusCode, 200);
+    assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
+    assert.equal(att.observed.some(step => step.kind === "start-app"), false);
+    assert.ok(att.observed.some(step =>
+      step.id === "health-preflight" &&
+      step.ok === false &&
+      /application was not started/.test(step.observation)
+    ));
+  });
+});
+
+test("honesty: an instantly exited app stops health polling without claiming supervision", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort();
+  fs.writeFileSync(path.join(repo, "server.js"), "process.exit(17);\n");
+  const started = Date.now();
+  const { out, code } = run([
+    "up",
+    repo,
+    "--provider",
+    "local",
+    "--unsafe-local",
+    "--port",
+    String(port),
+    "--timeout",
+    "10000",
+    "--ci",
+  ], true);
+  const elapsedMs = Date.now() - started;
+
+  assert.equal(code, 1, out);
+  assert.ok(elapsedMs < 5000, `early exit waited ${elapsedMs}ms instead of stopping before the 10000ms timeout`);
+  assert.match(out, /NOT VERIFIED — app_exited_early/);
+  assert.doesNotMatch(out, /app process started and was supervised|\bBOOTED\b|booted=true/);
+
+  const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+  assert.equal(att.result.booted, false);
+  assert.equal(att.result.healthVerified, false);
+  assert.equal(att.result.failureClass, "app_exited_early");
+  const start = att.observed.find(step => step.kind === "start-app");
+  assert.equal(start.ok, false);
+  assert.doesNotMatch(start.observation, /supervised/i);
+});
+
+test("honesty: an accepted response cannot verify after the supervised app exits", async () => {
+  let requests = 0;
+  await withLocalhostHttpServer((_request, response) => {
+    requests++;
+    if (requests === 1) {
+      response.statusCode = 500;
+      response.end("preflight not healthy");
+      return;
+    }
+    setTimeout(() => {
+      response.statusCode = 200;
+      response.end("unrelated responder became healthy");
+    }, 600);
+  }, async url => {
+    const repo = freshCopy("hello-app");
+    const port = Number(new URL(url).port);
+    fs.writeFileSync(path.join(repo, "server.js"), "setTimeout(() => process.exit(23), 100);\n");
+
+    const { out, code } = await runAsync([
+      "up",
+      repo,
+      "--provider",
+      "local",
+      "--unsafe-local",
+      "--port",
+      String(port),
+      "--timeout",
+      "10000",
+      "--ci",
+    ]);
+
+    assert.equal(code, 1, out);
+    assert.match(out, /NOT VERIFIED — app_exited_early/);
+    assert.doesNotMatch(out, /app process started and was supervised|\bBOOTED\b|booted=true/);
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.booted, false);
+    assert.equal(att.result.healthVerified, false);
+    assert.equal(att.result.failureClass, "app_exited_early");
+    assert.equal(att.result.healthEvidence.statusCode, 200);
+    assert.equal(att.result.healthEvidence.acceptedAsHealthy, true);
+    const start = att.observed.find(step => step.kind === "start-app");
+    assert.equal(start.ok, false);
+    assert.match(start.observation, /before the accepted health response could be attributed/);
+    assert.doesNotMatch(start.observation, /supervised/i);
+  });
 });
 
 test("parent environment including RAILS_ENV and PATH reaches the app process", async () => {
