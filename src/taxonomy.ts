@@ -518,6 +518,8 @@ const RULES: Rule[] = [
     explain: () => "Docker is not available, and this plan needs it for services. Start Docker, or rerun with --provider local --unsafe-local if the app needs no containers." },
   { class: "health_http_error", pattern: /(only HTTP 5\d\d observed|HTTP 5\d\d|status\s*5\d\d|returned 5\d\d)/i,
     explain: () => "The app responded on the configured health URL, but returned HTTP 5xx. BootProof observed a running server, but not a verified healthy boot." },
+  { class: "health_preoccupied", pattern: /A service was already responding at (https?:\/\/\S+) before BootProof started anything/i,
+    explain: m => `A service was already responding at ${m[1]} before BootProof started anything, so its health response cannot be attributed to this repository.` },
 ];
 
 export function classifyFailure(evidence: string): FailureClassification {
@@ -550,5 +552,5 @@ export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "database_unreachable", "postgres_unavailable", "postgres_role_missing", "database_schema_missing", "unsupported_database_version",
   "unsupported_database_config", "redis_unavailable", "postgres_auth_env_missing", "migrations_missing", "port_in_use", "native_build_dependency",
   "private_registry_or_auth", "tls_or_proxy_interception", "service_port_allocated", "docker_unavailable", "install_failed", "app_exited_early",
-  "health_check_timeout", "health_http_error", "health_candidate_port_mismatch", "workspace_ambiguous", "unknown_failure",
+  "health_preoccupied", "health_check_timeout", "health_http_error", "health_candidate_port_mismatch", "workspace_ambiguous", "unknown_failure",
 ];

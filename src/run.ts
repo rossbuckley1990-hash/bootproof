@@ -23,6 +23,7 @@ import {
   runToCompletion,
   superviseApp,
   pollHealthCandidates,
+  probeHealthCandidatesOnce,
   type ProcessEvidence,
 } from "./exec.js";
 import { classifyFailure, extractMissingEnvNames, safeLocalEnvValue } from "./taxonomy.js";
@@ -241,6 +242,8 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
     explanation: string,
     observed: ObservedStep[] = [],
     failureEvidence: string = explanation,
+    healthEvidence: HealthEvidence | null = null,
+    observedHealthCandidates: string[] = [],
   ): UpOutcome => {
     const refusal = { failureClass, explanation };
     if (opts.dryRun) return { ...base, attestation: null, refusal };
@@ -258,8 +261,8 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       booted: false,
       healthVerified: false,
       healthObservation: null,
-      healthEvidence: null,
-      observedHealthCandidates: [],
+      healthEvidence,
+      observedHealthCandidates,
       failureClass,
       failureEvidence: failureEvidence.slice(-2000),
       explanation,
@@ -363,6 +366,35 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       "unknown_failure",
       "BootProof detected a hybrid backend/frontend repository, but the inferred command starts only the frontend development pipeline. Complete application orchestration is not implemented, so no boot was attempted.",
     );
+  }
+
+  const localStartStep = opts.provider === "local"
+    ? plan.steps.find(planned => planned.kind === "start-app" && planned.command)
+    : undefined;
+  if (localStartStep && plan.healthCandidates.length > 0) {
+    const preflightStartedAt = new Date().toISOString();
+    const preflight = await probeHealthCandidatesOnce(plan.healthCandidates);
+    if (preflight.responded && preflight.evidence) {
+      const url = preflight.evidence.requestedUrl;
+      const explanation = `A service was already responding at ${url} before BootProof started anything, so a health response cannot be attributed to this repository. If you intended to verify an already-running service, use: bootproof verify-url ${url} (or bootproof up . --external-health ${url}).`;
+      const preflightObservation = step(
+        "health-preflight",
+        "health",
+        undefined,
+        preflightStartedAt,
+        null,
+        false,
+        `pre-existing service responded ${healthStatusLabel(preflight.evidence)} at ${url}; application was not started`,
+      );
+      return refuse(
+        "health_preoccupied",
+        explanation,
+        [preflightObservation],
+        explanation,
+        preflight.evidence,
+        [url],
+      );
+    }
   }
 
   const writtenFiles = writePlanFiles(inference, inference.repoPath);
@@ -478,7 +510,13 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const app = superviseApp(planned.command, inference.repoPath, env);
       const inferredHealthUrl = plan.healthUrl;
       const inferredHealthCandidates = new Set(plan.healthCandidates);
-      const health = await pollHealthCandidates(plan.healthCandidates, opts.timeoutMs, app.output);
+      const health = await pollHealthCandidates(
+        plan.healthCandidates,
+        opts.timeoutMs,
+        app.output,
+        1000,
+        () => app.exited() !== null,
+      );
       await new Promise<void>(resolve => setImmediate(resolve));
       const advertisedHealthUrls = extractHealthCandidates(app.output());
       for (const advertisedHealthUrl of advertisedHealthUrls) {
@@ -506,10 +544,21 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       const portMismatchEvidence = healthCandidatePortMismatchEvidence(portMismatch);
       const packageScriptContext = packageScriptFailureContext(inference);
       const exit = app.exited();
-      if (exit && !health.responded) {
+      if (exit) {
         const processEvidence = app.evidence();
-        const evidence = [processEvidenceText(processEvidence), portMismatchEvidence, packageScriptContext].filter(Boolean).join("\n");
-        observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, `app process exited (code ${exit.code}) before responding`, processEvidence));
+        const unattributedHealthEvidence = health.evidence?.acceptedAsHealthy
+          ? `An accepted ${healthStatusLabel(health.evidence)} response was observed at ${health.evidence.requestedUrl}, but the supervised process had already exited, so BootProof did not attribute that response to this repository.`
+          : "";
+        const evidence = [
+          processEvidenceText(processEvidence),
+          unattributedHealthEvidence,
+          portMismatchEvidence,
+          packageScriptContext,
+        ].filter(Boolean).join("\n");
+        const observation = health.evidence?.acceptedAsHealthy
+          ? `app process exited (code ${exit.code}) before the accepted health response could be attributed to it`
+          : `app process exited (code ${exit.code}) before responding`;
+        observed.push(step(planned.id, "start-app", planned.command, t, exit.code, false, observation, processEvidence));
         const c = classifyFailure(evidence);
         await app.stop();
         return fail(c.class === "unknown_failure" ? "app_exited_early" : c.class, evidence, c.explanation, health.evidence, health.discoveredCandidates);

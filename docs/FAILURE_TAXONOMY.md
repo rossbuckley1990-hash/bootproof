@@ -57,6 +57,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `docker_unavailable` | Docker is required by the plan but unavailable. | Start Docker or explicitly choose a safe local path. |
 | `install_failed` | Dependency installation failed for an otherwise unclassified reason. | Inspect preserved install evidence and fix the underlying cause. |
 | `app_exited_early` | The application exited before health was observed. | Inspect process evidence and fix startup. |
+| `health_preoccupied` | A health candidate was already responding successfully before BootProof started the application. | Stop the existing service and rerun, or explicitly verify it with `bootproof verify-url <url>`. |
 | `health_check_timeout` | No HTTP response was observed before timeout. | Check logs, port inference, and health candidates. |
 | `health_http_error` | A health candidate returned HTTP 5xx. | Fix the server error; a responding process is not yet healthy. |
 | `health_candidate_port_mismatch` | Process output advertised a different port from the inferred application health URL. | Confirm the primary app command and intended health port; do not mistake an asset server for the Laravel app. |

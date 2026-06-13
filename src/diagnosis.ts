@@ -191,6 +191,12 @@ export function diagnoseFailure(
         whyRefused: "A responding server is not a verified healthy boot when the observed response is a server error.",
         safeNextStep: "Inspect the application logs and failing health route, fix the server error, then rerun BootProof.",
       };
+    case "health_preoccupied":
+      return {
+        whatHappened: explanation,
+        whyRefused: "The healthy response existed before BootProof started the application, so BootProof cannot attribute it to this repository.",
+        safeNextStep: "Stop the existing service and rerun BootProof, or verify the already-running service explicitly with bootproof verify-url <url>.",
+      };
     case "health_check_timeout":
       return {
         whatHappened: "No successful HTTP response was observed before the health timeout.",
