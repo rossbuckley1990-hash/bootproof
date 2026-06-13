@@ -129,6 +129,13 @@ describe `abctl local install --port 8001` as a high-risk,
 approval-required Kubernetes action, but it does not execute Airbyte, abctl,
 kind, Helm, Kubernetes, or credential commands through `plan-agent`.
 
+Airbyte-style repositories are externally orchestrated. BootProof may produce a
+local plan and may verify an already-running documented health endpoint, but it
+must not silently create or mutate a cluster. Cluster-level actions, including
+`abctl local install`, `kind create cluster`, and `helm install`, are high-risk
+and require explicit approval. CI planning remains non-interactive and executes
+none of those candidate actions.
+
 ## Open-Source Boundary
 
 The public repository owns the local brakes and trust layer:
