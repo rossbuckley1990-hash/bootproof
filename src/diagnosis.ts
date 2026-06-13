@@ -241,6 +241,14 @@ export function diagnoseFailure(
         "The selected package script depends on a repository CLI that is not available in the current development environment.",
         "Prepare the repository's documented development environment or bootstrap services so its project CLI is available, then rerun BootProof.",
       );
+    case "repo_requires_devenv":
+    case "missing_devenv_tool":
+    case "missing_direnv_tool":
+    case "sentry_virtualenv_not_activated":
+      return preciseFailure(
+        "The repository's documented Sentry development environment is not ready.",
+        "Install and configure Sentry's devenv tooling, review and run `devenv sync`, then activate the repository with `direnv allow` before rerunning BootProof.",
+      );
     case "runtime_engine_mismatch":
       return {
         whatHappened: "The available Node.js runtime does not satisfy the repository's declared engine requirement.",

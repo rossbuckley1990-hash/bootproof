@@ -143,6 +143,73 @@ function missingProjectCliFailure(evidence: string): FailureClassification | nul
   };
 }
 
+function sentrySetupMetadata(
+  evidence: string,
+  missingTool?: "devenv" | "direnv",
+): FailureMetadata {
+  const setupFiles = [
+    /\bMakefile\b/i.test(evidence) ? "Makefile" : null,
+    /scripts[\\/]do\.sh/i.test(evidence) ? "scripts/do.sh" : null,
+  ].filter((file): file is string => file !== null);
+  return {
+    ...(missingTool ? { missingTool } : {}),
+    ...(/\bsentry\b/i.test(evidence) ? { projectCli: "sentry" } : {}),
+    setupCommand: "devenv sync",
+    activationHint: "direnv allow",
+    ...(setupFiles.length ? { setupFiles } : {}),
+  };
+}
+
+function sentryDevenvFailure(evidence: string): FailureClassification | null {
+  const commonSafeNextStep =
+    "Install and configure Sentry's documented devenv tooling, review and run `devenv sync`, then activate the repository with `direnv allow` before rerunning BootProof.";
+
+  if (/(?:command not found:\s*direnv\b|(?:^|\s)direnv:\s*(?:command )?not found\b)/im.test(evidence)) {
+    return {
+      class: "missing_direnv_tool",
+      explanation: "The Sentry development environment requires direnv, but the direnv executable is not available.",
+      metadata: sentrySetupMetadata(evidence, "direnv"),
+      safeNextStep: commonSafeNextStep,
+    };
+  }
+
+  if (
+    /Your sentry virtualenv isn't activated/i.test(evidence)
+    && /\bdirenv allow\b/i.test(evidence)
+  ) {
+    return {
+      class: "sentry_virtualenv_not_activated",
+      explanation: "Sentry's project virtual environment is not active, so its project CLI and development dependencies are unavailable.",
+      metadata: sentrySetupMetadata(evidence),
+      safeNextStep: commonSafeNextStep,
+    };
+  }
+
+  if (
+    /Please install the devenv tool/i.test(evidence)
+    || /https:\/\/github\.com\/getsentry\/devenv#install/i.test(evidence)
+    || /(?:command not found:\s*devenv\b|(?:^|\s)devenv:\s*(?:command )?not found\b)/im.test(evidence)
+  ) {
+    return {
+      class: "missing_devenv_tool",
+      explanation: "The repository requires Sentry's devenv setup tool, but it is not installed or available in PATH.",
+      metadata: sentrySetupMetadata(evidence, "devenv"),
+      safeNextStep: commonSafeNextStep,
+    };
+  }
+
+  if (/\bdevenv sync\b/i.test(evidence)) {
+    return {
+      class: "repo_requires_devenv",
+      explanation: "The repository's documented setup path requires devenv synchronization before its project CLI can run.",
+      metadata: sentrySetupMetadata(evidence),
+      safeNextStep: commonSafeNextStep,
+    };
+  }
+
+  return null;
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -285,6 +352,9 @@ function classifyRealWorldFailure(evidence: string): FailureClassification | nul
 
   const goBuild = goBuildFailure(evidence);
   if (goBuild) return goBuild;
+
+  const sentryDevenv = sentryDevenvFailure(evidence);
+  if (sentryDevenv) return sentryDevenv;
 
   const missingProjectCli = missingProjectCliFailure(evidence);
   if (missingProjectCli) return missingProjectCli;
@@ -543,6 +613,7 @@ export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
   "not_an_application", "orchestration_not_supported", "go_service_orchestration_not_supported", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
   "go_runtime_missing", "go_build_failed", "missing_project_cli",
+  "repo_requires_devenv", "missing_devenv_tool", "missing_direnv_tool", "sentry_virtualenv_not_activated",
   "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
   "laravel_sqlite_database_missing", "laravel_migrations_required",
   "missing_build_tool", "native_extension_compile_failed", "package_manager_version_mismatch",

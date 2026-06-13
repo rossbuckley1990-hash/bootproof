@@ -245,6 +245,19 @@ function followUpInstruction(instruction: string, explanation: string): RepairAc
   });
 }
 
+function hostToolingSetupInstruction(instruction: string, explanation: string): RepairAction {
+  return buildRepairAction({
+    actionType: "instruction",
+    mutationScope: "host_tool_install",
+    riskLevel: "medium",
+    requiresApproval: true,
+    instruction,
+    explanation,
+    evidenceRefs: [".bootproof/attestation.json", "Makefile", "scripts/do.sh"],
+    verificationStep: "Confirm devenv sync completed and direnv activated the project environment, then rerun BootProof.",
+  });
+}
+
 export function deterministicRepairCandidateFor(
   attestation: Attestation,
   options: RepairCandidateOptions = {},
@@ -254,6 +267,22 @@ export function deterministicRepairCandidateFor(
   if (!failureClass || attestation.result.booted || attestation.result.healthVerified) return null;
   const classified = classifyFailure(evidence);
   if (classified.class !== failureClass) return null;
+
+  if (
+    failureClass === "repo_requires_devenv"
+    || failureClass === "missing_devenv_tool"
+    || failureClass === "missing_direnv_tool"
+    || failureClass === "sentry_virtualenv_not_activated"
+  ) {
+    return {
+      id: "prepare-sentry-devenv-instruction",
+      failureClass,
+      action: hostToolingSetupInstruction(
+        "Install and configure Sentry's documented devenv and direnv tools, review and run `devenv sync`, then activate the repository with `direnv allow`.",
+        "Sentry's development environment requires host tooling and project synchronization. BootProof will not install tools or run setup automatically.",
+      ),
+    };
+  }
 
   if (failureClass === "missing_ruby_version") {
     const requiredVersion = classified.metadata?.requiredVersion;

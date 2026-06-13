@@ -343,6 +343,7 @@ function detectRubyCommand(repo: string): { commandBase: string; source: string 
 
 function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: string; pkg: any } | null, repoComposeFile: string | null) {
   const makefile = readText(repo, "Makefile");
+  const setupScript = readText(repo, "scripts/do.sh");
   const pyproject = readText(repo, "pyproject.toml");
   const setupPy = readText(repo, "setup.py");
   const requirements = readText(repo, "requirements.txt");
@@ -370,6 +371,11 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     && exists(repo, "Makefile")
     && exists(repo, "package.json")
     && exists(repo, "pnpm-lock.yaml");
+  const hasDevenvManagedSetup =
+    hasLargePythonNodeHybrid
+    && isDirectory(repo, "devservices")
+    && exists(repo, "scripts/do.sh")
+    && /\bdevenv\b/i.test(setupScript);
   const hasPythonBackend = hasFlaskBackend || hasDjango || hasLargePythonNodeHybrid;
   const hasGoBackend = exists(repo, "go.mod") || exists(repo, "go.work");
   const hasRubyBackend = exists(repo, "Gemfile");
@@ -400,6 +406,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
     if (isDirectory(repo, "src")) backendMarkers.push("src/");
     if (isDirectory(repo, "static")) frontendMarkers.push("static/");
     if (isDirectory(repo, "devservices")) serviceMarkers.push("devservices/");
+    if (hasDevenvManagedSetup) serviceMarkers.push("scripts/do.sh");
   }
 
   if (hasGoBackend) {
@@ -436,6 +443,7 @@ function detectArchitecture(repo: string, pkg: any, nestedFrontend: { dir: strin
   if (hasCelery) stack.push("celery");
   if (hasLargePythonNodeHybrid) stack.push("large-hybrid-app");
   if (hasLargePythonNodeHybrid && isDirectory(repo, "devservices")) stack.push("devservices-backed");
+  if (hasDevenvManagedSetup) stack.push("devenv-managed");
 
   const setupSteps: string[] = [];
   if (/^\s*superset db upgrade\s*$/m.test(makefile)) setupSteps.push("superset db upgrade");
