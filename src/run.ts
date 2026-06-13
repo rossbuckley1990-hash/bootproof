@@ -374,7 +374,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   if (localStartStep && plan.healthCandidates.length > 0) {
     const preflightStartedAt = new Date().toISOString();
     const preflight = await probeHealthCandidatesOnce(plan.healthCandidates);
-    if (preflight.evidence?.acceptedAsHealthy) {
+    if (preflight.responded && preflight.evidence) {
       const url = preflight.evidence.requestedUrl;
       const explanation = `A service was already responding at ${url} before BootProof started anything, so a health response cannot be attributed to this repository. If you intended to verify an already-running service, use: bootproof verify-url ${url} (or bootproof up . --external-health ${url}).`;
       const preflightObservation = step(

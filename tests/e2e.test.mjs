@@ -161,11 +161,11 @@ function writeFailedAttestation(repo, failureClass, failureEvidence, provider = 
   return attestation;
 }
 
-async function getFreePort() {
+async function getFreePort(host = "127.0.0.1") {
   return await new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, host, () => {
       const address = server.address();
       assert.ok(address && typeof address !== "string");
       server.close(error => error ? reject(error) : resolve(address.port));
@@ -201,6 +201,23 @@ async function withLocalhostHttpServer(handler, runWithUrl) {
   } finally {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
+}
+
+async function waitForFile(file, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for ${file}`);
+}
+
+async function listenLocalhostHttpServer(port, handler) {
+  return await new Promise((resolve, reject) => {
+    const server = http.createServer(handler);
+    server.once("error", reject);
+    server.listen(port, "localhost", () => resolve(server));
+  });
 }
 
 function fakeRemote(fixture, canonicalUrl, setup) {
@@ -600,23 +617,18 @@ test("honesty: an instantly exited app stops health polling without claiming sup
   assert.doesNotMatch(start.observation, /supervised/i);
 });
 
-test("honesty: an accepted response cannot verify after the supervised app exits", async () => {
-  let requests = 0;
+test("honesty: a pre-existing unhealthy responder is still treated as occupied", async () => {
   await withLocalhostHttpServer((_request, response) => {
-    requests++;
-    if (requests === 1) {
-      response.statusCode = 500;
-      response.end("preflight not healthy");
-      return;
-    }
-    setTimeout(() => {
-      response.statusCode = 200;
-      response.end("unrelated responder became healthy");
-    }, 600);
+    response.statusCode = 500;
+    response.end("unrelated responder");
   }, async url => {
     const repo = freshCopy("hello-app");
     const port = Number(new URL(url).port);
-    fs.writeFileSync(path.join(repo, "server.js"), "setTimeout(() => process.exit(23), 100);\n");
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({
+      name: "preoccupied-unhealthy",
+      private: true,
+      scripts: { start: "true" },
+    }));
 
     const { out, code } = await runAsync([
       "up",
@@ -632,6 +644,69 @@ test("honesty: an accepted response cannot verify after the supervised app exits
     ]);
 
     assert.equal(code, 1, out);
+    assert.match(out, /NOT VERIFIED.*health_preoccupied/s);
+    assert.doesNotMatch(out, /app process started and was supervised|\bBOOTED\b|booted=true/);
+    const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
+    assert.equal(att.result.booted, false);
+    assert.equal(att.result.healthVerified, false);
+    assert.equal(att.result.failureClass, "health_preoccupied");
+    assert.equal(att.result.healthEvidence.statusCode, 500);
+    assert.equal(att.result.healthEvidence.acceptedAsHealthy, false);
+    assert.equal(att.observed.some(step => step.kind === "start-app"), false);
+  });
+});
+
+test("honesty: an accepted response cannot verify after the supervised app exits", async () => {
+  const repo = freshCopy("hello-app");
+  const port = await getFreePort("localhost");
+  const childStarted = path.join(repo, "child-started");
+  const childShouldExit = path.join(repo, "child-should-exit");
+  const childExiting = path.join(repo, "child-exiting");
+  fs.writeFileSync(path.join(repo, "exit-on-signal.cjs"), `
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.env.BOOTPROOF_TEST_MARKER_ROOT;
+fs.writeFileSync(path.join(root, "child-started"), "");
+const timer = setInterval(() => {
+  if (!fs.existsSync(path.join(root, "child-should-exit"))) return;
+  clearInterval(timer);
+  fs.writeFileSync(path.join(root, "child-exiting"), "");
+  process.exit(23);
+}, 10);
+`);
+
+  const runPromise = runAsync([
+    "up",
+    repo,
+    "--provider",
+    "local",
+    "--unsafe-local",
+    "--command",
+    "node exit-on-signal.cjs",
+    "--port",
+    String(port),
+    "--timeout",
+    "10000",
+    "--ci",
+  ], {
+    BOOTPROOF_TEST_MARKER_ROOT: repo,
+  });
+
+  await waitForFile(childStarted);
+  const server = await listenLocalhostHttpServer(port, (_request, response) => {
+    fs.writeFileSync(childShouldExit, "");
+    void waitForFile(childExiting).then(() => {
+      setTimeout(() => {
+        response.statusCode = 200;
+        response.end("unrelated responder became healthy");
+      }, 500);
+    });
+  });
+
+  try {
+    const { out, code } = await runPromise;
+
+    assert.equal(code, 1, out);
     assert.match(out, /NOT VERIFIED — app_exited_early/);
     assert.doesNotMatch(out, /app process started and was supervised|\bBOOTED\b|booted=true/);
     const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
@@ -644,7 +719,9 @@ test("honesty: an accepted response cannot verify after the supervised app exits
     assert.equal(start.ok, false);
     assert.match(start.observation, /before the accepted health response could be attributed/);
     assert.doesNotMatch(start.observation, /supervised/i);
-  });
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });
 
 test("parent environment including RAILS_ENV and PATH reaches the app process", async () => {
