@@ -19,10 +19,11 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
 14. A deterministic repair suggestion requires a signature-valid classified failed attestation.
 15. Commands run only after the exact command, mutation scope, and risk are shown and the user types uppercase `Y`. JSON and CI modes never approve commands.
-16. Repair generation never patches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
-17. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
-18. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
-19. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
+16. A boot skeleton fingerprint describes content-addressed boot-relevant structure only. It is not a prediction or proof of bootability; verified boot still requires observed health evidence.
+17. Repair generation never patches the user's working tree; applying a diff requires the separate explicit `apply-repair` command.
+18. Repair diffs are restricted to boot-plumbing scope; application logic is never edited.
+19. Declined, failed, progressed, and verified repair attempts remain distinct signed receipt states.
+20. Explicit repair application requires a valid signed receipt and exact file preimages; stale or tampered receipts write nothing.
 
 These behaviors are enforced by tests.
 

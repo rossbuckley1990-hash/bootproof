@@ -190,6 +190,30 @@ export interface AttestationTrust {
   oidc: Record<string, string> | null;
 }
 
+export interface BootSkeletonComponents {
+  runtimes: Array<{ family: string; major: number | null }>;
+  packageManagers: Array<{ family: string; major: number | null }>;
+  frameworks: string[];
+  startCommands: Array<{ source: string; shape: string }>;
+  healthCandidates: Array<{ protocol: "http" | "https"; port: number; route: string }>;
+  services: Array<{ name: string; type: string }>;
+  ports: Array<{
+    service: string;
+    containerPort: number;
+    publishedPort: number | null;
+    protocol: "tcp" | "udp";
+  }>;
+  envVars: string[];
+  lockfiles: string[];
+  workspaceTopology: string[];
+}
+
+export interface BootSkeleton {
+  schema: "bootproof/boot-skeleton/v1";
+  fingerprint: `sha256:${string}`;
+  components: BootSkeletonComponents;
+}
+
 export interface Attestation {
   schema: "bootproof/attestation/v1";
   tool: string;
@@ -204,6 +228,7 @@ export interface Attestation {
   repo: { path: string; remote: string | null; commit: string | null; dirty: boolean | null };
   environment: { os: string; arch: string; node: string };
   trust: AttestationTrust;
+  bootSkeleton?: BootSkeleton;
   plan: RunPlan;
   observed: ObservedStep[];
   result: {

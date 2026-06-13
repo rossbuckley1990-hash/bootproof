@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bootproof.dev/schemas/boot-skeleton-v1.schema.json",
+  "title": "BootProof Boot Skeleton v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "fingerprint",
+    "components"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bootproof/boot-skeleton/v1"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtimes",
+        "packageManagers",
+        "frameworks",
+        "startCommands",
+        "healthCandidates",
+        "services",
+        "ports",
+        "envVars",
+        "lockfiles",
+        "workspaceTopology"
+      ],
+      "properties": {
+        "runtimes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/versionedFamily"
+          }
+        },
+        "packageManagers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/versionedFamily"
+          }
+        },
+        "frameworks": {
+          "$ref": "#/$defs/stringSet"
+        },
+        "startCommands": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "shape"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "shape": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "healthCandidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "protocol",
+              "port",
+              "route"
+            ],
+            "properties": {
+              "protocol": {
+                "enum": [
+                  "http",
+                  "https"
+                ]
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "route": {
+                "type": "string",
+                "pattern": "^/"
+              }
+            }
+          }
+        },
+        "services": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "ports": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "service",
+              "containerPort",
+              "publishedPort",
+              "protocol"
+            ],
+            "properties": {
+              "service": {
+                "type": "string",
+                "minLength": 1
+              },
+              "containerPort": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "publishedPort": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "protocol": {
+                "enum": [
+                  "tcp",
+                  "udp"
+                ]
+              }
+            }
+          }
+        },
+        "envVars": {
+          "$ref": "#/$defs/stringSet"
+        },
+        "lockfiles": {
+          "$ref": "#/$defs/stringSet"
+        },
+        "workspaceTopology": {
+          "$ref": "#/$defs/stringSet"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "versionedFamily": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "major"
+      ],
+      "properties": {
+        "family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "major": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "stringSet": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
