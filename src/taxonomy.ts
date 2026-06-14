@@ -488,6 +488,8 @@ function classifyRealWorldFailure(evidence: string): FailureClassification | nul
 }
 
 const RULES: Rule[] = [
+  { class: "host_execution_not_acknowledged", pattern: /(Local provider runs repository code directly on your machine|will not execute remote repository code without --provider local --unsafe-local)/i,
+    explain: () => "BootProof will not execute repository code on the host until the user explicitly acknowledges local execution with --unsafe-local." },
   { class: "package_manager_version_mismatch", pattern: /(ERR_PNPM_UNSUPPORTED_ENGINE|Unsupported environment \(bad (?:pnpm|yarn|npm|bun) and\/or Node\.js version\)|(?:pnpm|yarn|npm|bun)[\s\S]{0,160}Expected version:\s*[^\n]+[\s\S]{0,120}Got:\s*[^\n]+|packageManager field[\s\S]{0,120}(?:version|mismatch)|engines\.(?:pnpm|yarn|npm|bun))/i,
     explain: () => "The repository declares a package manager version that does not match the version available in the current environment. Enable Corepack or install the required package manager version before rerunning BootProof." },
   { class: "runtime_engine_mismatch", pattern: /(Node version .{0,40}doesn'?t (?:satisfy|match)|The engine "node" is incompatible|EBADENGINE|required:\s*\{\s*node)/i,
@@ -540,7 +542,7 @@ export function classifyFailure(evidence: string): FailureClassification {
 }
 
 export const TAXONOMY_DOC_CLASSES: FailureClass[] = [
-  "not_an_application", "orchestration_not_supported", "go_service_orchestration_not_supported", "auth_required", "external_health_unreachable",
+  "not_an_application", "orchestration_not_supported", "go_service_orchestration_not_supported", "host_execution_not_acknowledged", "auth_required", "external_health_unreachable",
   "runtime_engine_mismatch", "missing_ruby_version", "missing_package_manager", "missing_runtime_tool",
   "go_runtime_missing", "go_build_failed", "missing_project_cli",
   "missing_php_runtime", "missing_composer", "unsupported_php_version_for_composer_lock", "missing_php_vendor_autoload",
