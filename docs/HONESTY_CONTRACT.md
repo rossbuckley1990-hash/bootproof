@@ -13,7 +13,7 @@ BootProof's promise is not that every repository boots. Its promise is that the 
 7. Ambiguous workspaces are surfaced instead of guessed.
 8. Generated files are referenced as generated evidence only when they were actually written.
 9. Refusals and execution failures write signed failed attestations where a signer is available.
-10. Failed attestations preserve available raw local evidence; exported registry entries redact it.
+10. Failed attestations preserve available diagnostic evidence, redacted at capture before it is persisted. Registry export applies its own additional public-artifact redaction.
 11. A process starting is not enough. A health signal must be observed.
 12. Confidence describes evidence found, not predicted success.
 13. An image-only Compose service does not prove the checked-out source. Compose application proof requires a repository-local build context, a published HTTP port, and an observed HTTP response.
