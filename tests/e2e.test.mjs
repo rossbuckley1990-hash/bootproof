@@ -481,7 +481,7 @@ test("honesty: local provider refuses without --unsafe-local", () => {
   const att = JSON.parse(fs.readFileSync(path.join(repo, ".bootproof", "attestation.json"), "utf8"));
   assert.equal(att.result.booted, false);
   assert.equal(att.result.healthVerified, false);
-  assert.equal(att.result.failureClass, "unknown_failure");
+  assert.equal(att.result.failureClass, "host_execution_not_acknowledged");
   assert.deepEqual(att.observed, [], "a refusal must not pretend any step executed");
 });
 
@@ -972,7 +972,7 @@ test("remote mode clones GitHub sources but refuses execution without the existi
   assert.equal(code, 1);
   assert.equal(out.trim().split("\n").length, 1);
   const result = JSON.parse(out);
-  assert.equal(result.failureClass, "unknown_failure");
+  assert.equal(result.failureClass, "host_execution_not_acknowledged");
   assert.match(result.explanation, /will not execute remote repository code/);
   assert.match(result.attestationPath, /^\.bootproof\/remotes\/github\.com\/example\/hello-app-/);
   const attestationPath = path.join(remote.cwd, result.attestationPath);

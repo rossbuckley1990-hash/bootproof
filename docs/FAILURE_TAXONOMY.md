@@ -16,6 +16,7 @@ Unknown evidence remains `unknown_failure`. BootProof does not pick a more marke
 | `not_an_application` | No trustworthy runnable entrypoint was found. | Select a runnable workspace or add an explicit start command. |
 | `orchestration_not_supported` | An application stack was detected, but no explicit supported entrypoint or source-built Compose web service was found. | Use the repository's documented runbook; treat the signed result as diagnosis, not boot proof. |
 | `go_service_orchestration_not_supported` | A Go service was detected, but no safe runnable service command and health contract could be established. | Use the documented service command or provide an explicit reviewed override; do not treat detection as boot proof. |
+| `host_execution_not_acknowledged` | Host execution, including execution of a cloned remote repository, was selected without the explicit `--unsafe-local` acknowledgement. | Review the inferred commands, then rerun with `--provider local --unsafe-local` only if you accept host execution. |
 | `auth_required` | An externally managed health endpoint returned HTTP 401 or 403. | Use a separate unauthenticated health endpoint or verify authentication manually without exposing credentials. |
 | `external_health_unreachable` | An externally managed health endpoint could not be reached or did not return HTTP 2xx/3xx. | Confirm the service and endpoint are reachable, then rerun external verification. |
 | `runtime_engine_mismatch` | Node.js does not satisfy the declared engine. | Switch to a compatible runtime and rerun. |

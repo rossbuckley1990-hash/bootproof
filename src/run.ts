@@ -295,12 +295,12 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   }
   if (opts.remoteSource && !opts.dryRun && (opts.provider !== "local" || !opts.unsafeLocal)) {
     return refuse(
-      "unknown_failure",
+      "host_execution_not_acknowledged",
       `BootProof cloned ${opts.remoteSource} for inspection but will not execute remote repository code without --provider local --unsafe-local.`,
     );
   }
   if (opts.provider === "local" && !opts.unsafeLocal) {
-    return refuse("unknown_failure", "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker.");
+    return refuse("host_execution_not_acknowledged", "Local provider runs repository code directly on your machine. Re-run with --unsafe-local to acknowledge this, or use --provider docker.");
   }
   if (opts.dryRun) return { ...base, attestation: null, refusal: null };
   if (inference.multiAppCommand) {
@@ -360,7 +360,7 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
   }
   if (inference.incompleteAppCommand) {
     return refuse(
-      "unknown_failure",
+      "orchestration_not_supported",
       "BootProof detected a hybrid backend/frontend repository, but the inferred command starts only the frontend development pipeline. Complete application orchestration is not implemented, so no boot was attempted.",
     );
   }
@@ -611,5 +611,5 @@ export async function up(repoPath: string, opts: UpOptions): Promise<UpOutcome> 
       return fail(failureClass, evidence, explanation, health.evidence, health.discoveredCandidates);
     }
   }
-  return fail("unknown_failure", "", "Inference identified an application, but the plan contained no supported runnable app or source-built Compose health step.");
+  return fail("orchestration_not_supported", "", "Inference identified an application, but the plan contained no supported runnable app or source-built Compose health step.");
 }

@@ -12,6 +12,7 @@ export type FailureClass =
   | "not_an_application"
   | "orchestration_not_supported"
   | "go_service_orchestration_not_supported"
+  | "host_execution_not_acknowledged"
   | "auth_required"
   | "external_health_unreachable"
   | "runtime_engine_mismatch"
