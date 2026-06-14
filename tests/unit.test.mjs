@@ -2710,6 +2710,80 @@ test("redaction masks secrets, urls credentials and home paths", async () => {
   });
 });
 
+test("redaction covers named provider, private key, and high-entropy formats conservatively", async () => {
+  const { redactJsonValue, redactText } = await import("../dist/redact.js");
+  const secrets = {
+    openAiLegacy: ["sk", "BootProofOpenAiAbC123456789"].join("-"),
+    openAiProject: ["sk", "proj", "BootProofProjectAbC123456789"].join("-"),
+    stripeLive: ["s" + "k", "live", "BootProofStripeAbC123456"].join("_"),
+    stripeTest: ["s" + "k", "test", "BootProofStripeXyZ987654"].join("_"),
+    stripeRestricted: ["r" + "k", "live", "BootProofRestrictedAbC123"].join("_"),
+    stripeWebhook: ["whsec", "BootProofWebhookAbC123456"].join("_"),
+    slack: ["xoxb", "1234567890", "BootProofSlackAbC123456"].join("-"),
+    google: `AI${"za"}BootProofGoogleAbC1234567890_XyZ`,
+    entropy: "Ab3dEf5hIj7kLm9nOp2qRs4tUv6wXy8z",
+    aws: `AKIA${"B".repeat(16)}`,
+    github: `gh${"p_"}${"C".repeat(20)}`,
+  };
+  const assignment = "BootProofSessionTokenValue123";
+  const urlPassword = "BootProofUrlPassword123";
+  const privateKeys = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY"]
+    .map(label => [
+      `-----BEGIN ${label}-----`,
+      "Qm9vdFByb29mSW52YWxpZFByaXZhdGVLZXlCb2R5MTIzNDU2Nzg5",
+      `-----END ${label}-----`,
+    ].join("\n"));
+  const evidence = [
+    ...Object.entries(secrets).map(([name, value]) => `${name}: ${value}`),
+    `SESSION_TOKEN=${assignment}`,
+    `DATABASE_URL=postgresql://admin:${urlPassword}@localhost/app`,
+    ...privateKeys,
+  ].join("\n");
+
+  const redactedText = redactText(evidence);
+  for (const secret of [...Object.values(secrets), assignment, urlPassword, ...privateKeys]) {
+    assert.equal(redactedText.text.includes(secret), false, `${secret} must be redacted`);
+  }
+  assert.equal(redactedText.text.match(/\[redacted-private-key\]/g)?.length, privateKeys.length);
+  for (const applied of [
+    "openai keys",
+    "stripe keys",
+    "slack tokens",
+    "google api keys",
+    "private keys",
+    "high-entropy token",
+    "aws access keys",
+    "github tokens",
+    "env assignment secrets",
+    "url credentials",
+  ]) {
+    assert.ok(redactedText.applied.includes(applied), `missing redaction marker ${applied}`);
+  }
+
+  const commit = "d".repeat(40);
+  const sha256 = "e".repeat(64);
+  const structured = redactJsonValue({
+    commit,
+    sha256,
+    failureEvidence: evidence,
+    nested: { stdout: evidence },
+  });
+  const persisted = JSON.stringify(structured.value);
+  for (const secret of [...Object.values(secrets), assignment, urlPassword, ...privateKeys]) {
+    assert.equal(persisted.includes(secret), false, `${secret} must be redacted inside JSON values`);
+  }
+  assert.equal(structured.value.commit, commit);
+  assert.equal(structured.value.sha256, sha256);
+
+  const ordinary = [
+    "TypeError: Cannot read properties of undefined",
+    "    at RequestHandlerMiddlewareVersion2026 (/workspace/src/server.ts:123:45)",
+  ].join("\n");
+  assert.equal(redactText(ordinary).text, ordinary);
+  assert.equal(redactText(`https://example.invalid/${secrets.entropy}`).text, `https://example.invalid/${secrets.entropy}`);
+  assert.equal(redactText(`/tmp/${secrets.entropy}/fixture.log`).text, `/tmp/${secrets.entropy}/fixture.log`);
+});
+
 test("attestation construction redacts persisted free-text evidence without mutating runtime evidence", () => {
   const inf = inferRepo(path.join(FIX, "hello-app"));
   const plan = buildPlan(inf, "local");
